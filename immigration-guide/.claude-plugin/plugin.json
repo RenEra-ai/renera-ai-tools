@@ -1,0 +1,6 @@
+{
+  "name": "immigration-guide",
+  "version": "1.0.0",
+  "description": "Controlled legal-research pipeline for U.S. immigration self-help. Covers employment visas, family-based immigration, asylum, humanitarian programs, naturalization, work permits, detention, and removal defense. Classifies questions, collects current authorities, extracts rules, enumerates branches, and self-reviews before answering.",
+  "hooks": "./hooks/hooks.json"
+}
