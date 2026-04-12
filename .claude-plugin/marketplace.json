@@ -1,0 +1,32 @@
+{
+  "name": "renera-ai-tools",
+  "owner": {
+    "name": "Renera",
+    "email": "contact@renera.ai"
+  },
+  "metadata": {
+    "description": "Renera AI tools and plugins for Claude Code",
+    "version": "1.0.0",
+    "pluginRoot": "."
+  },
+  "plugins": [
+    {
+      "name": "immigration-guide",
+      "source": "./immigration-guide",
+      "description": "DIY U.S. immigration guidance for self-petitioners — covers visas, green cards, asylum, naturalization, work permits, and more",
+      "version": "1.0.0",
+      "author": {
+        "name": "Renera"
+      }
+    },
+    {
+      "name": "sound-studio",
+      "source": "./sound-studio",
+      "description": "Complete music production toolkit using Python audio processing — mixing, mastering, stem separation, voice synthesis, composition, and genre blueprints. No DAW required.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Gleb"
+      }
+    }
+  ]
+}

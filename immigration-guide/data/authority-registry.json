@@ -1,0 +1,358 @@
+{
+  "_meta": {
+    "description": "Centralized authority registry for the immigration-guide plugin. For any T2/T3/T4 issue bundle, look up the mandatory source set here before concluding.",
+    "last_updated": "2026-03",
+    "usage": "Stage 3 of the 10-stage pipeline must consult this registry to identify mandatory sources before fetching. Stage 10 self-review validates the authority_set against mandatory sources."
+  },
+
+  "authority_bundles": {
+
+    "tps_ead": {
+      "label": "TPS EAD automatic extension (all countries)",
+      "issue_types": ["T3"],
+      "mandatory_sources": [
+        {
+          "id": "uscis_country_tps_page", "tier": 1,
+          "name": "USCIS country-specific TPS page",
+          "url": "https://www.uscis.gov/humanitarian/temporary-protected-status",
+          "controls": "Designation period, eligible categories, designated-through date",
+          "when_mandatory": "Any country-specific TPS question",
+          "volatility": "HIGH"
+        },
+        {
+          "id": "federal_register_tps", "tier": 1,
+          "name": "Federal Register — country-specific TPS notice (most recent)",
+          "url": "https://www.federalregister.gov",
+          "controls": "Extension through dates, eligible category codes, re-registration windows",
+          "when_mandatory": "Any extension date or re-registration question",
+          "volatility": "HIGH"
+        },
+        {
+          "id": "uscis_i9_central", "tier": 1,
+          "name": "USCIS I-9 Central",
+          "url": "https://www.uscis.gov/i-9-central",
+          "controls": "Which categories qualify for I-9 automatic extension acceptance",
+          "when_mandatory": "Any I-9 proof or employment authorization question",
+          "volatility": "HIGH"
+        }
+      ],
+      "minimum_tier1_count": 2,
+      "notes": "Country is a parameter, not a separate bundle. Always check the country-specific FRN notice. Multiple extension paths may exist. Non-stacking rule may apply. Use tps-ead-resolver.py for deterministic branch selection after extracting dates."
+    },
+
+    "ead_general": {
+      "label": "EAD / work permit validity and renewal (non-TPS bases)",
+      "issue_types": ["T2", "T3"],
+      "mandatory_sources": [
+        {
+          "id": "uscis_i765_page", "tier": 1,
+          "name": "USCIS Form I-765 page",
+          "url": "https://www.uscis.gov/i-765",
+          "controls": "Filing instructions, eligible categories, category codes",
+          "when_mandatory": "Any I-765 filing or EAD question",
+          "volatility": "MEDIUM"
+        },
+        {
+          "id": "uscis_ead_auto_extension", "tier": 1,
+          "name": "USCIS — Automatic EAD Extension (8 CFR 274a.13(d))",
+          "url": "https://www.uscis.gov/working-in-the-united-states/information-for-employers-and-employees/automatic-employment-authorization-document-ead-extension",
+          "controls": "180-day auto-extension rule, which categories qualify, combo card rules",
+          "when_mandatory": "Any EAD renewal or auto-extension question (non-TPS)",
+          "volatility": "MEDIUM"
+        },
+        {
+          "id": "uscis_policy_manual_ead", "tier": 1,
+          "name": "USCIS Policy Manual Vol 10 — Employment Authorization",
+          "url": "https://www.uscis.gov/policy-manual/volume-10",
+          "controls": "Detailed eligibility rules by category, adjudication standards",
+          "when_mandatory": "Any detailed EAD eligibility or category question",
+          "volatility": "MEDIUM"
+        }
+      ],
+      "minimum_tier1_count": 1,
+      "notes": "Covers H-4 EAD, L-2 EAD, AOS-pending (c)(9), asylum (c)(8), DACA, OPT/STEM OPT, and all other non-TPS categories. Always identify the specific category code."
+    },
+
+    "visa_bulletin": {
+      "label": "Visa bulletin priority dates and cutoffs",
+      "issue_types": ["T2", "T3"],
+      "mandatory_sources": [
+        {
+          "id": "state_visa_bulletin", "tier": 1,
+          "name": "State Department Visa Bulletin (current month)",
+          "url": "https://travel.state.gov/content/travel/en/legal/visa-law0/visa-bulletin.html",
+          "controls": "Current priority dates for all family and employment preference categories",
+          "when_mandatory": "Any priority date or visa availability question",
+          "volatility": "MONTHLY"
+        },
+        {
+          "id": "uscis_chart_acceptance", "tier": 1,
+          "name": "USCIS — Which chart to use (Final Action vs Dates for Filing)",
+          "url": "https://www.uscis.gov/green-card/green-card-processes-and-procedures/visa-availability-priority-dates/when-to-file-your-adjustment-of-status-application",
+          "controls": "Whether USCIS accepts Final Action or Dates for Filing chart this month",
+          "when_mandatory": "Any I-485 filing window or chart-selection question",
+          "volatility": "MONTHLY"
+        }
+      ],
+      "minimum_tier1_count": 2,
+      "notes": "Always get the current month's bulletin. Never answer priority date questions from training knowledge. Distinguish Final Action Date from Dates for Filing."
+    },
+
+    "current_fees": {
+      "label": "USCIS filing fees",
+      "issue_types": ["T2"],
+      "mandatory_sources": [
+        {
+          "id": "uscis_filing_fees", "tier": 1,
+          "name": "USCIS Filing Fees page",
+          "url": "https://www.uscis.gov/forms/filing-fees",
+          "controls": "Current fees for all USCIS forms",
+          "when_mandatory": "Any fee question",
+          "volatility": "HIGH"
+        },
+        {
+          "id": "federal_register_fee_rule", "tier": 1,
+          "name": "Federal Register — USCIS Fee Schedule Rule",
+          "url": "https://www.federalregister.gov",
+          "controls": "Fee amounts by form type, fee rule effective dates, fee exemptions",
+          "when_mandatory": "Any question about whether fees have recently changed or will change",
+          "volatility": "HIGH"
+        },
+        {
+          "id": "uscis_fee_waiver", "tier": 2,
+          "name": "USCIS Form I-912 (Fee Waiver)",
+          "url": "https://www.uscis.gov/i-912",
+          "controls": "Fee waiver eligibility",
+          "when_mandatory": "Always mention alongside fee amounts",
+          "volatility": "LOW"
+        }
+      ],
+      "minimum_tier1_count": 2,
+      "notes": "Always mention Form I-912 fee waiver when discussing fees."
+    },
+
+    "processing_times": {
+      "label": "USCIS processing times",
+      "issue_types": ["T2"],
+      "mandatory_sources": [
+        {
+          "id": "uscis_processing_times", "tier": 1,
+          "name": "USCIS Processing Times tool",
+          "url": "https://www.uscis.gov/tools/case-status-online/processing-times",
+          "controls": "Current processing times by form type and service center",
+          "when_mandatory": "Any processing time question",
+          "volatility": "HIGH"
+        },
+        {
+          "id": "uscis_case_status", "tier": 1,
+          "name": "USCIS Case Status Online",
+          "url": "https://egov.uscis.gov/casestatus",
+          "controls": "Individual case status, receipt number lookup, case processing stage",
+          "when_mandatory": "When the user has a specific receipt number or wants their individual case status",
+          "volatility": "HIGH"
+        },
+        {
+          "id": "uscis_service_centers", "tier": 2,
+          "name": "USCIS Service Centers",
+          "url": "https://www.uscis.gov/about-us/organization/service-centers",
+          "controls": "Which service center handles which form types",
+          "when_mandatory": "When user doesn't know their service center",
+          "volatility": "LOW"
+        }
+      ],
+      "minimum_tier1_count": 2,
+      "notes": "Processing times vary by service center. Always ask which service center."
+    },
+
+    "h1b_cap_lottery": {
+      "label": "H-1B cap, lottery, and extensions",
+      "issue_types": ["T2", "T3"],
+      "mandatory_sources": [
+        {
+          "id": "uscis_h1b_page", "tier": 1,
+          "name": "USCIS H-1B page",
+          "url": "https://www.uscis.gov/working-in-the-united-states/h-1b-specialty-occupations",
+          "controls": "Current cap, lottery rules, registration period",
+          "when_mandatory": "Any H-1B cap or lottery question",
+          "volatility": "HIGH"
+        },
+        {
+          "id": "uscis_policy_manual_h1b", "tier": 1,
+          "name": "USCIS Policy Manual Vol 2 — Nonimmigrant Workers",
+          "url": "https://www.uscis.gov/policy-manual/volume-2",
+          "controls": "Eligibility, specialty occupation, cap-exempt, extensions beyond 6 years",
+          "when_mandatory": "Any H-1B eligibility, cap-exempt, or extension question",
+          "volatility": "MEDIUM"
+        },
+        {
+          "id": "federal_register_h1b", "tier": 1,
+          "name": "Federal Register — H-1B rules (most recent)",
+          "url": "https://www.federalregister.gov",
+          "controls": "Registration fee, lottery mechanics, registration period dates",
+          "when_mandatory": "Any H-1B lottery rule or fee question",
+          "volatility": "HIGH"
+        }
+      ],
+      "minimum_tier1_count": 1,
+      "notes": "Cap-exempt employers (nonprofits, universities, gov research) bypass lottery. H-1B extensions beyond 6 years require I-140 or labor cert milestones."
+    },
+
+    "advance_parole_travel": {
+      "label": "Advance parole and travel while AOS pending",
+      "issue_types": ["T3", "T4"],
+      "mandatory_sources": [
+        {
+          "id": "uscis_i131", "tier": 1,
+          "name": "USCIS Form I-131 (Advance Parole)",
+          "url": "https://www.uscis.gov/i-131",
+          "controls": "AP rules, combo card availability",
+          "when_mandatory": "Any travel-while-pending question",
+          "volatility": "MEDIUM-HIGH"
+        },
+        {
+          "id": "uscis_policy_manual_travel", "tier": 1,
+          "name": "USCIS Policy Manual Vol 7 — AOS, Travel",
+          "url": "https://www.uscis.gov/policy-manual/volume-7-part-b",
+          "controls": "Effect of travel on pending I-485, abandonment, parole reinstatement",
+          "when_mandatory": "Any question about travel abandoning I-485 or affecting parole",
+          "volatility": "MEDIUM"
+        }
+      ],
+      "minimum_tier1_count": 1,
+      "notes": "Travel without AP while I-485 pending can abandon the application. T3/T4 — always flag the risk."
+    },
+
+    "marriage_aos": {
+      "label": "Marriage-based adjustment of status",
+      "issue_types": ["T3"],
+      "mandatory_sources": [
+        {
+          "id": "uscis_policy_manual_aos", "tier": 1,
+          "name": "USCIS Policy Manual Vol 7 — Adjustment of Status",
+          "url": "https://www.uscis.gov/policy-manual/volume-7",
+          "controls": "AOS eligibility, bars, entry requirements, §245(a) vs §245(i)",
+          "when_mandatory": "Any AOS eligibility or bar question",
+          "volatility": "MEDIUM"
+        },
+        {
+          "id": "uscis_i485", "tier": 1,
+          "name": "USCIS Form I-485 page",
+          "url": "https://www.uscis.gov/i-485",
+          "controls": "Filing instructions, concurrent filing, evidence requirements",
+          "when_mandatory": "Any I-485 filing question",
+          "volatility": "MEDIUM"
+        },
+        {
+          "id": "uscis_i130", "tier": 1,
+          "name": "USCIS Form I-130 page",
+          "url": "https://www.uscis.gov/i-130",
+          "controls": "Petitioner eligibility, relationship evidence, processing",
+          "when_mandatory": "Any I-130 petition question",
+          "volatility": "MEDIUM"
+        }
+      ],
+      "minimum_tier1_count": 2,
+      "notes": "Entry method (inspected vs EWI) is critical. §245(i) grandfathering and parole-in-place are key branches. Always check for bars to adjustment."
+    },
+
+    "naturalization": {
+      "label": "Naturalization / N-400 / citizenship",
+      "issue_types": ["T3"],
+      "mandatory_sources": [
+        {
+          "id": "uscis_policy_manual_nat", "tier": 1,
+          "name": "USCIS Policy Manual Vol 12 — Citizenship & Naturalization",
+          "url": "https://www.uscis.gov/policy-manual/volume-12",
+          "controls": "Continuous residence, physical presence, good moral character, English/civics",
+          "when_mandatory": "Any naturalization eligibility question",
+          "volatility": "MEDIUM"
+        },
+        {
+          "id": "uscis_n400", "tier": 1,
+          "name": "USCIS Form N-400 page",
+          "url": "https://www.uscis.gov/n-400",
+          "controls": "Filing instructions, early filing window, evidence requirements",
+          "when_mandatory": "Any N-400 filing question",
+          "volatility": "MEDIUM"
+        }
+      ],
+      "minimum_tier1_count": 1,
+      "notes": "3-year rule (married to USC) vs 5-year rule. Absences affect continuous residence: <6mo OK, 6-12mo rebuttable presumption, >12mo breaks it. Criminal history triggers GMC analysis — recommend attorney."
+    },
+
+    "asylum_filing": {
+      "label": "Asylum filing and 1-year deadline",
+      "issue_types": ["T3", "T4"],
+      "mandatory_sources": [
+        {
+          "id": "uscis_asylum_page", "tier": 1,
+          "name": "USCIS Asylum page",
+          "url": "https://www.uscis.gov/humanitarian/refugees-and-asylum/asylum",
+          "controls": "One-year deadline, extraordinary/changed circumstances exceptions",
+          "when_mandatory": "Any one-year deadline or asylum filing question",
+          "volatility": "MEDIUM"
+        },
+        {
+          "id": "uscis_policy_manual_asylum", "tier": 1,
+          "name": "USCIS Policy Manual — Asylum",
+          "url": "https://www.uscis.gov/policy-manual",
+          "controls": "Exception standards, eligibility bars, credible fear",
+          "when_mandatory": "Any exception analysis or eligibility question",
+          "volatility": "MEDIUM"
+        }
+      ],
+      "minimum_tier1_count": 1,
+      "notes": "One-year deadline is outcome-determinative — T4 territory. Always flag attorney recommendation. Withholding of removal is the backup if deadline missed."
+    },
+
+    "removal_defense": {
+      "label": "Removal proceedings and defense",
+      "issue_types": ["T4"],
+      "mandatory_sources": [
+        {
+          "id": "eoir_practice_manual", "tier": 1,
+          "name": "EOIR Immigration Court Practice Manual",
+          "url": "https://www.justice.gov/eoir/eoir-policy-manual",
+          "controls": "Court procedures, filing deadlines, motions, continuances",
+          "when_mandatory": "Any immigration court procedure question",
+          "volatility": "MEDIUM"
+        },
+        {
+          "id": "uscis_policy_manual_removal", "tier": 1,
+          "name": "USCIS Policy Manual — Removal grounds",
+          "url": "https://www.uscis.gov/policy-manual",
+          "controls": "Grounds of inadmissibility, deportability, waivers",
+          "when_mandatory": "Any removal ground or waiver question",
+          "volatility": "MEDIUM"
+        }
+      ],
+      "minimum_tier1_count": 1,
+      "notes": "Always T4 — elevated attorney warning mandatory. Covers NTA, voluntary departure, cancellation of removal, prosecutorial discretion."
+    },
+
+    "detention_bond": {
+      "label": "Immigration detention and bond",
+      "issue_types": ["T4"],
+      "mandatory_sources": [
+        {
+          "id": "eoir_bond_procedures", "tier": 1,
+          "name": "EOIR — Bond and custody procedures",
+          "url": "https://www.justice.gov/eoir",
+          "controls": "Bond hearing procedures, mandatory detention categories, redetermination",
+          "when_mandatory": "Any bond or custody question",
+          "volatility": "MEDIUM"
+        },
+        {
+          "id": "ice_detention_standards", "tier": 1,
+          "name": "ICE Detention Standards",
+          "url": "https://www.ice.gov/detain/detention-management",
+          "controls": "Facility standards, access to counsel, medical care",
+          "when_mandatory": "Any detention conditions question",
+          "volatility": "MEDIUM"
+        }
+      ],
+      "minimum_tier1_count": 1,
+      "notes": "Always T4. Mandatory detention (aggravated felony, arriving aliens) vs discretionary. Bond amount, conditions of release, parole from detention."
+    }
+  }
+}
