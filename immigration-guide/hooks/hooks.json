@@ -14,7 +14,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "WebSearch|WebFetch",
+        "matcher": "WebSearch|WebFetch|mcp__.*web_fetch|mcp__.*web_search",
         "hooks": [
           {
             "type": "command",
@@ -26,7 +26,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "WebSearch|WebFetch",
+        "matcher": "WebSearch|WebFetch|mcp__.*web_fetch|mcp__.*web_search",
         "hooks": [
           {
             "type": "command",

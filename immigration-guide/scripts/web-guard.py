@@ -48,11 +48,11 @@ def main():
     tool_input = data.get("tool_input") or data.get("input") or {}
     inject = False
 
-    if tool_name in ("WebSearch", "web_search"):
+    if tool_name in ("WebSearch", "web_search") or tool_name.endswith("web_search"):
         query = tool_input.get("query", "")
         if any(re.match(p, query.strip().lower()) for p in GENERIC_QUERY_PATTERNS):
             inject = True
-    elif tool_name in ("WebFetch", "web_fetch"):
+    elif tool_name in ("WebFetch", "web_fetch") or tool_name.endswith("web_fetch"):
         url = tool_input.get("url", "")
         if url and not any(d in url for d in OFFICIAL_DOMAINS):
             inject = True
