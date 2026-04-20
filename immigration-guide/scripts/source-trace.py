@@ -27,10 +27,10 @@ def main():
     tool_input = data.get("tool_input") or data.get("input") or {}
     tool_result = data.get("tool_result") or data.get("output") or {}
 
-    if tool_name in ("WebFetch", "web_fetch"):
+    if tool_name in ("WebFetch", "web_fetch") or tool_name.endswith("web_fetch"):
         url_or_query = tool_input.get("url") or str(tool_input)
         entry_type = "fetch"
-    elif tool_name in ("WebSearch", "web_search"):
+    elif tool_name in ("WebSearch", "web_search") or tool_name.endswith("web_search"):
         url_or_query = tool_input.get("query") or str(tool_input)
         entry_type = "search"
     else:
