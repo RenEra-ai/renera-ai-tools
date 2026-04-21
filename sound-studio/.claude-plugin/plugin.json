@@ -1,6 +1,5 @@
 {
   "name": "sound-studio",
-  "version": "1.0.0",
   "description": "Complete music production toolkit using Python audio processing — mixing, mastering, stem separation, voice synthesis, composition, and genre blueprints. No DAW required.",
   "author": {
     "name": "Gleb"

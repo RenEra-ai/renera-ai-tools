@@ -22,7 +22,7 @@ Then browse and install plugins:
 
 | Plugin | Description | Version |
 |--------|-------------|---------|
-| `immigration-guide` | DIY U.S. immigration guidance — visas, green cards, asylum, naturalization, work permits | 1.0.0 |
+| `immigration-guide` | DIY U.S. immigration guidance — visas, green cards, asylum, naturalization, work permits | 1.0.1 |
 | `sound-studio` | Music production with Python audio processing — mixing, mastering, stem separation, voice synthesis, composition | 1.0.0 |
 
 ## Structure
