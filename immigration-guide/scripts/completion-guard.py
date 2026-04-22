@@ -118,6 +118,23 @@ def plugin_data_writable(plugin_data: str) -> bool:
         return False
 
 
+def trace_file_rewritable(trace_path: str) -> bool:
+    """Probe whether an existing trace file could be truncated-in-place by
+    prompt-gate's next reset. If the file is read-only even when its
+    directory is writable, prompt-gate could not have overwritten a prior
+    turn's marker — so the marker we are about to trust may be stale.
+    Returns True if the file does not exist (nothing to stale) or if it is
+    writable."""
+    if not os.path.exists(trace_path):
+        return True
+    try:
+        fd = os.open(trace_path, os.O_WRONLY)
+        os.close(fd)
+        return True
+    except OSError:
+        return False
+
+
 def load_bundle_minimum(bundle_name: str) -> int:
     """Load minimum_tier1_count for a bundle from the authority registry."""
     plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
@@ -159,6 +176,13 @@ def main():
             print(json.dumps({"decision": "block", "reason": BLOCK_MESSAGE_STORAGE_BROKEN}))
         else:
             print(json.dumps({"decision": "block", "reason": BLOCK_MESSAGE_MISSING_MARKER}))
+        sys.exit(2)
+
+    # Marker present, but if the trace file itself is read-only, prompt-gate
+    # could not have replaced a prior turn's marker — what we just read may
+    # be stale. Fail safe.
+    if not trace_file_rewritable(trace_path):
+        print(json.dumps({"decision": "block", "reason": BLOCK_MESSAGE_STORAGE_BROKEN}))
         sys.exit(2)
 
     # Explicit non-live-law marker (tier "NONE", "T1", "T2"): no enforcement.
