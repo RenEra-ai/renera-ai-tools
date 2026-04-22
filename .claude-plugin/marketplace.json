@@ -14,7 +14,7 @@
       "name": "immigration-guide",
       "source": "./immigration-guide",
       "description": "DIY U.S. immigration guidance for self-petitioners — covers visas, green cards, asylum, naturalization, work permits, and more",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "author": {
         "name": "Renera"
       }

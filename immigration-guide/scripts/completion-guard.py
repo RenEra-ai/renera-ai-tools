@@ -103,7 +103,6 @@ def main():
     trace_path = os.path.join(plugin_data, "source_trace.jsonl")
     entries = read_trace(trace_path)
 
-    # Find session classification marker from prompt-gate
     classification = None
     bundle_name = None
     for entry in entries:
@@ -112,26 +111,24 @@ def main():
             bundle_name = entry.get("bundle")
             break
 
-    # Filter to non-marker entries for source checking
+    # Only T3/T4 live-law sessions are gated on Tier 1 sources.
+    # T1/T2 and non-immigration sessions pass through — web fetches during
+    # those turns (e.g. unrelated research) must never block completion.
+    if classification not in ("T3", "T4"):
+        sys.exit(0)
+
     source_entries = [e for e in entries if e.get("type") != "classification"]
 
-    # T3/T4 session with zero web fetches — block
-    if classification in ("T3", "T4") and not source_entries:
+    if not source_entries:
         print(json.dumps({"decision": "block", "reason": BLOCK_MESSAGE_NO_SOURCE}))
         sys.exit(2)
 
-    # No classification or no sources — pass (T1/T2)
-    if not source_entries:
-        sys.exit(0)
-
     tier1_count = count_tier1_fetches(source_entries)
 
-    # No Tier 1 sources at all — block
     if tier1_count == 0:
         print(json.dumps({"decision": "block", "reason": BLOCK_MESSAGE_NO_SOURCE}))
         sys.exit(2)
 
-    # Bundle-specific enforcement: check minimum_tier1_count from registry
     if bundle_name:
         required = load_bundle_minimum(bundle_name)
         if tier1_count < required:
