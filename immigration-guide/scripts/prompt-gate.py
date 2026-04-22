@@ -197,25 +197,30 @@ def main():
     is_live_law = is_high_risk or detect(prompt_text, LIVE_LAW_SIGNALS)
     bundle = detect_issue_bundle(prompt_text) if is_live_law else None
 
-    # Always truncate the trace file on every new prompt so stale markers
-    # from a prior turn don't leak into non-immigration follow-ups.
-    # For live-law prompts, write a classification marker for completion-guard.
+    # Reset the trace file on every new prompt and ALWAYS write an explicit
+    # classification marker. A "NONE" tier lets completion-guard distinguish
+    # "prompt-gate ran and decided non-live-law" (safe to pass) from "no
+    # marker at all" (prompt-gate failed or never ran — fail-safe to block
+    # if web activity was logged).
     plugin_data = os.environ.get("CLAUDE_PLUGIN_DATA", "/tmp")
     trace_path = os.path.join(plugin_data, "source_trace.jsonl")
+    from datetime import datetime, timezone
+    if is_live_law:
+        marker = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "type": "classification",
+            "tier": "T4" if is_high_risk else "T3",
+            "bundle": bundle,
+        }
+    else:
+        marker = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "type": "classification",
+            "tier": "NONE",
+        }
     try:
-        if is_live_law:
-            from datetime import datetime, timezone
-            marker = {
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "type": "classification",
-                "tier": "T4" if is_high_risk else "T3",
-                "bundle": bundle,
-            }
-            with open(trace_path, "w", encoding="utf-8") as f:
-                f.write(json.dumps(marker) + "\n")
-        else:
-            # Non-immigration: truncate to empty so completion-guard sees no marker
-            open(trace_path, "w").close()
+        with open(trace_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(marker) + "\n")
     except OSError:
         pass
 

@@ -32,6 +32,8 @@ The plugin is v4-ready only when ALL of these are true:
 | Stop fires | Let agent complete | completion-guard.py checks trace |
 | Completion blocking works | Complete T3 answer with no Tier 1 fetch | Exit code 2, block message |
 | High-risk detection | Send "I got a deportation notice" | T4 context injected |
+| Non-immigration pass-through | Non-immigration prompt + WebFetch to a non-Tier 1 URL (e.g. froy.com) | Exit code 0, no block — prompt-gate writes `tier=NONE`, completion-guard skips Tier 1 enforcement |
+| Missing-marker fail-safe | Delete the classification line from the trace, then append a fetch entry and run Stop | Exit code 2, `SESSION METADATA MISSING` block |
 
 ---
 
@@ -41,6 +43,14 @@ Run: `python3 scripts/test-tps-ead-resolver.py -v`
 
 All existing test scenarios must pass. The resolver is verified for Ukraine TPS;
 other countries use the generic path with scope warnings.
+
+Run: `python3 scripts/test-completion-guard.py -v`
+
+Covers the Stop hook decision boundary: non-immigration sessions (tier
+`NONE` / T1 / T2) pass through with any web activity, T3/T4 sessions block
+without Tier 1 sources, bundle-specific `minimum_tier1_count` is enforced,
+and a missing classification marker fails safe when web activity was
+logged.
 
 ---
 
