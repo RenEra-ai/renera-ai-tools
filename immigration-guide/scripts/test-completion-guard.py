@@ -206,7 +206,9 @@ class TestBundleEnforcement(_HookTestBase):
 
 
 class TestMissingMarkerFailSafe(_HookTestBase):
-    """Missing classification marker: fail safe when web activity was logged."""
+    """Missing classification marker always blocks — the only honest signal
+    about whether enforcement should have run is prompt-gate's marker, and
+    its absence means we cannot verify T3/T4 compliance."""
 
     def test_missing_marker_with_fetch_blocks(self):
         write_trace(self.trace_dir, [
@@ -218,7 +220,6 @@ class TestMissingMarkerFailSafe(_HookTestBase):
         self.assertIn("SESSION METADATA MISSING", out)
 
     def test_missing_marker_with_non_tier1_fetch_blocks(self):
-        """Even non-Tier 1 activity should fail safe when marker is absent."""
         write_trace(self.trace_dir, [
             {"type": "fetch", "tool": "WebFetch",
              "url_or_query": "https://froy.com/x"},
@@ -227,16 +228,69 @@ class TestMissingMarkerFailSafe(_HookTestBase):
         self.assertEqual(rc, 2)
         self.assertIn("SESSION METADATA MISSING", out)
 
-    def test_missing_marker_empty_trace_passes(self):
-        """No marker and no activity — nothing to enforce, safe to pass."""
+    def test_missing_marker_empty_trace_blocks(self):
+        """Empty trace in writable storage blocks — prompt-gate should have
+        written a marker. Absence means the hook did not run."""
         write_trace(self.trace_dir, [])
-        rc, _ = run_hook(self.trace_dir)
-        self.assertEqual(rc, 0)
+        rc, out = run_hook(self.trace_dir)
+        self.assertEqual(rc, 2)
+        self.assertIn("SESSION METADATA MISSING", out)
 
-    def test_no_trace_file_passes(self):
-        """If the trace file doesn't exist at all, pass silently."""
-        rc, _ = run_hook(self.trace_dir)
-        self.assertEqual(rc, 0)
+    def test_no_trace_file_blocks(self):
+        """No trace file at all in writable storage blocks — same reasoning
+        as the empty-trace case."""
+        rc, out = run_hook(self.trace_dir)
+        self.assertEqual(rc, 2)
+        self.assertIn("SESSION METADATA MISSING", out)
+
+
+class TestBrokenStorageFailSafe(unittest.TestCase):
+    """Fully broken CLAUDE_PLUGIN_DATA must not bypass enforcement. When the
+    directory is unwritable, prompt-gate could not have written the marker
+    and source-trace could not have logged fetches — so an empty/absent
+    trace is silent failure, not a safe pass."""
+
+    def test_nonexistent_plugin_data_blocks_with_storage_message(self):
+        tmp = tempfile.mkdtemp(prefix="completion-guard-broken-")
+        try:
+            broken = Path(tmp) / "does" / "not" / "exist"
+            env = os.environ.copy()
+            env["CLAUDE_PLUGIN_DATA"] = str(broken)
+            env["CLAUDE_PLUGIN_ROOT"] = str(PLUGIN_ROOT)
+            result = subprocess.run(
+                [sys.executable, str(HOOK_PATH)],
+                input="{}",
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("PLUGIN STORAGE UNWRITABLE", result.stdout)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_readonly_plugin_data_blocks_with_storage_message(self):
+        """chmod the directory to read-only; the probe write must fail."""
+        tmp = tempfile.mkdtemp(prefix="completion-guard-ro-")
+        try:
+            os.chmod(tmp, 0o555)
+            env = os.environ.copy()
+            env["CLAUDE_PLUGIN_DATA"] = tmp
+            env["CLAUDE_PLUGIN_ROOT"] = str(PLUGIN_ROOT)
+            result = subprocess.run(
+                [sys.executable, str(HOOK_PATH)],
+                input="{}",
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("PLUGIN STORAGE UNWRITABLE", result.stdout)
+        finally:
+            os.chmod(tmp, 0o755)
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
