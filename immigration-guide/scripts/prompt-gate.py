@@ -200,8 +200,7 @@ def main():
     # Reset the trace file on every new prompt and ALWAYS write an explicit
     # classification marker. A "NONE" tier lets completion-guard distinguish
     # "prompt-gate ran and decided non-live-law" (safe to pass) from "no
-    # marker at all" (prompt-gate failed or never ran — fail-safe to block
-    # if web activity was logged).
+    # marker at all" (prompt-gate failed or never ran — fail-safe to block).
     plugin_data = os.environ.get("CLAUDE_PLUGIN_DATA", "/tmp")
     trace_path = os.path.join(plugin_data, "source_trace.jsonl")
     from datetime import datetime, timezone
@@ -218,7 +217,16 @@ def main():
             "type": "classification",
             "tier": "NONE",
         }
+    # Unlink the previous turn's trace before writing so a failed reset can
+    # never leave stale classification data that completion-guard would
+    # misread. If unlink or write fails, completion-guard's storage probe
+    # and missing-marker fail-safe cover the gap.
     try:
+        os.makedirs(plugin_data, exist_ok=True)
+        try:
+            os.unlink(trace_path)
+        except FileNotFoundError:
+            pass
         with open(trace_path, "w", encoding="utf-8") as f:
             f.write(json.dumps(marker) + "\n")
     except OSError:

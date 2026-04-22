@@ -50,15 +50,26 @@ BLOCK_MESSAGE_BUNDLE = (
 
 BLOCK_MESSAGE_MISSING_MARKER = (
     "=== COMPLETION BLOCKED — SESSION METADATA MISSING ===\n\n"
-    "The session trace has web-fetch entries but no classification marker "
-    "from prompt-gate.py. The immigration-guide plugin cannot verify whether "
-    "Tier 1 source requirements were met for this turn.\n\n"
-    "This usually means the UserPromptSubmit hook failed to run or could not "
-    "write to CLAUDE_PLUGIN_DATA.\n\n"
+    "The session trace has no classification marker from prompt-gate.py. "
+    "The immigration-guide plugin cannot verify whether Tier 1 source "
+    "requirements were met for this turn.\n\n"
+    "This usually means the UserPromptSubmit hook did not run.\n\n"
     "Required action:\n"
-    "1. Confirm the immigration-guide plugin is enabled and CLAUDE_PLUGIN_DATA "
-    "is writable.\n"
+    "1. Confirm the immigration-guide plugin is enabled.\n"
     "2. Resend the prompt so prompt-gate.py can classify it correctly."
+)
+
+BLOCK_MESSAGE_STORAGE_BROKEN = (
+    "=== COMPLETION BLOCKED — PLUGIN STORAGE UNWRITABLE ===\n\n"
+    "The immigration-guide plugin could not write to CLAUDE_PLUGIN_DATA, so "
+    "its source-tracking hooks are not functioning. Tier 1 enforcement "
+    "cannot run until storage is restored.\n\n"
+    "Required action:\n"
+    "1. Check that $CLAUDE_PLUGIN_DATA points to an existing, writable "
+    "directory.\n"
+    "2. Verify filesystem permissions for that directory.\n"
+    "3. Disable this plugin if you do not need its safeguards for this "
+    "session."
 )
 
 
@@ -93,6 +104,20 @@ def count_tier1_fetches(entries: list[dict]) -> int:
     return len(seen_domains)
 
 
+def plugin_data_writable(plugin_data: str) -> bool:
+    """Probe whether plugin_data accepts writes. If it does not, prompt-gate
+    and source-trace could not have logged either — so any missing marker is
+    a storage failure, not 'prompt-gate decided nothing'."""
+    probe = os.path.join(plugin_data, ".completion_guard_probe")
+    try:
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.unlink(probe)
+        return True
+    except OSError:
+        return False
+
+
 def load_bundle_minimum(bundle_name: str) -> int:
     """Load minimum_tier1_count for a bundle from the authority registry."""
     plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
@@ -124,21 +149,24 @@ def main():
             bundle_name = entry.get("bundle")
             break
 
-    source_entries = [e for e in entries if e.get("type") != "classification"]
-
-    # Missing classification marker: prompt-gate did not run or its write
-    # failed. Fail safe — if web activity was logged, we can't verify Tier 1
-    # requirements for what might be a real T3/T4 turn, so block.
+    # Missing classification marker means we cannot verify Tier 1 enforcement
+    # for what might be a real T3/T4 turn. Fail safe unconditionally — do not
+    # branch on source_entries, because a fully broken CLAUDE_PLUGIN_DATA
+    # suppresses BOTH the marker write and source-trace's appends, leaving
+    # an empty or absent trace even for T3/T4 sessions.
     if classification is None:
-        if source_entries:
+        if not plugin_data_writable(plugin_data):
+            print(json.dumps({"decision": "block", "reason": BLOCK_MESSAGE_STORAGE_BROKEN}))
+        else:
             print(json.dumps({"decision": "block", "reason": BLOCK_MESSAGE_MISSING_MARKER}))
-            sys.exit(2)
-        sys.exit(0)
+        sys.exit(2)
 
     # Explicit non-live-law marker (tier "NONE", "T1", "T2"): no enforcement.
     # Web fetches during these turns (e.g. unrelated research) never block.
     if classification not in ("T3", "T4"):
         sys.exit(0)
+
+    source_entries = [e for e in entries if e.get("type") != "classification"]
 
     if not source_entries:
         print(json.dumps({"decision": "block", "reason": BLOCK_MESSAGE_NO_SOURCE}))
