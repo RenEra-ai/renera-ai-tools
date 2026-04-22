@@ -48,6 +48,19 @@ BLOCK_MESSAGE_BUNDLE = (
     "Do NOT present the current draft as a final answer."
 )
 
+BLOCK_MESSAGE_MISSING_MARKER = (
+    "=== COMPLETION BLOCKED — SESSION METADATA MISSING ===\n\n"
+    "The session trace has web-fetch entries but no classification marker "
+    "from prompt-gate.py. The immigration-guide plugin cannot verify whether "
+    "Tier 1 source requirements were met for this turn.\n\n"
+    "This usually means the UserPromptSubmit hook failed to run or could not "
+    "write to CLAUDE_PLUGIN_DATA.\n\n"
+    "Required action:\n"
+    "1. Confirm the immigration-guide plugin is enabled and CLAUDE_PLUGIN_DATA "
+    "is writable.\n"
+    "2. Resend the prompt so prompt-gate.py can classify it correctly."
+)
+
 
 def read_trace(trace_path: str) -> list[dict]:
     entries = []
@@ -111,13 +124,21 @@ def main():
             bundle_name = entry.get("bundle")
             break
 
-    # Only T3/T4 live-law sessions are gated on Tier 1 sources.
-    # T1/T2 and non-immigration sessions pass through — web fetches during
-    # those turns (e.g. unrelated research) must never block completion.
-    if classification not in ("T3", "T4"):
+    source_entries = [e for e in entries if e.get("type") != "classification"]
+
+    # Missing classification marker: prompt-gate did not run or its write
+    # failed. Fail safe — if web activity was logged, we can't verify Tier 1
+    # requirements for what might be a real T3/T4 turn, so block.
+    if classification is None:
+        if source_entries:
+            print(json.dumps({"decision": "block", "reason": BLOCK_MESSAGE_MISSING_MARKER}))
+            sys.exit(2)
         sys.exit(0)
 
-    source_entries = [e for e in entries if e.get("type") != "classification"]
+    # Explicit non-live-law marker (tier "NONE", "T1", "T2"): no enforcement.
+    # Web fetches during these turns (e.g. unrelated research) never block.
+    if classification not in ("T3", "T4"):
+        sys.exit(0)
 
     if not source_entries:
         print(json.dumps({"decision": "block", "reason": BLOCK_MESSAGE_NO_SOURCE}))
