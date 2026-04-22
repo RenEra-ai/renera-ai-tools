@@ -218,15 +218,21 @@ def main():
             "tier": "NONE",
         }
     # Unlink the previous turn's trace before writing so a failed reset can
-    # never leave stale classification data that completion-guard would
-    # misread. If unlink or write fails, completion-guard's storage probe
-    # and missing-marker fail-safe cover the gap.
+    # never leave stale classification data. Each step is independently
+    # swallowed: if unlink fails (e.g. directory is read-only), the
+    # subsequent open("w") can still truncate-in-place when the file itself
+    # is writable — which is the common read-only-directory case.
+    # If the file itself is also read-only, completion-guard's trace-file
+    # writability probe catches the stale marker and fails safe.
     try:
         os.makedirs(plugin_data, exist_ok=True)
-        try:
-            os.unlink(trace_path)
-        except FileNotFoundError:
-            pass
+    except OSError:
+        pass
+    try:
+        os.unlink(trace_path)
+    except OSError:
+        pass
+    try:
         with open(trace_path, "w", encoding="utf-8") as f:
             f.write(json.dumps(marker) + "\n")
     except OSError:
