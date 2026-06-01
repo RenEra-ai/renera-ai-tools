@@ -1,6 +1,6 @@
 {
   "name": "codex-claude",
-  "description": "Use Codex (GPT-5.x) as an architect and reviewer inside the Claude Code dev loop. Drives a headless `codex app-server` over JSON-RPC for a native architect → implement → review loop — Codex plans and reviews while Claude implements. Complements (does not replace) Claude Code's own workflow.",
+  "description": "Use Codex (GPT-5.x) as an architect and reviewer inside the Claude Code dev loop. Drives a headless `codex app-server` over JSON-RPC for a native architect → implement → review loop — Codex plans and reviews while Claude implements. Includes /codex-issue for a fully autonomous loop (architect → approve → implement via the repo's own workflow → review-until-clean → push + PR + close issue). Complements (does not replace) Claude Code's own workflow.",
   "author": {
     "name": "Gleb"
   }
