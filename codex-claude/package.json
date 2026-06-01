@@ -1,0 +1,12 @@
+{
+  "name": "codex-drive",
+  "version": "0.1.0",
+  "description": "Drive a headless codex app-server over JSON-RPC for a Claude-orchestrated Codex dev-loop",
+  "type": "module",
+  "bin": { "codex-drive": "bin/codex-drive.mjs" },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:live": "CODEX_DRIVE_LIVE=1 node --test test/integration.live.test.mjs"
+  },
+  "engines": { "node": ">=20" }
+}
