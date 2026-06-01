@@ -1,0 +1,200 @@
+---
+name: codex-claude
+version: 1.0.0
+description: >-
+  Use Codex (GPT-5.x) as a second-opinion architect and reviewer during Claude Code
+  development, without GUI automation. This skill drives a headless `codex app-server`
+  over JSON-RPC for a native architect → implement → review loop: Codex plans (Plan mode)
+  and reviews (read-only) while Claude implements. Use it when the user asks to "have Codex
+  architect/plan/design this", "get a Codex (or GPT-5) review", "second opinion from Codex",
+  "run the codex architect→review loop", or when you want an independent model to vet a plan
+  or a diff before/after implementing. It complements — does not replace — Claude Code's own
+  workflow (brainstorming, TDD, plans). Requires a logged-in Codex CLI; reuses its ChatGPT auth.
+allowed-tools:
+  - Bash
+  - Read
+  - Edit
+  - Write
+  - Grep
+  - Glob
+  - Task
+requirements:
+  node: ">=20"
+  external:
+    - "codex CLI logged in (`codex login status` → \"Logged in using ChatGPT\")"
+---
+
+# codex-claude — Codex as architect & reviewer
+
+This skill lets you orchestrate **Codex** (the OpenAI coding agent, GPT-5.x) as an
+**architect** and **reviewer** inside the Claude Code dev loop. Codex runs headless via a
+background **session daemon** that speaks the documented `codex app-server` JSON-RPC protocol —
+the same protocol the Codex desktop app, VS Code extension, and CLI use. No screenshots, no
+synthetic keystrokes.
+
+**Division of labor:** Codex *plans* (Plan mode, read-only) and *reviews* (read-only). **You
+(Claude) implement.** Codex never edits the repo in this loop — that keeps approvals out of the
+way and keeps you in control of the code.
+
+The CLI is invoked as:
+
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs <verb> [args]
+```
+
+Zero install, zero dependencies (pure Node ≥20 stdlib). Every verb prints **one JSON object** on
+stdout. Daemon state is global (a single session) in `~/.codex-drive/state.json`.
+
+> **Two ways in.** For a one-shot autonomous review, prefer the `/codex-review` command or the
+> `codex-reviewer` subagent (they isolate the chatty wait-loop from this context). Use this skill
+> directly for the **architect** flow and for any interactive loop where Codex's clarifying
+> questions must be surfaced to the user.
+
+## Before you start: doctor
+
+Always verify the environment first:
+
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs doctor
+```
+
+→ `{ "codexVersion": "0.130.0", "authPresent": true, "threads": 12 }`
+
+- `codexVersion: null` → Codex CLI not installed/on PATH. Stop and tell the user to install Codex.
+- `authPresent: false` → not logged in. Tell the user to run `codex login` (this skill reuses
+  `~/.codex/auth.json`; it never handles credentials itself).
+
+## The loop (architect → implement → review)
+
+```
+1. start  ──►  2. plan ─► wait ─► (answer questions) ─► read   ── the architecture/plan
+                                                                   │
+                          3. YOU implement the plan ◄──────────────┘
+                                                                   │
+4. send "review…" ─► wait ─► read  ── the review ──► issues? fix ─┘  clean? ─► 5. stop
+```
+
+### 1. Start the session
+
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --cwd "$PWD"
+# add --model <name> if Plan mode errors with no_model_for_mode (see Troubleshooting)
+# add --resume-latest to continue the most recent Codex thread for this cwd
+```
+
+→ `{ "ok": true, "threadId": "...", "socket": "...", "pid": 12345 }`
+
+### 2. Architect turn (Plan mode, read-only)
+
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs plan "Architect a fix for <problem>. Inspect <files>. Produce a concrete, file-by-file plan. Ask if anything is ambiguous." --effort xhigh
+node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait
+```
+
+`wait` returns one of:
+- `{ "status": "completed", "message": "<the plan>" }` → read it (or use the message directly).
+- `{ "status": "question", "question": {...} }` → Codex needs a decision. **Surface it to the
+  user** with its options; answer with `answer` (below); then `wait` again. Plan mode genuinely
+  asks clarifying questions — this is expected, not an error.
+- `{ "status": "approval", "request": {...} }` → rare in read-only Plan/review. Surface and
+  `approve` it, or `interrupt`.
+- `{ "status": "failed" | "interrupted", "message": "..." }` → see Troubleshooting.
+
+Answer a parked question (1-based option index, or free text):
+
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs answer --id <questionId> --option 2
+node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs answer --id <questionId> --text "free-form answer"
+node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait   # continue the turn
+```
+
+Read the finished plan explicitly if needed:
+
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs read   # → { status, message }
+```
+
+### 3. Implement
+
+You (Claude) implement the plan in the repo using your normal tools and workflow (TDD, etc.).
+Codex does not touch the code.
+
+### 4. Review turn (read-only)
+
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs send "Review the implementation in <files>. Report concrete issues with file:line, or reply exactly 'no issues'."
+node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait
+node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs read
+```
+
+If the review lists issues → fix them → `send` another review → `wait`/`read`. Repeat until the
+review says it's clean. (For a hands-off review that keeps this loop out of your context, dispatch
+the `codex-reviewer` subagent instead — see below.)
+
+### 5. Stop
+
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs stop
+```
+
+Always `stop` when done — it kills the `codex app-server` child and removes the socket + state.
+
+## Human supervision (important)
+
+v1 is **human-supervised by design** — `wait` *parks* questions and approvals instead of
+auto-answering. When you hit `status:"question"` or `status:"approval"`:
+
+- **Show the user** what Codex asked (the question text + options, or the command/file it wants).
+- Answer from the conversation context when the choice is unambiguous, and state what you chose.
+- If it's a genuine product/scope decision, **ask the user** before answering.
+
+Never silently guess your way through a parked question — surfacing it is the point.
+
+## Verb reference
+
+| Verb | Args | Returns |
+|---|---|---|
+| `doctor` | — | `{ codexVersion, authPresent, threads }` |
+| `start` | `[--cwd <path>] [--model <m>] [--resume <uuid> \| --resume-latest]` | `{ ok, threadId, socket, pid }` |
+| `plan` | `"<prompt>" [--effort <e>] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"no_model_for_mode"}` |
+| `send` | `"<prompt>" [--effort <e>] [--mode default] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"no_model_for_mode"}` (only with `--mode`) |
+| `wait` | `[--timeout-ms <N>]` | `{status:"completed",message}` · `{status:"question",question}` · `{status:"approval",request}` · `{status:"interrupted"\|"failed",message}` · `{status:"unsupported",request}` · `{status:"timeout"}` (exit 2) |
+| `answer` | `--id <qid> (--option <n> \| --text "<s>")` | `{ ok }` · `{error:"no_pending_question"}` (`--option` is 1-based; one selection per call — answering resumes the turn) |
+| `approve` | `--decision allow\|deny` | `{ ok }` · `{error:"no_pending_approval"}` |
+| `read` | — | `{ status, message }` (last assistant message) |
+| `interrupt` | — | `{ ok }` · `{error:"no_active_turn"}` |
+| `status` | — | `{ threadId, turnStatus, parked }` |
+| `stop` | — | `{ ok }` (tears down daemon, socket, state) |
+
+**Modes & effort.** `plan` = Plan mode (read-only architect). Plain `send` inherits the thread's
+current mode (a `send` after a `plan` reviews read-only — exactly what you want). `send --mode
+default` explicitly leaves Plan mode (only needed if you ever want Codex to edit). `--effort` ∈
+`{minimal, low, medium, high, xhigh, none}`; use `xhigh` for hard architecture problems.
+
+## Troubleshooting
+
+- **`no active session; run start first`** — the daemon isn't up. Run `start`.
+- **`{error:"busy"}`** — a turn is already in flight. Run `wait` (or `interrupt` to abandon it).
+- **`{error:"no_model_for_mode"}`** — Plan/`--mode default` needs a concrete model string. Either
+  set a default in `~/.codex/config.toml`, or re-`start` with `--model <name>` (e.g. a model from
+  the user's Codex config). Plain `send` (review) does not need this.
+- **`{status:"failed"}` with "codex app-server exited"** — the child died mid-turn. Run `stop`,
+  then `start` again (optionally `--resume-latest`).
+- **`{status:"unsupported"}`** — Codex raised an **MCP elicitation** (or an unknown request kind)
+  this client can't answer. `interrupt` the turn and proceed without it.
+- **Permissions approval** — `item/permissions/requestApproval` comes back from `wait` as
+  `{status:"approval"}`, but `approve` then fails with `{error:"permissions approval not supported…"}`
+  (its response shape differs from exec/file approvals). `interrupt` the turn rather than approving it.
+- **Stuck `wait`** — pass `--timeout-ms <N>`; on timeout you get `{status:"timeout"}` (exit 2),
+  then `interrupt`.
+- **After upgrading Codex** — the Plan-mode / question surfaces are experimental and may drift
+  across Codex versions; re-run `doctor` and sanity-check a `plan` turn.
+
+## Notes
+
+- The daemon is a **single global session** (`~/.codex-drive/state.json`); one in-flight turn at a
+  time. Don't run two architect sessions concurrently from the main thread. The `codex-reviewer`
+  subagent sidesteps this by running its own **ephemeral** daemon on a private socket.
+- This plugin complements the separate `codex` plugin (rescue/setup, one-shot `codex exec`). They
+  can coexist; this one adds the native Plan-mode architect + interactive review loop.
+- Design rationale and protocol details: `${CLAUDE_PLUGIN_ROOT}/docs/specs/2026-05-31-codex-drive-design.md`.
