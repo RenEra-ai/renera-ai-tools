@@ -29,7 +29,10 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs doctor
 | **skill** `codex-claude` | The brain: daemon lifecycle, the full verb contract, the architect→implement→review loop, and human-supervised question/approval handling. Auto-activates when you ask Claude to use Codex as an architect/reviewer. |
 | **command** `/codex-architect <task>` | Runs a Plan-mode architect turn **in the main thread**, surfacing Codex's clarifying questions to you. You implement the resulting plan. |
 | **command** `/codex-review [scope]` | Dispatches the `codex-reviewer` subagent for an independent review of your changes (defaults to the current diff). |
+| **command** `/codex-issue <#\|task>` | **Fully autonomous** end-to-end loop: architect → approve → implement → review-until-clean → push + PR + close issue. Add `--dry-run` to stop before integration. |
 | **agent** `codex-reviewer` | Autonomous, isolated read-only review on its own **ephemeral** Codex session; returns a clean findings report. |
+| **agent** `codex-orchestrator` | Drives the full `/codex-issue` loop on the persistent daemon; owns plan approval, the review loop, and the push/PR/close finish. |
+| **agent** `codex-developer` | The repo-agnostic **black box**: implements/fixes by following THIS repo's own `CLAUDE.md`/QA/review, then reports `DONE` + a diff. |
 | **runtime** `bin/` + `lib/` | The `codex-drive` CLI + session daemon (JSON-RPC client, turn state machine, question/approval parking). |
 | `scripts/review-round.mjs` | One-shot ephemeral-daemon review used by the `codex-reviewer` agent. |
 
@@ -37,6 +40,26 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs doctor
 > (the product) is `codex-claude`. The internal client name and the `~/.codex-drive/` state dir are
 > deliberate and decoupled from the plugin name — renaming the state dir would orphan existing
 > Codex sessions, so leave them as-is.
+
+## Full automation (`/codex-issue`)
+
+`/codex-issue <issue-number | free-text task> [--dry-run] [--base <branch>]` runs the whole loop
+hands-off via the `codex-orchestrator` agent:
+
+1. **Intake** the GitHub issue (`gh issue view`) or free-text task; create a `codex/…` branch.
+2. **Architect** plans it (Plan mode); the orchestrator **auto-answers** clarifying questions and
+   **auto-approves** the plan (optionally getting a second opinion from an independent plan-review
+   subagent such as `plan-reviewer`, if one is configured — not shipped with this plugin).
+3. **Implement** — dispatches the `codex-developer` black box, which follows **this repo's own**
+   `CLAUDE.md`/QA/review and reports back only `DONE` + a diff.
+4. **Architect review** of impl-vs-plan on the same thread → fix → re-review until **"no issues"**.
+5. **Finish** — `git push`, `gh pr create` (`Closes #N`), `gh issue close`, then `stop` the daemon.
+
+It is **fully autonomous and ends in irreversible actions** (push / PR / close). Brakes: `--dry-run`
+stops before integration; the loop halts after a max round count (default 6) rather than push an
+un-clean change. This deliberately overrides the human-supervised model of `/codex-architect` +
+`/codex-review` — use those when you want to drive each step yourself. Requires `gh` (GitHub CLI)
+authenticated for the integration step.
 
 ## CLI verb reference
 

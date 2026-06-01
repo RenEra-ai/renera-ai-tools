@@ -150,6 +150,37 @@ auto-answering. When you hit `status:"question"` or `status:"approval"`:
 
 Never silently guess your way through a parked question — surfacing it is the point.
 
+## Full-issue orchestration (autonomous)
+
+For a hands-off run, **`/codex-issue <#|task>`** drives the entire architect→implement→review→ship loop
+via the **codex-orchestrator** agent — no human in the loop except `--dry-run` and a max-rounds guard.
+Requires the `gh` CLI (authenticated) for issue intake + push/PR/close. Unlike the manual loop above
+(human-supervised), the orchestrator **auto-answers** the architect's clarifying questions and
+**auto-approves** the plan, then integrates the result.
+
+Pieces:
+- **codex-orchestrator** (agent) — drives the *persistent* daemon; owns plan → approval → review loop →
+  finish (push + PR + close issue).
+- **codex-developer** (agent) — the repo-agnostic **black box**: implements/fixes by following THIS
+  repo's own `CLAUDE.md`/QA/review, then reports `STATUS: DONE` + a diff. The orchestrator never looks
+  inside; it only consumes that report.
+- *(optional)* an independent **plan-review subagent** (e.g. an agent named `plan-reviewer`, if one is
+  configured in your environment) — a second-opinion approve/adjust verdict on the architect's plan;
+  the orchestrator falls back to judging the plan itself when none is available. Not shipped with this
+  plugin.
+
+Flow: intake (`gh issue view`) → `plan` (architect, Plan mode) → approve → dispatch developer (black box)
+→ `send` a review of impl-vs-plan **on the same thread** (so the architect remembers the plan) →
+fix→re-review scoped to the fix delta until "no issues" → `git push` + `gh pr create` (`Closes #N`) +
+`gh issue close` → `stop`. The codex↔claude **messaging handoff** is just the verbs: `read` carries the
+plan/review out of Codex; `send` points Codex at the developer's changed files on disk (never paste big
+diffs — ARG_MAX).
+
+Brakes: `--dry-run` stops before push/PR/close; the loop halts after the max rounds (default 6) rather
+than push an un-clean change; the daemon is always `stop`ped, even on abort. This orchestrated path
+deliberately **overrides** the human-supervised default — use the manual `/codex-architect` +
+`/codex-review` flow when you want to see and decide each step yourself.
+
 ## Verb reference
 
 | Verb | Args | Returns |
