@@ -65,7 +65,9 @@ CDX="node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs"
   If neither a `--model` flag nor `$CONFIG_MODEL` is available → **abort** with: "Plan mode needs a
   model — pass `--model <name>` or set `model = \"...\"` in ~/.codex/config.toml." (Abort before
   starting the daemon to avoid wasting an architect turn.)
-- Confirm git state; note the starting commit. Ensure `gh auth status` is OK (else abort before work).
+- Confirm git state; note the starting commit. Require GitHub auth (`gh auth status`) **only on the
+  paths that need it**: when the task is a numeric issue (for `gh issue view`) or when this is **not**
+  a `--dry-run` (the finish pushes/PRs/closes). A free-text `--dry-run` needs no `gh` — don't abort on it.
 
 ### 1. Intake
 - Issue number → `gh issue view <#> --json number,title,body`. Free text → use as-is.
@@ -118,9 +120,11 @@ CDX="node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs"
 
 ### 7. Finish — integrate (skip entirely if `--dry-run`)
 - Ensure everything is committed (the developer commits each round).
-- Resolve the base branch: `--base` if given; else `origin/dev` if it exists
+- Resolve the base **branch name** — `gh pr create --base` wants a bare branch name, never a
+  remote-tracking ref: `--base` if given; else `dev` if `origin/dev` exists
   (`git show-ref --verify --quiet refs/remotes/origin/dev`); else the repo default
-  (`gh repo view --json defaultBranchRef -q .defaultBranchRef.name`).
+  (`gh repo view --json defaultBranchRef -q .defaultBranchRef.name`). `$BASE` must be e.g. `dev`,
+  not `origin/dev`.
 - `git push -u origin <branch>`.
 - Build the PR body with **real newlines** (literal `\n` in a double-quoted string will NOT render):
   ```bash

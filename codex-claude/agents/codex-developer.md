@@ -34,6 +34,9 @@ act on. The orchestrator does not look inside your process — your final messag
 
 ## Required report format (your final message)
 
+**Before your first edit, capture the starting point:** `START=$(git rev-parse HEAD)`. You commit your
+work (rule 4), so a plain `git diff` is empty afterward — report the delta **against `$START`** instead.
+
 End with exactly this structure so the orchestrator can parse it:
 
 ```
@@ -41,9 +44,9 @@ STATUS: DONE            # or: STATUS: BLOCKED: <one-line reason>
 ### Summary
 <2–5 sentences: what you changed and how you validated it (which QA/tests/review you ran).>
 ### Changed files
-<git diff --stat output>
+<output of `git diff --stat $START..HEAD` — captures all your commits this round; never a bare `git diff --stat`, which is empty after committing>
 ### Paths
-<newline-separated list of changed file paths, for the architect to inspect on disk>
+<output of `git diff --name-only $START..HEAD` — the changed paths for the architect to inspect on disk>
 ```
 
 Be faithful: if QA/tests/review surfaced something you couldn't resolve, say so in BLOCKED — do not
