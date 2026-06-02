@@ -42,8 +42,10 @@ before.
    real pipeline, returning `ready_to_land` on `branch`.
 3. **Architect review** — an ephemeral Codex review (`scripts/review-round.mjs`) of the branch diff vs
    the inlined plan, parsed for a last-line `VERDICT: NO ISSUES` / `VERDICT: ISSUES FOUND`. On issues,
-   the fix is dispatched to the **repo's own `developer` agent** (its conventions), re-verified
-   (repo tests) and committed, then re-reviewed — up to `maxRounds` (default 6).
+   the fix follows the repo's **own** development conventions — *discovered, not assumed* (its
+   CLAUDE.md/AGENTS.md/.claude docs/commands/agents; it uses the repo's developer agent if one exists,
+   else implements per CLAUDE.md / from scratch) — then re-verified (the repo's own test/QA command,
+   discovered) and committed, then re-reviewed — up to `maxRounds` (default 6).
 4. **Land** — squash to the repo's one-commit convention, `git push`, `gh pr create` (`Closes #N`).
    Never closes the issue directly; flags non-default bases for manual close. `--dry-run` stops here.
 
@@ -55,10 +57,13 @@ repo's workflow.
 
 ## Notes / limits
 
-- The wrapper's architect **fix loop** uses the repo's `developer` agent directly (it must exist as a
-  dispatchable `.claude/agents/*` for the fix path). If a repo defines its logic *only* inside the
-  Workflow with no dispatchable developer agent, the fix loop degrades — prefer exposing a developer
-  agent.
+- The wrapper's architect **fix loop** is repo-agnostic: it discovers the repo's own dev conventions
+  and uses a named developer agent **if one exists**, otherwise follows the repo's documented procedure
+  or implements per CLAUDE.md (from scratch). No specific agent name is assumed. Repos that expose a
+  developer agent get higher fidelity, but it is not required.
+- The only hard requirement for composition is that the repo's Workflow implements the **`noLand`
+  contract** (`noLand` is NOT an Anthropic-standard arg — the repo's script must read `args.noLand`).
+  If it doesn't, `/codex-issue` detects nothing and falls back to subagent mode, which needs no contract.
 - Approval is requested **before** launch (workflows can't prompt mid-run). The wrapper runs in the
   background and reports on completion.
 - The architect plan is **inlined** into the review (no shared Codex thread across phases), so each
