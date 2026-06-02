@@ -1,6 +1,6 @@
 ---
 name: codex-claude
-version: 1.4.0
+version: 1.5.0
 description: >-
   Use Codex (GPT-5.x) as a second-opinion architect and reviewer during Claude Code
   development, without GUI automation. This skill drives a headless `codex app-server`
@@ -166,9 +166,11 @@ Pieces:
   own full internal workflow wherever it's defined** (`CLAUDE.md`, `AGENTS.md`, or `.claude/` process
   docs / commands / agents) — however many internal reviews / QA agents / tests it has — then reports
   `STATUS: DONE/BLOCKED` + a diff. It **stops before landing** (push/PR are the orchestrator's job).
-  The orchestrator never looks inside; it only consumes that report. *(The plugin only adds the
-  architect plan at the front and the architect review→fix loop at the back — it wraps, never replaces,
-  the repo's lifecycle.)*
+  It is **fail-closed**: a required review/QA gate that *cannot run* (e.g. a live QA stage needing
+  credentials it doesn't have) is reported `BLOCKED`, never silently skipped — so the orchestrator
+  stops rather than landing an under-reviewed change. The orchestrator never looks inside; it only
+  consumes that report. *(The plugin only adds the architect plan at the front and the architect
+  review→fix loop at the back — it wraps, never replaces, the repo's lifecycle.)*
 - *(optional)* an independent **plan-review subagent** (e.g. an agent named `plan-reviewer`, if one is
   configured in your environment) — a second-opinion approve/adjust verdict on the architect's plan;
   the orchestrator falls back to judging the plan itself when none is available. Not shipped with this
@@ -197,6 +199,9 @@ its gates intact) with the architect plan + review, then lands. Detected by
 `grep -l noLand .claude/workflows/*.js`; falls back to the subagent path above when no composable
 workflow is present. Run **`/codex-compose-setup`** to add the `noLand` seam to a repo's workflow (or
 scaffold a starter) — `noLand` is not an Anthropic-standard arg, so the repo's workflow must read it.
+In composition, the architect's fix rounds re-run the repo's **own review/QA gate(s)** on the fix
+(dispatching the repo's reviewer/QA agent, not just its tests), a clean-but-substance-free verdict is
+nudged once rather than rubber-stamped, and a gate that can't run is fail-closed (not landed).
 Contract + details: `${CLAUDE_PLUGIN_ROOT}/docs/WORKFLOW-MODE.md`.
 
 ## Verb reference
