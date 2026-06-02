@@ -58,13 +58,14 @@ const plan = await agent(
   `Produce a Codex architect plan for GitHub issue #${ISSUE} in this repo.
 Steps:
 1. \`gh issue view ${ISSUE} --json title,body\` to read the issue.
-2. Run the ephemeral Plan-mode driver (it boots its own private Codex daemon, plans, and prints the plan after a '=== PLAN ===' line):
-   node ${PLUGIN}/scripts/plan-round.mjs "Architect a concrete, file-by-file plan for issue #${ISSUE}: <paste the issue title+body>. Inspect the relevant files. Do not change anything."
-3. If STATUS is not 'completed' OR the plan body is empty/(empty), run it ONCE more with an explicit nudge appended ("emit the full plan as plain text now").
-Return: status = the STATUS line value; planText = the full plan text printed after '=== PLAN ==='.`,
+2. Build the plan prompt text — "Architect a concrete, file-by-file plan for issue #${ISSUE} (title+body below). Inspect the relevant files. Do not change anything." followed by the issue title+body — and WRITE it to a temp file using the Write tool. Do NOT put the issue text in the shell command (it may contain backticks/$()/quotes).
+3. Run the ephemeral Plan-mode driver (boots a private Codex daemon, plans, prints the plan after a '=== PLAN ===' line):
+   node ${PLUGIN}/scripts/plan-round.mjs --prompt-file <that temp file>
+4. If STATUS is not 'completed' OR the plan body is empty/(empty), rebuild the prompt file with a nudge ("emit the full plan as plain text now; do not stop after the reasoning preamble") and run ONCE more.
+Return: status = the STATUS line value (e.g. 'completed'); planText = the full plan text printed after '=== PLAN ==='.`,
   { label: `plan #${ISSUE}`, phase: 'Architect plan', schema: PLAN_SCHEMA },
 )
-if (!plan || !plan.planText || !plan.planText.trim() || plan.planText.trim() === '(empty)') {
+if (!plan || plan.status !== 'completed' || !plan.planText || !plan.planText.trim() || plan.planText.trim() === '(empty)') {
   return { status: 'failed', stage: 'architect-plan', detail: 'architect produced no usable plan' }
 }
 log(`architect plan captured (${plan.planText.length} chars)`)
@@ -87,13 +88,17 @@ let verdict = 'UNCLEAR'
 let findings = []
 while (round < MAX_ROUNDS) {
   const review = await agent(
-    `Run a Codex architect review of the implementation on branch ${BRANCH} against the APPROVED PLAN below.
+    `Run a Codex architect review of the implementation on branch ${BRANCH} against the APPROVED PLAN (shown at the end).
 Steps:
 1. Changed files: \`git diff --name-only ${REPO_BASE}...HEAD\`.
-2. Run the ephemeral review driver (it prints a deterministic 'PARSED_VERDICT:' line, then the raw review after '=== REVIEW ==='):
-   node ${PLUGIN}/scripts/review-round.mjs "Review the implementation against this plan, then inspect the changed files on disk: <list>. List concrete issues as file:line with a fix. END with a verdict on its OWN final line: exactly 'VERDICT: NO ISSUES' or 'VERDICT: ISSUES FOUND'. PLAN:\n${plan.planText}"
-3. Read the driver's 'PARSED_VERDICT:' line (NO ISSUES | ISSUES FOUND | UNCLEAR) as the verdict; collect any file:line findings from the '=== REVIEW ===' body.
-Return verdict, reviewedFiles, and findings[].`,
+2. Build the review prompt text — "Review the implementation against the plan below, then inspect the changed files on disk: <the changed files>. List concrete issues as file:line with a fix. END with a verdict on its OWN FINAL line, with NOTHING after it: exactly 'VERDICT: NO ISSUES' or 'VERDICT: ISSUES FOUND'." followed by the PLAN text — and WRITE it to a temp file using the Write tool. Do NOT put it in the shell command (it may contain backticks/$()/quotes).
+3. Run the ephemeral review driver (it prints a deterministic 'PARSED_VERDICT:' line, then the raw review after '=== REVIEW ==='):
+   node ${PLUGIN}/scripts/review-round.mjs --prompt-file <that temp file>
+4. Read the driver's 'PARSED_VERDICT:' line (NO ISSUES | ISSUES FOUND | UNCLEAR) as the verdict; collect any file:line findings from the '=== REVIEW ===' body.
+Return verdict, reviewedFiles, and findings[].
+
+--- PLAN ---
+${plan.planText}`,
     { label: `arch-review #${ISSUE} r${round + 1}`, phase: 'Architect review', schema: REVIEW_SCHEMA },
   )
   verdict = review ? review.verdict : 'UNCLEAR'

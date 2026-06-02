@@ -2,15 +2,17 @@
 // session), run ONE Plan-mode architect turn, auto-answer any clarifying question (first option) and
 // decline any approval (Plan mode is read-only), print the plan, and exit. Used by the codex-wrap
 // workflow's "architect plan" phase. Mirrors review-round.mjs but in Plan mode (needs a model).
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Daemon } from '../lib/daemon.mjs';
 import { sendCommand } from '../lib/client.mjs';
 import { readConfiguredModel } from '../lib/config.mjs';
 
-const prompt = process.argv[2];
-if (!prompt) { console.error('usage: plan-round.mjs "<prompt>" [--model <m>] [--effort <e>]'); process.exit(1); }
+// Prefer --prompt-file (avoids shell-quoting/injection from issue/plan text with backticks, $(), quotes).
+const pf = process.argv.indexOf('--prompt-file');
+const prompt = pf >= 0 ? readFileSync(process.argv[pf + 1], 'utf8') : process.argv[2];
+if (!prompt) { console.error('usage: plan-round.mjs ("<prompt>" | --prompt-file <path>) [--model <m>] [--effort <e>]'); process.exit(1); }
 const mi = process.argv.indexOf('--model');
 const ei = process.argv.indexOf('--effort');
 const model = (mi >= 0 ? process.argv[mi + 1] : null) || readConfiguredModel();
