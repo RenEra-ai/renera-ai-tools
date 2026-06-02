@@ -115,10 +115,16 @@ ${plan.planText}`,
     continue
   }
   inconclusiveRetries = 0
-  // Fix via the REPO's own developer agent (its conventions + receiving-code-review discipline).
+  // Fix following the REPO's OWN development conventions — discovered, not assumed. Works whether the
+  // repo defines a developer agent, a multi-step procedure, or nothing (implement from scratch).
   await agent(
-    `Fix these Codex architect findings on branch ${BRANCH}, following THIS repo's CLAUDE.md and conventions (apply its receiving-code-review discipline; keep its tests/QA green). Do NOT commit, push, or open a PR. Findings:\n${JSON.stringify(findings, null, 2)}`,
-    { label: `arch-fix #${ISSUE} r${round + 1}`, phase: 'Architect review', agentType: 'developer' },
+    `Fix these Codex architect findings on branch ${BRANCH} by following THIS repo's OWN way of developing.
+First DISCOVER how this repo develops: read its CLAUDE.md / AGENTS.md and any .claude/ process docs, commands, or agents. THEN:
+- if it defines a developer agent or a documented dev procedure, follow that discipline (dispatch the repo's developer agent if available);
+- if it defines nothing, implement the fix directly and sensibly per its CLAUDE.md (from scratch).
+Apply receiving-code-review discipline (verify each finding; fix only what is genuinely wrong; push back on the rest). Keep its tests/QA green. Do NOT commit, push, or open a PR.
+Findings:\n${JSON.stringify(findings, null, 2)}`,
+    { label: `arch-fix #${ISSUE} r${round + 1}`, phase: 'Architect review' },
   )
   const v = await agent(
     `Verify and commit the architect fix on branch ${BRANCH}. First DISCOVER this repo's test/QA command from its CLAUDE.md / AGENTS.md / .claude workflow (do NOT assume \`pytest\`); run it and confirm it passes. If green, \`git add -A && git commit -m\` with a short one-line message (no "Claude Code"). If not green, set ok=false. In detail, ECHO the exact command you ran plus the last lines of its output.`,
