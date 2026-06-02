@@ -60,10 +60,11 @@ which is exactly what setup arranges.)
    wrapper nudges once for the list of reviewed files and re-reviews before accepting clean. On issues,
    a single merged fix agent runs the repo's **own review/QA discipline on the fix delta**, not just
    its tests: it discovers the repo's process (CLAUDE.md/AGENTS.md/.claude docs/commands/agents),
-   applies the fix, **re-runs the repo's own review/QA gate(s)** — dispatching the repo's
-   reviewer/QA agent via Task and looping until that gate is clean (falling back to running the gate's
-   discipline inline if Task can't dispatch it), then runs the repo's discovered test/QA command — and
-   commits **only if all of that is green**. A required gate that **cannot run** (e.g. a credential-gated
+   applies the fix, **re-runs the repo's own review/QA gate(s)** — the fix agent is itself a subagent
+   and **cannot nest Task**, so a gate that is a command/script is run **natively** via Bash and a gate
+   that is a repo-defined **subagent** is **replayed inline** from its `.md` (the only option on fix
+   rounds, not a fallback) — then runs the repo's discovered test/QA command — and commits **only if
+   all of that is green**. A required gate that **cannot run** (e.g. a credential-gated
    live QA stage that needs an account the run doesn't have) is **fail-closed**: the round returns
    `not_clean` (its `detail` is expected to begin `BLOCKED:`) and the change is **not** landed — a live
    gate is never inline-faked from a diff. Re-reviewed up to `maxRounds` (default 6).
@@ -84,8 +85,9 @@ The plugin must wrap a repo's lifecycle **whatever shape it has**. Two real repo
   a `developer ⇄ code-reviewer` loop (cap 3) then its own internal Codex loop (cap 3), already
   `noLand`+`plan`-aware. `/codex-issue` detects `noLand`, runs it as a real sub-workflow (gates intact),
   and the architect's fix rounds re-apply **that repo's `code-reviewer` gate discipline** on the delta
-  (dispatching its reviewer agent where possible; a gate baked entirely into the workflow JS is
-  replayed as faithfully as a single agent can, not natively re-run).
+  (its first native pass runs the real reviewer; on fix rounds the wrapper's fix agent — a subagent that
+  can't dispatch the reviewer subagent — **replays** that reviewer's criteria inline, as faithfully as a
+  single agent can).
 - **Prose policy with a live gate → subagent mode.** `Boomi/boomi-mcp-server` has no workflow — a
   prose-only `CLAUDE.md` two-stage gate (live `boomi-qa-tester` QA via real tool calls → Codex review,
   "skipping either stage is never acceptable"). `/codex-issue` falls back to subagent mode; the
@@ -96,12 +98,20 @@ The plugin must wrap a repo's lifecycle **whatever shape it has**. Two real repo
 ## Notes / limits
 
 - The wrapper's architect **fix loop** is repo-agnostic and **gate-faithful**: it discovers the repo's
-  own dev conventions, applies the fix, and re-runs the repo's **own review/QA gate(s)** (its reviewer/
-  QA agent via Task, with an inline fallback) plus its tests before committing — not just the tests.
-  It uses a named developer/reviewer agent **if one exists**, otherwise follows the repo's documented
-  procedure or implements per CLAUDE.md. No specific agent name is assumed.
+  own dev conventions, applies the fix, and re-runs the repo's **own review/QA gate(s)** plus its tests
+  before committing — not just the tests. The fix agent is itself a subagent and **cannot dispatch
+  another subagent** (no nested Task), so it runs each gate the honest way: a review/QA **command or
+  script** is run natively; a gate that is a repo-defined **subagent** is **replayed inline** from that
+  agent's `.md`; a gate that must **execute live** (credentials/network) and can't be run is **BLOCKED**.
 - **Fail-closed.** A required review/QA gate that cannot run (missing credentials/env, no network) is
-  treated as BLOCKED — the change is never landed with a skipped gate.
+  treated as BLOCKED — the change is never landed with a skipped gate. The wrapper also stages only the
+  fix delta (never `git add -A`), so a pre-existing untracked file is not swept into the PR.
+- **Landing is plugin-owned (by design).** Under `noLand` the repo's own `land()` is suppressed and the
+  wrapper does the squash + `git push` + `gh pr create` itself. A repo's **bespoke land side-effects**
+  (deploy, tag/release, changelog, issue-close-with-stats) are therefore **not** replayed — only push +
+  PR with `Closes #N`. If a repo needs those, run its real land step manually after the PR merges.
+- **Preflight with `/codex-doctor`** to see which mode a repo will use and whether the `noLand` seam is
+  intact, before a real run.
 - The only hard requirement for composition is that the repo's Workflow implements the **`noLand`
   contract** (`noLand` is NOT an Anthropic-standard arg — the repo's script must read `args.noLand`).
   If it doesn't, `/codex-issue` detects nothing and falls back to subagent mode, which needs no contract.

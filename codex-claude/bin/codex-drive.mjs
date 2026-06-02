@@ -60,6 +60,19 @@ async function main() {
 
 async function startDaemon(parsed, store) {
   const cwd = parsed.flags.cwd || process.cwd();
+  // Idempotency: do NOT silently clobber a LIVE session — that orphans its detached codex app-server.
+  // Probe the recorded socket; if a daemon answers, refuse (or, with --force, stop it first).
+  const existing = store.readState();
+  if (existing && existing.socket) {
+    let live = false;
+    try { await sendCommand(existing.socket, { cmd: 'status' }, { timeoutMs: 2000 }); live = true; } catch { /* stale/dead socket → safe to replace */ }
+    if (live && !parsed.flags.force) {
+      fail(`a codex-drive session is already live (pid ${existing.pid}, thread ${existing.threadId}). Run \`codex-drive stop\` first, or \`start --force\` to stop it and start fresh.`);
+    }
+    if (live && parsed.flags.force) {
+      try { await sendCommand(existing.socket, { cmd: 'stop' }, { timeoutMs: 5000 }); } catch { /* best-effort teardown */ }
+    }
+  }
   // Resolve the resume thread id.
   let resumeId = parsed.flags.resume || null;
   if (parsed.flags['resume-latest']) {

@@ -78,7 +78,7 @@ on merge via `Closes #N` — the loop never closes it directly).
 ### 2. Architect — plan (Plan mode)
 - `$CDX start --cwd "$PWD"` (add `--model "$MODEL"` only if you resolved one from a `--model` flag;
   a config-file default needs no flag). Record `threadId`/`socket`.
-- `$CDX plan "<task>. Inspect the relevant files and produce a concrete, file-by-file plan. Ask if anything is genuinely ambiguous." --effort xhigh` → **inspect the return**: `{ok,status:"running"}` →
+- `$CDX plan "<task>. Inspect the relevant files and produce a concrete, file-by-file plan. Honor this repo's own conventions (CLAUDE.md / AGENTS.md — e.g. no new dependencies, minimal diff, scope discipline). Ask if anything is genuinely ambiguous." --effort xhigh` → **inspect the return**: `{ok,status:"running"}` →
   continue; `{error:"no_model_for_mode"}` → stop + abort (model preflight failed); `{error:"busy"}` →
   `interrupt` then retry; any other error → stop + abort.
 - **Drive `wait` (shared pattern — used in steps 2, 5, 6, and plan revision):**
@@ -115,7 +115,13 @@ on merge via `Closes #N` — the loop never closes it directly).
   definition-of-done requires. It must report `STATUS: DONE/BLOCKED` + a summary **naming which
   repo workflow it actually ran** + the `$START..HEAD` diff/paths. Consume only its report — do not
   inspect its internals; but DO sanity-check the summary names a real internal workflow (not just
-  "ran pytest") when the repo defines more.
+  "ran pytest") when the repo defines more. Read its **Gates** section: each required gate is labeled
+  `natively run` (a command/script it executed) or `replayed inline` (a repo-defined SUBAGENT gate it
+  could not Task-dispatch — subagents can't nest — so it applied that agent's criteria itself). A
+  `replayed inline` gate is expected and acceptable, but it is **reduced fidelity**; carry that note
+  into your final report so the human knows which gates ran natively vs by replay. (If a repo's whole
+  lifecycle is a Workflow, the developer returns `BLOCKED` recommending `/codex-compose-setup` — treat
+  that as a blocker, surface it, and suggest composition mode.)
 - **Parse the status from the FIRST non-empty line** of the developer's report (like the verdict parse
   in step 6): it is BLOCKED iff that line begins with `STATUS: BLOCKED` (trimmed), DONE only if it is
   exactly `STATUS: DONE`. Do **not** substring-match `BLOCKED` elsewhere in the message (the report's
@@ -127,7 +133,7 @@ on merge via `Closes #N` — the loop never closes it directly).
   skipped.
 
 ### 5. Architect review (same thread → architect remembers the plan)
-- `$CDX send "Review the implementation against the plan you produced. Changed files: <paths from the developer>. Inspect each on disk. List concrete issues as file:line with a fix. END your reply with a verdict on its OWN final line: exactly 'VERDICT: NO ISSUES' or 'VERDICT: ISSUES FOUND'."` → check the return → drive `wait` → `$CDX read` the review.
+- `$CDX send "Review the implementation against the plan you produced. Changed files: <paths from the developer>. Inspect each on disk. Judge against this repo's own conventions (CLAUDE.md / AGENTS.md) — do not raise findings that would violate them. List concrete issues as file:line with a fix. END your reply with a verdict on its OWN final line: exactly 'VERDICT: NO ISSUES' or 'VERDICT: ISSUES FOUND'."` → check the return → drive `wait` → `$CDX read` the review.
 - **If continuity was reconstructed** (you had to restart the daemon since the plan turn — see
   *Malformed completed turns*), the architect may not actually remember the plan: **re-inline the
   approved plan text** into this `send` prompt, and note in the final report that continuity was rebuilt.
@@ -149,6 +155,14 @@ on merge via `Closes #N` — the loop never closes it directly).
   the outstanding findings.
 
 ### 7. Finish — integrate (skip entirely if `--dry-run`)
+- **Pre-finish landing-state guard (the developer must NOT have landed).** Before you push, verify the
+  developer did not already integrate behind your back: `git ls-remote --heads origin <branch>` must be
+  **empty** (the branch isn't already pushed) and, for a numeric issue, `gh issue view <#> --json state`
+  must still be **OPEN**. If the remote branch already exists or the issue is already closed, the
+  developer landed prematurely and **the architect review may have been bypassed** → do **not** push or
+  re-PR; `$CDX stop`, abort, and report `DANGER: the developer appears to have landed before review —
+  manual inspection needed` with the current state. (This is why the developer is told to stop before
+  landing; this guard catches a violation.)
 - Ensure everything is committed (the developer commits each round).
 - Resolve the default branch and the base. `$DEFAULT` = `gh repo view --json defaultBranchRef -q
   .defaultBranchRef.name`. The base **branch name** (`gh pr create --base` wants a bare name, never a

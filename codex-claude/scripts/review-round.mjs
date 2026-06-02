@@ -19,22 +19,41 @@ const socketPath = join(dir, 'r.sock');
 const daemon = new Daemon({ socketPath, clientInfo: { name: 'codex-drive', version: '0.1.0' } });
 await daemon.start();
 
-await sendCommand(socketPath, { cmd: 'send', prompt });
-
-let res = await sendCommand(socketPath, { cmd: 'wait' });
-let guard = 0;
-while ((res.status === 'question' || res.status === 'approval') && guard++ < 20) {
-  if (res.status === 'approval') {
-    process.stderr.write(`[driver] declining approval: ${res.request.method}\n`);
-    await sendCommand(socketPath, { cmd: 'approve', decision: 'deny' });
-  } else {
-    const q = res.question.questions[0];
-    const first = q.options && q.options[0];
-    const answer = first == null ? 'proceed' : (typeof first === 'string' ? first : first.label);
-    process.stderr.write(`[driver] answering question ${q.id} -> ${answer}\n`);
-    await sendCommand(socketPath, { cmd: 'answer', id: q.id, answers: [answer] });
+// Bounded wait: a client-side cap (under the ~10-min Bash cap) so a wedged Codex turn can't hang the
+// driver forever; on timeout, interrupt the turn and surface status:'timeout'.
+const WAIT_TIMEOUT_MS = 540000;
+async function driveWait() {
+  try {
+    return await sendCommand(socketPath, { cmd: 'wait' }, { timeoutMs: WAIT_TIMEOUT_MS });
+  } catch (e) {
+    if (!/timeout/i.test(e.message)) throw e;
+    process.stderr.write('[driver] wait timed out — interrupting the turn\n');
+    try { await sendCommand(socketPath, { cmd: 'interrupt' }, { timeoutMs: 10000 }); } catch {}
+    return { status: 'timeout', message: '' };
   }
-  res = await sendCommand(socketPath, { cmd: 'wait' });
+}
+
+let res = { status: 'failed', message: '' };
+try {
+  await sendCommand(socketPath, { cmd: 'send', prompt });
+  res = await driveWait();
+  let guard = 0;
+  while ((res.status === 'question' || res.status === 'approval') && guard++ < 20) {
+    if (res.status === 'approval') {
+      process.stderr.write(`[driver] declining approval: ${res.request.method}\n`);
+      await sendCommand(socketPath, { cmd: 'approve', decision: 'deny' });
+    } else {
+      const q = res.question.questions[0];
+      const first = q.options && q.options[0];
+      const answer = first == null ? 'proceed' : (typeof first === 'string' ? first : first.label);
+      process.stderr.write(`[driver] answering question ${q.id} -> ${answer}\n`);
+      await sendCommand(socketPath, { cmd: 'answer', id: q.id, answers: [answer] });
+    }
+    res = await driveWait();
+  }
+} finally {
+  // ALWAYS tear down the ephemeral daemon — even on timeout/error — so it never orphans a codex app-server.
+  await daemon.stop();
 }
 
 // Deterministic verdict: ONLY the FINAL non-empty line may be the verdict (trailing text → UNCLEAR).
@@ -47,5 +66,4 @@ console.log('STATUS: ' + res.status + (res.empty ? ' (empty)' : ''));
 console.log('PARSED_VERDICT: ' + parsed);
 console.log('=== REVIEW ===');
 console.log(msg || '(empty)');
-await daemon.stop();
 process.exit(0);

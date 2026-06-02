@@ -87,7 +87,7 @@ if (NO_LAND) {
 }
 
 const land = await agent(
-  `Run EXACTLY this, then report ok/detail (ok=true only if every command exited 0):\n\`\`\`bash\nset -e\ngit push -u origin ${report.branch}\nBASE=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)\ngh pr create --base "$BASE" --head ${report.branch} --title "#${ISSUE}: ${safeTitle}" --body "Closes #${ISSUE}"\n\`\`\`\nNever auto-merge. Do NOT close the issue (the PR's Closes #N closes it on a default-branch merge).`,
+  `Run EXACTLY this, then report ok/detail (ok=true only if every command exited 0):\n\`\`\`bash\nset -e\ngit push -u origin ${report.branch}\nDEFAULT=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)\nif git ls-remote --heads origin dev | grep -q .; then BASE="dev"; else BASE="$DEFAULT"; fi\ngh pr create --base "$BASE" --head ${report.branch} --title "#${ISSUE}: ${safeTitle}" --body "Closes #${ISSUE}"\n\`\`\`\nNever auto-merge. Do NOT close the issue (the PR's Closes #N closes it only on a DEFAULT-branch merge; if BASE is not the default branch, note that issue #${ISSUE} needs a manual close).`,
   { label: `land #${ISSUE}`, phase: 'Land', schema: OPS },
 )
 report.terminal = (land && land.ok) ? 'success' : 'land_failed'

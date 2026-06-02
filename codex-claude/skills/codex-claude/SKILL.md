@@ -1,6 +1,6 @@
 ---
 name: codex-claude
-version: 1.5.0
+version: 1.6.0
 description: >-
   Use Codex (GPT-5.x) as a second-opinion architect and reviewer during Claude Code
   development, without GUI automation. This skill drives a headless `codex app-server`
@@ -168,9 +168,13 @@ Pieces:
   `STATUS: DONE/BLOCKED` + a diff. It **stops before landing** (push/PR are the orchestrator's job).
   It is **fail-closed**: a required review/QA gate that *cannot run* (e.g. a live QA stage needing
   credentials it doesn't have) is reported `BLOCKED`, never silently skipped — so the orchestrator
-  stops rather than landing an under-reviewed change. The orchestrator never looks inside; it only
-  consumes that report. *(The plugin only adds the architect plan at the front and the architect
-  review→fix loop at the back — it wraps, never replaces, the repo's lifecycle.)*
+  stops rather than landing an under-reviewed change. Because a subagent **cannot dispatch another
+  subagent**, a repo gate that is itself a subagent is **replayed inline** from its `.md` (and labeled
+  `replayed inline` vs `natively run` in the report, so reduced fidelity is visible); a repo whose whole
+  lifecycle is a Workflow it cannot run returns `BLOCKED` pointing to `/codex-compose-setup`. The
+  orchestrator never looks inside; it only consumes that report. *(The plugin only adds the architect
+  plan at the front and the architect review→fix loop at the back — it wraps, never replaces, the
+  repo's lifecycle.)*
 - *(optional)* an independent **plan-review subagent** (e.g. an agent named `plan-reviewer`, if one is
   configured in your environment) — a second-opinion approve/adjust verdict on the architect's plan;
   the orchestrator falls back to judging the plan itself when none is available. Not shipped with this
@@ -199,10 +203,13 @@ its gates intact) with the architect plan + review, then lands. Detected by
 `grep -l noLand .claude/workflows/*.js`; falls back to the subagent path above when no composable
 workflow is present. Run **`/codex-compose-setup`** to add the `noLand` seam to a repo's workflow (or
 scaffold a starter) — `noLand` is not an Anthropic-standard arg, so the repo's workflow must read it.
-In composition, the architect's fix rounds re-run the repo's **own review/QA gate(s)** on the fix
-(dispatching the repo's reviewer/QA agent, not just its tests), a clean-but-substance-free verdict is
-nudged once rather than rubber-stamped, and a gate that can't run is fail-closed (not landed).
-Contract + details: `${CLAUDE_PLUGIN_ROOT}/docs/WORKFLOW-MODE.md`.
+In composition, the architect's fix rounds re-run the repo's **own review/QA gate(s)** on the fix (a
+gate that is a command/script runs natively; a gate that is a subagent is **replayed inline**, since
+subagents can't nest), a clean-but-substance-free verdict is nudged once rather than rubber-stamped, and
+a gate that can't run is fail-closed (not landed). If a repo has a Workflow that **isn't**
+composition-ready (no `noLand`), `/codex-issue` says so and nudges `/codex-compose-setup` instead of
+silently degrading. Run **`/codex-doctor`** to preflight which mode a repo will use and whether the
+seam is intact. Contract + details: `${CLAUDE_PLUGIN_ROOT}/docs/WORKFLOW-MODE.md`.
 
 ## Verb reference
 

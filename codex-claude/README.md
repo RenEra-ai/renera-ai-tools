@@ -30,6 +30,7 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs doctor
 | **command** `/codex-architect <task>` | Runs a Plan-mode architect turn **in the main thread**, surfacing Codex's clarifying questions to you. You implement the resulting plan. |
 | **command** `/codex-review [scope]` | Dispatches the `codex-reviewer` subagent for an independent review of your changes (defaults to the current diff). |
 | **command** `/codex-issue <#\|task>` | **Fully autonomous** end-to-end loop: architect → approve → implement (via the repo's own workflow) → review-until-clean → push + PR (issue closes on merge). Add `--dry-run` to stop before integration. |
+| **command** `/codex-doctor` | Read-only preflight: which mode (`/codex-issue` will use composition vs subagent) and why, `noLand` seam integrity, resolved PR base + auto-close, and Codex daemon health. |
 | **agent** `codex-reviewer` | Autonomous, isolated read-only review on its own **ephemeral** Codex session; returns a clean findings report. |
 | **agent** `codex-orchestrator` | Drives the full `/codex-issue` loop on the persistent daemon; owns plan approval, the review loop, and the push/PR finish (the issue closes on merge). |
 | **agent** `codex-developer` | The repo-agnostic **black box**: **discovers and runs THIS repo's own full internal workflow** wherever defined (`CLAUDE.md`/`AGENTS.md`/`.claude/` docs, commands, agents) — however many internal reviews/QA/tests — then reports `DONE` + a diff. Stops before landing. |

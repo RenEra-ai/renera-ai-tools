@@ -25,19 +25,28 @@ honor `--dry-run` and `--base <branch>`.
 
 ## Step 1 — detect the repo's integration mode
 
-Check whether this repo's dev workflow is a Claude Code **Workflow** that supports the codex-claude
-**composition contract** (an `args.noLand` branch that runs the full pipeline but returns before
-landing):
+Check whether this repo has a Claude Code **Workflow**, and whether it supports the codex-claude
+**composition contract** (an `args.noLand` branch that runs the full pipeline but returns before landing):
 
 ```bash
-grep -l "noLand" .claude/workflows/*.js 2>/dev/null   # composable workflow(s), if any
+ls .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null            # any workflow at all?
+grep -l "noLand" .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null   # composition-ready one(s)
 ```
 
-- A match **and** the task is a **numeric issue** → **workflow-mode composition** (Step 2A). If
-  multiple files match, pick the one that defines an issue-implementation pipeline (or the first) and
-  state which you chose. (The detector is a heuristic gate — the wrapper hard-validates the contract by
-  requiring the repo workflow to return `terminal: "ready_to_land"`.)
-- Otherwise → **subagent mode** (Step 2B — the default for repos without a composable Workflow).
+Decide (and **state which branch you took** so demotion is never silent):
+- **A file that actually READS `args.noLand` AND a numeric issue** → **workflow-mode composition**
+  (Step 2A). A bare `grep` match isn't enough — open the matched file(s) and confirm it references
+  `args.noLand` / destructures `noLand` from `args` **in code** (not just a comment); if several
+  qualify, pick the issue-implementation pipeline and say which. (The wrapper then hard-validates by
+  requiring the workflow to return `terminal: "ready_to_land"`.)
+- **A workflow file EXISTS but none actually reads `args.noLand`** (no match, or only a comment-only
+  mention; or the task is free-text on such a repo) → this
+  repo has a real Workflow that **isn't composition-ready**; composition would be higher-fidelity than
+  the black box. **Tell the user and nudge:** "This repo has `.claude/workflows/<file>` but it's not
+  composition-ready (no `noLand` seam) — run **`/codex-compose-setup`** to enable the higher-fidelity
+  composition path. Proceeding in subagent mode for now." Then go to **Step 2B**.
+- **No workflow at all** → **subagent mode** (Step 2B). Say plainly: "No composable workflow detected —
+  using subagent mode."
 
 ## Step 2A — workflow-mode composition (runs the repo's REAL pipeline, bracketed by Codex)
 
