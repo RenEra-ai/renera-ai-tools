@@ -50,7 +50,7 @@ for (let attempt = 1; attempt <= 3 && !green; attempt++) {
     { label: `dev #${ISSUE}.${attempt}`, phase: 'Implement' },
   )
   const v = await agent(
-    `READ-ONLY verification. FIRST, BEFORE running anything else, capture the implementation's FULL change-set vs the branch base into changed_pre_test (one path per entry; [] if none): the deduped UNION of \`git diff --name-only HEAD\` (tracked edits + already-staged new files) and \`git ls-files --others --exclude-standard\` (still-untracked new files). Capturing it BEFORE the tests run excludes any artifacts the test command creates. THEN DISCOVER this repo's test/QA command from its CLAUDE.md / AGENTS.md / README (do NOT assume any specific test runner), run it, and report: green = true only if it passed with zero failures/errors; detail = the exact command you ran + the last ~6 lines. Do NOT edit, stage, or commit.`,
+    `READ-ONLY verification. FIRST, BEFORE running anything else, capture the implementation's FULL change-set vs the branch base into changed_pre_test (one path per entry; [] if none): the deduped UNION of \`git diff --no-renames --name-only HEAD\` (tracked edits + already-staged new files; \`--no-renames\` so a rename surfaces BOTH its old and new path) and \`git ls-files --others --exclude-standard\` (still-untracked new files). Capturing it BEFORE the tests run excludes any artifacts the test command creates. THEN DISCOVER this repo's test/QA command from its CLAUDE.md / AGENTS.md / README (do NOT assume any specific test runner), run it, and report: green = true only if it passed with zero failures/errors; detail = the exact command you ran + the last ~6 lines. Do NOT edit, stage, or commit.`,
     { label: `verify #${ISSUE}.${attempt}`, phase: 'Implement', schema: VERIFY },
   )
   green = !!(v && v.green)
@@ -67,9 +67,13 @@ const safeTitle = String(pf.issue_title || '').replace(/["`$\\]/g, '').replace(/
 // pre-existing untracked), artifact-free (the snapshot was taken before the tests ran).
 const preSet = new Set(pf.pre_untracked || [])
 const implPaths = implChanged.filter((p) => !preSet.has(p))
-const addImpl = implPaths.length ? `git add -- ${implPaths.map(shellQuote).join(' ')}\n` : ''
+const implArg = implPaths.map(shellQuote).join(' ')
+const addImpl = implPaths.length ? `git add -- ${implArg}\n` : ''
+// Completeness scoped to the implementation paths only — a tracked file a test happened to touch
+// OUTSIDE the implementation must not fail the commit.
+const completeness = implPaths.length ? `test -z "$(git status --porcelain -- ${implArg})"  # every implementation path is fully committed\n` : ''
 const commit = await agent(
-  `Commit ONLY the implementation paths staged below — NOT test artifacts or pre-existing untracked files. Run EXACTLY this, then report ok/detail (ok=true only if every command exited 0):\n\`\`\`bash\nset -e\ngit reset -q                    # clear the index — ignore whatever the dev may have staged\n${addImpl}git commit -m "#${ISSUE}: ${safeTitle}"\ntest -z "$(git status --porcelain --untracked-files=no)"  # all tracked changes committed (completeness)\ngit log --oneline -1\n\`\`\`\nIf nothing is staged the commit exits non-zero — report ok=false.`,
+  `Commit ONLY the implementation paths staged below — NOT test artifacts or pre-existing untracked files. Run EXACTLY this, then report ok/detail (ok=true only if every command exited 0):\n\`\`\`bash\nset -e\ngit reset -q                    # clear the index — ignore whatever the dev may have staged\n${addImpl}git commit -m "#${ISSUE}: ${safeTitle}"\n${completeness}git log --oneline -1\n\`\`\`\nIf nothing is staged the commit exits non-zero — report ok=false.`,
   { label: `commit #${ISSUE}`, phase: 'Land', schema: OPS },
 )
 if (!commit || !commit.ok) { report.terminal = 'commit_failed'; report.detail = commit && commit.detail; return report }
