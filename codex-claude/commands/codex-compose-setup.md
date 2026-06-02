@@ -37,21 +37,26 @@ grep -l "noLand" .claude/workflows/*.js 2>/dev/null
 
 **Read the workflow file** and understand its structure: where it reads `args`, where it creates the
 working branch and freezes the base commit, and where it **lands** (the terminal integration — squash /
-push / PR / issue-close / deploy, often a `land()` function or a final block). Then edit it,
-**preserving everything else**:
+push / PR / issue-close / deploy, often a `land()` function or a final block).
 
-1. Near the other `args` reads, add:
-   `const NO_LAND = !!(args && typeof args === 'object' && args.noLand)`
-   and (if implementation guidance is easy to thread in) `const PLAN = (args && typeof args === 'object' && typeof args.plan === 'string') ? args.plan : ''`.
-2. If `PLAN` is added, inject it into the implement step ("follow this architect plan where sound").
-3. **Immediately before the workflow lands**, gate it: when `NO_LAND` is true, RETURN
-   `{ ...<its run report>, terminal: 'ready_to_land', branch: <its branch var>, base_sha: <its frozen base var>, ready: true }`
-   instead of landing. Identify the workflow's existing branch + base variables; if it tracks no base,
-   set `base_sha` to the commit the working branch was created from.
-
-**Show the change as a diff** (`git diff -- <file>` if it's tracked, otherwise present the before/after
-of the edited region) and use **AskUserQuestion** — *Apply* · *Show more* · *Cancel* — before saving.
-After applying, verify: `grep -c noLand <file>` is > 0.
+**Do NOT modify the real workflow file yet** — draft the change to a temp copy so Cancel leaves the
+original untouched:
+1. Copy the workflow to a temp file: `cp <file> /tmp/codex-seam.proposed.js`.
+2. Apply the seam to the **temp copy** (preserving everything else):
+   - Near the other `args` reads, add `const NO_LAND = !!(args && typeof args === 'object' && args.noLand)`
+     and (if easy to thread in) `const PLAN = (args && typeof args === 'object' && typeof args.plan === 'string') ? args.plan : ''`.
+   - If `PLAN` is added, inject it into the implement step ("follow this architect plan where sound").
+   - **Immediately before the workflow lands**, gate it: when `NO_LAND` is true, RETURN
+     `{ ...<its run report>, terminal: 'ready_to_land', branch: <its branch var>, base_sha: <its frozen base var>, ready: true }`
+     instead of landing. Identify the workflow's existing branch + base variables; if it tracks no
+     base, set `base_sha` to the commit the working branch was created from.
+3. Show the diff between the original and the proposal: `diff <file> /tmp/codex-seam.proposed.js`
+   (or present the before/after of the changed region).
+4. **AskUserQuestion** — *Apply* · *Show more* · *Cancel*. **Only on Apply**, overwrite the original:
+   `cp /tmp/codex-seam.proposed.js <file>` (and `node --check` it isn't required — workflow scripts use
+   top-level await/return, but confirm it still reads as the same workflow). On **Cancel**, delete the
+   temp and leave the original **unchanged**.
+5. After Apply, verify: `grep -c noLand <file>` is > 0.
 
 (Keep the edit minimal and faithful — do not restructure or "improve" the user's pipeline; only add the
 seam. If the land step is too tangled to gate safely, say so and offer Step 3's standalone template as
