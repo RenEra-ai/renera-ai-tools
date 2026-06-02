@@ -11,6 +11,12 @@ test('readConfiguredModel reads a top-level model from config.toml', () => {
   assert.equal(readConfiguredModel(home), 'gpt-5.5');
 });
 
+test('readConfiguredModel reads a single-quoted top-level model', () => {
+  const home = mkdtempSync(join(tmpdir(), 'cdx-cfgq-'));
+  writeFileSync(join(home, 'config.toml'), "model = 'gpt-5.5'\nmodel_reasoning_effort = \"xhigh\"\n");
+  assert.equal(readConfiguredModel(home), 'gpt-5.5');
+});
+
 test('readConfiguredModel ignores a model key inside a [table] section', () => {
   const home = mkdtempSync(join(tmpdir(), 'cdx-cfg2-'));
   writeFileSync(join(home, 'config.toml'), 'personality = "pragmatic"\n[some_provider]\nmodel = "other"\n');

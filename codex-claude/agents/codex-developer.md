@@ -31,20 +31,36 @@ just "run the tests."** Look in all of these (use Glob/Read; read what exists):
   process.
 - `.claude/agents/*.md` — repo-defined subagents (e.g. a `developer`, `code-reviewer`, `qa`/tester
   agent) that the process expects you to use.
+- `.claude/workflows/*.js` — a deterministic Claude Code **Workflow** that IS the repo's lifecycle.
 - `.claude/settings.json` hooks and `README.md`/`CONTRIBUTING.md` for required checks.
+
+**Escape hatch — if the repo's lifecycle is itself a Claude Code Workflow** (`.claude/workflows/*.js`
+that you'd have to *run*, not just read): you **cannot** invoke it — subagents can't use the Workflow
+tool. Do **not** hand-replay a whole deterministic Workflow from prose. Stop and report
+`STATUS: BLOCKED: lifecycle is a Claude Code Workflow — run /codex-compose-setup so /codex-issue uses
+composition mode (which runs the Workflow natively)`. (If `noLand` were present the orchestrator would
+not have sent you here; reaching this means the Workflow isn't composition-ready.)
 
 Synthesize the repo's **definition of done** and its **required steps** from what you find. If the repo
 truly defines nothing beyond tests, then tests are the workflow — but only after you've checked.
 
 ## 2. Run that workflow as-is — every internal step
 
-Execute the repo's process faithfully, however heavy it is. That can include:
-- Dispatching repo-defined subagents via the **Task** tool (e.g. its own `developer`, then its
-  `code-reviewer`, then a QA/tester agent) and looping per the repo's rules.
-- Running repo-defined review/test/lint/browser-test commands — **even multiple sequential reviews**
-  (e.g. an internal Codex code-review step) — until the repo's own gates pass.
-- Applying the repo's review discipline to findings (e.g. a `receiving-code-review` skill) and fixing
-  only genuine issues.
+Execute the repo's process faithfully, however heavy it is — but mind one **hard platform limit: you
+are yourself a subagent, and a subagent cannot dispatch another subagent.** The Task tool cannot spawn
+the repo's `developer`/`code-reviewer`/QA agents from here. So run each required gate the best way you
+actually can, and be honest about which way that was:
+- **Repo commands/scripts you can run directly** — tests, lint, a Bash code-review/QA command, an
+  internal `codex … review` step: run them via Bash. These execute **natively** — including **multiple
+  sequential reviews** — until the repo's own gates pass.
+- **A gate that is a repo-defined SUBAGENT** (e.g. a `.claude/agents/code-reviewer.md`): you can NOT
+  Task-dispatch it, so **replay it inline** — read that agent's `.md` (its criteria / checklist /
+  output contract) and apply it yourself to the changed files, looping fix↔review as the repo would
+  until it is clean. This is a faithful **replay**, not a native run — label it as such in your report.
+- **A gate that must EXECUTE LIVE and you cannot run** — a live QA/integration agent needing
+  credentials/tokens/network you don't have: that is **BLOCKED**, never a paper replay. Fail closed.
+- Apply the repo's review discipline to findings (e.g. a `receiving-code-review` skill); fix only
+  genuine issues.
 
 Keep going until the repo's own definition-of-done is met (its tests/reviews/QA all green), not just
 until your edit compiles.
@@ -92,13 +108,20 @@ must be exactly one of: `STATUS: DONE` (every required gate ran and passed) **or
 ```
 STATUS: DONE
 ### Summary
-<2–5 sentences: what you changed AND which repo workflow you ran — name the actual steps/agents/reviews you executed (e.g. "ran the repo's developer→code-reviewer loop + its Codex code-review; all green").>
+<2–5 sentences: what you changed AND which repo workflow you ran.>
+### Gates
+<one line per required gate, each labeled with HOW you ran it:
+  - "natively run" — a command/script you executed via Bash (tests, lint, a Bash review/QA step), OR
+  - "replayed inline" — a repo-defined SUBAGENT gate you could not Task-dispatch, so you applied its
+    criteria yourself (state which agent .md you replayed).
+e.g. "tests: natively run (pytest, green); code-reviewer: replayed inline from .claude/agents/code-reviewer.md (clean)">
 ### Changed files
 <output of `git diff --stat $START..HEAD` — never a bare `git diff --stat`, which is empty after committing>
 ### Paths
 <output of `git diff --name-only $START..HEAD` — the changed paths for the architect to inspect on disk>
 ```
 
-Be faithful: the Summary must state which internal workflow you actually ran, so the orchestrator (and
-the human reading the report) can confirm the repo's real lifecycle executed — not a thinned-down
-substitute.
+Be faithful: the **Gates** section must state, per gate, whether it was **natively run** or **replayed
+inline**, so the orchestrator (and the human reading the report) can see the repo's real lifecycle
+executed — and can tell where fidelity was reduced by an inline replay rather than getting a
+thinned-down substitute presented as the real thing.
