@@ -37,6 +37,8 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs doctor
 | `scripts/review-round.mjs` | One-shot ephemeral-daemon review used by the `codex-reviewer` agent. |
 | **workflow** `workflows/codex-wrap.js` | **Workflow-mode** composition: brackets a repo's own no-land Workflow with a Codex architect plan + review, then lands. Invoked by `/codex-issue` when a composable `.claude/workflows/*.js` is detected. |
 | `scripts/plan-round.mjs` | Ephemeral Plan-mode Codex session used by the wrapper's architect-plan phase. |
+| **command** `/codex-compose-setup` | Makes a repo composition-ready: adds the `noLand` seam to its workflow (diff + approval) **in place**, or scaffolds a starter workflow if none exists. |
+| `templates/implement-issue.template.js` | Repo-agnostic starter workflow (already `noLand`-aware; discovers the repo's test command) used by `/codex-compose-setup` scaffolding. |
 
 > **On the two names:** the vendored runtime engine is the npm package `codex-drive`; the plugin
 > (the product) is `codex-claude`. The internal client name and the `~/.codex-drive/` state dir are
@@ -77,6 +79,11 @@ with `noLand: true` so its full pipeline runs with all gates intact — with the
 review, then lands. Detected via `grep -l noLand .claude/workflows/*.js`; otherwise it falls back to
 subagent mode. The contract a repo's workflow must satisfy (the `noLand` arg) and the full design are
 in [`docs/WORKFLOW-MODE.md`](docs/WORKFLOW-MODE.md).
+
+Run **`/codex-compose-setup`** to arrange the contract automatically: it adds the `noLand` seam to your
+existing workflow (shown as a diff for approval) or scaffolds a composition-ready starter if you have
+none. `noLand` is not an Anthropic-standard arg, so the repo's workflow must read it — that's what setup
+does. (Plugin install can't touch your repos; setup is per-repo.)
 
 ## CLI verb reference
 

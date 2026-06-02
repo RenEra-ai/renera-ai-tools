@@ -35,6 +35,20 @@ The plugin **detects** a composable workflow by `grep -l noLand .claude/workflow
 found, `/codex-issue` falls back to **subagent mode** (the `codex-developer` black box) and works as
 before.
 
+## Making a repo composable — `/codex-compose-setup`
+
+Run **`/codex-compose-setup`** in a repo to arrange the contract automatically instead of editing by
+hand:
+- An existing `.claude/workflows/*.js` → it adds the `noLand` seam **in place** (gate `land()` → return
+  `ready_to_land`), shown as a diff for your approval.
+- No workflow → it scaffolds a minimal, composition-ready starter from
+  `templates/implement-issue.template.js` (implement → discover-and-run the repo's tests → land,
+  already `noLand`-aware).
+
+(Plugin *install* can't do this — a plugin is global and never runs inside your repos; setup is a
+per-repo command. `noLand` is **not** an Anthropic-standard arg — the repo's workflow must read it,
+which is exactly what setup arranges.)
+
 ## What the plugin's wrapper does (`workflows/codex-wrap.js`)
 
 1. **Architect plan** — an ephemeral Codex Plan-mode session (`scripts/plan-round.mjs`) → plan text.
