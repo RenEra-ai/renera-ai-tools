@@ -21,7 +21,7 @@ const shellQuote = (s) => `'` + String(s).replace(/'/g, `'\\''`) + `'`
 
 const OPS = { type: 'object', additionalProperties: false, required: ['ok', 'detail'], properties: { ok: { type: 'boolean' }, detail: { type: 'string' } } }
 const PRE = { type: 'object', additionalProperties: false, required: ['ok', 'reason', 'issue_state', 'issue_title', 'base_sha', 'branch', 'pre_untracked'], properties: { ok: { type: 'boolean' }, reason: { type: 'string' }, issue_state: { type: 'string' }, issue_title: { type: 'string' }, base_sha: { type: 'string' }, branch: { type: 'string' }, pre_untracked: { type: 'array', items: { type: 'string' } } } }
-const VERIFY = { type: 'object', additionalProperties: false, required: ['green', 'detail'], properties: { green: { type: 'boolean' }, detail: { type: 'string' } } }
+const VERIFY = { type: 'object', additionalProperties: false, required: ['green', 'detail', 'untracked_pre_test'], properties: { green: { type: 'boolean' }, detail: { type: 'string' }, untracked_pre_test: { type: 'array', items: { type: 'string' } } } }
 
 const report = { issue: ISSUE, branch: null, base_sha: null, terminal: null }
 
@@ -43,28 +43,33 @@ if (DRY_RUN) { report.terminal = 'dry_run_ok'; log(`DRY RUN ok: would use branch
 
 phase('Implement')
 let green = false
+let implUntracked = []
 for (let attempt = 1; attempt <= 3 && !green; attempt++) {
   await agent(
-    `Implement GitHub issue #${ISSUE} ("${pf.issue_title}") in this repo. Read the full issue first: \`gh issue view ${ISSUE}\`. Follow THIS repo's conventions (its CLAUDE.md / AGENTS.md). Add or adjust the relevant tests. Do NOT commit — the pipeline commits ALL of your changes (new + modified files), so make sure every change needed for the tests to pass is written to disk.${PLAN ? `\n\nAn architect proposed this plan — follow it where sound, deviate only with a stated reason:\n${PLAN}` : ''}${attempt > 1 ? '\n\nThe previous attempt was not green — diagnose the failures and fix them minimally.' : ''}`,
+    `Implement GitHub issue #${ISSUE} ("${pf.issue_title}") in this repo. Read the full issue first: \`gh issue view ${ISSUE}\`. Follow THIS repo's conventions (its CLAUDE.md / AGENTS.md). Add or adjust the relevant tests. Do NOT commit — the pipeline commits your changes (tracked edits + the new source files you write), so write every change needed for the tests to pass to disk.${PLAN ? `\n\nAn architect proposed this plan — follow it where sound, deviate only with a stated reason:\n${PLAN}` : ''}${attempt > 1 ? '\n\nThe previous attempt was not green — diagnose the failures and fix them minimally.' : ''}`,
     { label: `dev #${ISSUE}.${attempt}`, phase: 'Implement' },
   )
   const v = await agent(
-    `READ-ONLY verification. DISCOVER this repo's test/QA command from its CLAUDE.md / AGENTS.md / README (do NOT assume any specific test runner). Run it and report: green = true only if it passed with zero failures/errors; detail = the exact command you ran + the last ~6 lines. Do NOT edit, stage, or commit.`,
+    `READ-ONLY verification. FIRST, BEFORE running anything else, capture the currently-untracked files: \`git ls-files --others --exclude-standard\` -> untracked_pre_test (one path per entry; [] if none) — this snapshots the implementation's NEW files BEFORE the test command can create artifacts. THEN DISCOVER this repo's test/QA command from its CLAUDE.md / AGENTS.md / README (do NOT assume any specific test runner), run it, and report: green = true only if it passed with zero failures/errors; detail = the exact command you ran + the last ~6 lines. Do NOT edit, stage, or commit.`,
     { label: `verify #${ISSUE}.${attempt}`, phase: 'Implement', schema: VERIFY },
   )
   green = !!(v && v.green)
-  if (!green) report.terminal = 'tests_not_green'
+  if (green) implUntracked = (v && v.untracked_pre_test) || []
+  else report.terminal = 'tests_not_green'
 }
 if (!green) { log(`FAIL: tests_never_green`); return report }
 
 phase('Land')
 const safeTitle = String(pf.issue_title || '').replace(/["`$\\]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60)
-// Stage the WHOLE implementation (git add -A is complete — no under-staging), then UNstage anything
-// that was already untracked at preflight, so pre-existing/unrelated work is never swept into the PR.
-const preList = (pf.pre_untracked || []).map(shellQuote).join(' ')
-const unstagePre = preList ? `git reset -q -- ${preList}\n` : ''
+// Stage exactly the implementation: all tracked edits (git add -u) + the new SOURCE files the developer
+// wrote (captured BEFORE the test command ran, minus anything already untracked at preflight). This is
+// complete (no under-staging) yet never sweeps pre-existing untracked work OR test artifacts (which are
+// created during the test run, after the untracked_pre_test snapshot).
+const preSet = new Set(pf.pre_untracked || [])
+const newFiles = implUntracked.filter((p) => !preSet.has(p))
+const addNew = newFiles.length ? `git add -- ${newFiles.map(shellQuote).join(' ')}\n` : ''
 const commit = await agent(
-  `Commit the implementation. Run EXACTLY this, then report ok/detail (ok=true only if every command exited 0):\n\`\`\`bash\nset -e\ngit add -A\n${unstagePre}git commit -m "#${ISSUE}: ${safeTitle}"\ntest -z "$(git status --porcelain --untracked-files=no)"  # all tracked changes are committed (completeness)\ngit log --oneline -1\n\`\`\`\nIf nothing is staged the commit exits non-zero — report ok=false.`,
+  `Commit ONLY the implementation (tracked edits + the new source files staged below) — NOT test artifacts or pre-existing untracked files. Run EXACTLY this, then report ok/detail (ok=true only if every command exited 0):\n\`\`\`bash\nset -e\ngit add -u\n${addNew}git commit -m "#${ISSUE}: ${safeTitle}"\ntest -z "$(git status --porcelain --untracked-files=no)"  # all tracked changes are committed (completeness)\ngit log --oneline -1\n\`\`\`\nIf nothing is staged the commit exits non-zero — report ok=false.`,
   { label: `commit #${ISSUE}`, phase: 'Land', schema: OPS },
 )
 if (!commit || !commit.ok) { report.terminal = 'commit_failed'; report.detail = commit && commit.detail; return report }
