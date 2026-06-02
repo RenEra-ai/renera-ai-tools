@@ -160,7 +160,8 @@ Requires the `gh` CLI (authenticated) for issue intake + push/PR. Unlike the man
 
 Pieces:
 - **codex-orchestrator** (agent) — drives the *persistent* daemon; owns plan → approval → review loop →
-  finish (push + PR; the issue closes on merge via `Closes #N` — no explicit close).
+  finish (push + PR; `Closes #N` closes the issue on merge **into the default branch** — no explicit
+  close; a non-default base like `dev` is flagged for manual close).
 - **codex-developer** (agent) — the repo-agnostic **black box**: it **discovers and runs THIS repo's
   own full internal workflow wherever it's defined** (`CLAUDE.md`, `AGENTS.md`, or `.claude/` process
   docs / commands / agents) — however many internal reviews / QA agents / tests it has — then reports
@@ -175,8 +176,8 @@ Pieces:
 
 Flow: intake (`gh issue view`) → `plan` (architect, Plan mode) → approve → dispatch developer (black box)
 → `send` a review of impl-vs-plan **on the same thread** (so the architect remembers the plan) →
-fix→re-review scoped to the fix delta until clean → `git push` + `gh pr create` (`Closes #N` — the issue
-closes on merge) → `stop`. The codex↔claude **messaging handoff** is just the verbs: `read` carries the
+fix→re-review scoped to the fix delta until clean → `git push` + `gh pr create` (`Closes #N` — closes the
+issue when merged into the default branch) → `stop`. The codex↔claude **messaging handoff** is just the verbs: `read` carries the
 plan/review out of Codex; `send` points Codex at the developer's changed files on disk (never paste big
 diffs — ARG_MAX).
 

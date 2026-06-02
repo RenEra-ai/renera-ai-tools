@@ -141,11 +141,11 @@ on merge via `Closes #N` — the loop never closes it directly).
 
 ### 7. Finish — integrate (skip entirely if `--dry-run`)
 - Ensure everything is committed (the developer commits each round).
-- Resolve the base **branch name** — `gh pr create --base` wants a bare branch name, never a
-  remote-tracking ref: `--base` if given; else `dev` if `origin/dev` exists
-  (`git show-ref --verify --quiet refs/remotes/origin/dev`); else the repo default
-  (`gh repo view --json defaultBranchRef -q .defaultBranchRef.name`). `$BASE` must be e.g. `dev`,
-  not `origin/dev`.
+- Resolve the default branch and the base. `$DEFAULT` = `gh repo view --json defaultBranchRef -q
+  .defaultBranchRef.name`. The base **branch name** (`gh pr create --base` wants a bare name, never a
+  remote-tracking ref): `--base` if given; else `dev` if `origin/dev` exists
+  (`git show-ref --verify --quiet refs/remotes/origin/dev`); else `$DEFAULT`. `$BASE` must be e.g.
+  `dev`, not `origin/dev`. **Record whether `$BASE == $DEFAULT`** — it decides issue auto-close (below).
 - `git push -u origin <branch>`.
 - Build the PR body with **real newlines** (literal `\n` in a double-quoted string will NOT render):
   ```bash
@@ -153,10 +153,15 @@ on merge via `Closes #N` — the loop never closes it directly).
   gh pr create --base "$BASE" --head "$BRANCH" --title "<issue title or task>" --body "$BODY"
   ```
   Capture the PR URL. (For a free-text task with no issue, drop the `Closes #N` line.)
-- **Do not close the issue explicitly.** The PR body's `Closes #N` closes it automatically **on merge**;
-  closing it now — before merge — would strand the issue as wrongly-closed if the PR is later rejected.
-  Optionally post a non-terminal note: `gh issue comment <#> --body "PR <pr-url> opened, pending merge."`
-  **Never auto-merge** — a human merges, and that merge closes the issue.
+- **Do not close the issue explicitly** (closing before merge would strand it as wrongly-closed if the
+  PR is rejected). How it closes depends on the base — a GitHub rule: `Closes #N` only fires on a merge
+  into the **default branch**.
+  - **`$BASE == $DEFAULT`** → `Closes #N` auto-closes the issue **on merge**. Leave it; the merge handles it.
+  - **`$BASE != $DEFAULT`** (e.g. `dev`) → `Closes #N` will **not** fire on that merge, so the issue will
+    **not** auto-close. Leave it OPEN and **flag in the final report** that issue #N needs a manual close
+    (or it closes once the change reaches `$DEFAULT`).
+  Optionally post `gh issue comment <#> --body "PR <pr-url> opened against <base>; pending merge."`
+  **Never auto-merge** — a human merges.
 
 ### 8. Always: stop the daemon
 - `$CDX stop` — on success and on every abort path. This is the finally step; nothing after `start`
@@ -201,6 +206,7 @@ whose `read` message carries no plan/verdict substance — judge that from the c
 - **Architect Q&A** you auto-answered, with rationale.
 - **Rounds**: how many review rounds, the final verdict, and whether thread continuity was ever
   restarted/reconstructed.
-- **Outcome**: PR URL + issue status (issue left OPEN, closes on merge), or — if you stopped early —
-  exactly why and the current state (branch, commits, outstanding findings). Be honest about anything
-  you couldn't get clean.
+- **Outcome**: PR URL + issue status — the issue is left OPEN; state whether it will **auto-close**
+  (`$BASE == $DEFAULT` → yes, on merge via `Closes #N`) or **needs a manual close** (`$BASE != $DEFAULT`,
+  e.g. `dev` → `Closes #N` won't fire). Or — if you stopped early — exactly why and the current state
+  (branch, commits, outstanding findings). Be honest about anything you couldn't get clean.
