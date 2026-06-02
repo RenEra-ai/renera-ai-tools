@@ -35,6 +35,8 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs doctor
 | **agent** `codex-developer` | The repo-agnostic **black box**: **discovers and runs THIS repo's own full internal workflow** wherever defined (`CLAUDE.md`/`AGENTS.md`/`.claude/` docs, commands, agents) — however many internal reviews/QA/tests — then reports `DONE` + a diff. Stops before landing. |
 | **runtime** `bin/` + `lib/` | The `codex-drive` CLI + session daemon (JSON-RPC client, turn state machine, question/approval parking). |
 | `scripts/review-round.mjs` | One-shot ephemeral-daemon review used by the `codex-reviewer` agent. |
+| **workflow** `workflows/codex-wrap.js` | **Workflow-mode** composition: brackets a repo's own no-land Workflow with a Codex architect plan + review, then lands. Invoked by `/codex-issue` when a composable `.claude/workflows/*.js` is detected. |
+| `scripts/plan-round.mjs` | Ephemeral Plan-mode Codex session used by the wrapper's architect-plan phase. |
 
 > **On the two names:** the vendored runtime engine is the npm package `codex-drive`; the plugin
 > (the product) is `codex-claude`. The internal client name and the `~/.codex-drive/` state dir are
@@ -65,6 +67,16 @@ stops before integration; the loop halts after a max round count (default 6) rat
 un-clean change. This deliberately overrides the human-supervised model of `/codex-architect` +
 `/codex-review` — use those when you want to drive each step yourself. Requires `gh` (GitHub CLI)
 authenticated for the integration step.
+
+### Workflow-mode repos
+
+If a repo's dev lifecycle is itself a Claude Code **Workflow** (`.claude/workflows/*.js`), a subagent
+can't run it. For those repos `/codex-issue` **composes** (after approval): a wrapper workflow
+(`workflows/codex-wrap.js`, run from the main thread) brackets the repo's **own** workflow — called
+with `noLand: true` so its full pipeline runs with all gates intact — with the Codex architect plan +
+review, then lands. Detected via `grep -l noLand .claude/workflows/*.js`; otherwise it falls back to
+subagent mode. The contract a repo's workflow must satisfy (the `noLand` arg) and the full design are
+in [`docs/WORKFLOW-MODE.md`](docs/WORKFLOW-MODE.md).
 
 ## CLI verb reference
 
