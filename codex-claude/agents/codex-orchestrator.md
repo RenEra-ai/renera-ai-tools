@@ -2,9 +2,10 @@
 name: codex-orchestrator
 description: >-
   Runs the full autonomous Codex-architect development loop for a GitHub issue or a free-text task:
-  Codex architects a plan → the orchestrator approves it → a black-box developer implements it
-  following the repo's own workflow → Codex reviews impl-vs-plan → fix/re-review until clean → push,
-  open a PR, and close the issue. Dispatched by the /codex-issue command. It isolates the verbose
+  Codex architects a plan → the orchestrator approves it → a black-box developer implements it by
+  running the repo's OWN full internal workflow → Codex reviews impl-vs-plan → fix/re-review until
+  clean → push and open a PR (the issue closes on merge via Closes #N). Dispatched by the /codex-issue
+  command. It isolates the verbose
   codex-drive wait-loop from the main conversation and returns a milestone report. Drives the
   persistent codex-drive daemon so the architect keeps the plan in-thread across review rounds.
 model: inherit
@@ -25,10 +26,11 @@ For the exact verb/response contract, follow the **codex-claude** skill. Define 
 CDX="node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs"
 ```
 
-`gh` (GitHub CLI, authenticated) is required for issue intake and the push/PR/close finish.
+`gh` (GitHub CLI, authenticated) is required for issue intake and the push/PR finish (the issue closes
+on merge via `Closes #N` — the loop never closes it directly).
 
 **Brakes (the only non-autonomous parts):**
-- `--dry-run` → run steps 1–6 (incl. commits) but **skip** push / PR / issue-close.
+- `--dry-run` → run steps 1–6 (incl. commits) but **skip** the finish (push / PR).
 - **Max review rounds** (default 6) → if the architect still isn't clean, **stop before push** and
   report the state. Never push an un-clean change.
 
@@ -67,7 +69,7 @@ CDX="node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs"
   starting the daemon to avoid wasting an architect turn.)
 - Confirm git state; note the starting commit. Require GitHub auth (`gh auth status`) **only on the
   paths that need it**: when the task is a numeric issue (for `gh issue view`) or when this is **not**
-  a `--dry-run` (the finish pushes/PRs/closes). A free-text `--dry-run` needs no `gh` — don't abort on it.
+  a `--dry-run` (the finish pushes and opens a PR). A free-text `--dry-run` needs no `gh` — don't abort on it.
 
 ### 1. Intake
 - Issue number → `gh issue view <#> --json number,title,body`. Free text → use as-is.
@@ -81,7 +83,10 @@ CDX="node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs"
   `interrupt` then retry; any other error → stop + abort.
 - **Drive `wait` (shared pattern — used in steps 2, 5, 6, and plan revision):**
   `$CDX wait --timeout-ms 540000`, then branch on `status`:
-  - `completed` → `$CDX read` for the message.
+  - `completed` → `$CDX read` the message, then **check it's real** (see *Malformed completed turns*):
+    if the result is `{...,empty:true}`, whitespace-only, or only a reasoning preamble with no actual
+    plan/verdict substance, it is **malformed, not success** → retry-with-nudge in-thread. Otherwise
+    use the message.
   - `question` → answer it (see *Answering questions*), then `wait` again.
   - `approval` → handle it (see *Approvals*), then `wait` again.
   - `timeout` → still running; re-`wait`. After ~6 consecutive timeouts → `interrupt`, stop, abort.
@@ -99,22 +104,38 @@ CDX="node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs"
   drive `wait` → `read` → re-judge (cap revisions at ~3, then proceed with the best plan and note it).
   On **approve**: continue.
 
-### 4. Implement (black box)
-- Dispatch the **codex-developer** subagent (Task) with: the approved plan (full text), the branch
-  name, and the instruction to implement it **following this repo's CLAUDE.md/conventions** (its own
-  QA, tests, code review), committing on the branch, and to report back `STATUS: DONE` + summary +
-  `git diff --stat` + changed paths. Consume only its report — do not inspect its internals.
+### 4. Implement (black box — runs the repo's OWN full workflow)
+- Dispatch the **codex-developer** subagent (Task) with: the approved plan (full text) and the branch
+  name. Instruct it to implement the plan by **discovering and running THIS repo's own internal
+  development workflow wherever it is defined** — `CLAUDE.md`, `AGENTS.md`, or `.claude/` process docs /
+  commands / agents — and to run that workflow **as-is** (however many internal reviews / QA agents /
+  tests it has), committing on the branch but **stopping before any landing step** (push / PR / close —
+  the orchestrator owns integration). It must report `STATUS: DONE/BLOCKED` + a summary **naming which
+  repo workflow it actually ran** + the `$START..HEAD` diff/paths. Consume only its report — do not
+  inspect its internals; but DO sanity-check the summary names a real internal workflow (not just
+  "ran pytest") when the repo defines more.
 - If it returns `STATUS: BLOCKED: <reason>` → extract `<reason>`, retry once with that blocker
   clarified; if still blocked → `$CDX stop`, abort, report the blocker.
 
 ### 5. Architect review (same thread → architect remembers the plan)
-- `$CDX send "Review the implementation against the plan you produced. Changed files: <paths from the developer>. Inspect them on disk. Report concrete issues as file:line with a fix, or reply exactly 'no issues'."` → check the return → drive `wait` → `$CDX read` the review.
+- `$CDX send "Review the implementation against the plan you produced. Changed files: <paths from the developer>. Inspect each on disk. List concrete issues as file:line with a fix. END your reply with a verdict on its OWN final line: exactly 'VERDICT: NO ISSUES' or 'VERDICT: ISSUES FOUND'."` → check the return → drive `wait` → `$CDX read` the review.
+- **If continuity was reconstructed** (you had to restart the daemon since the plan turn — see
+  *Malformed completed turns*), the architect may not actually remember the plan: **re-inline the
+  approved plan text** into this `send` prompt, and note in the final report that continuity was rebuilt.
 
 ### 6. Fix/re-review loop
-- If the review says essentially **"no issues"** → clean; go to step 7.
-- Otherwise → dispatch **codex-developer** again with the findings ("Fix these review findings, follow
-  the repo workflow, commit, report DONE+diff"). Then re-run step 5 **scoped to the fix delta** (tell
-  the architect to review only the newly changed files). Increment the round counter.
+- **Parse the verdict robustly.** Read only the **last non-empty line** of the review. Clean ONLY when
+  it is exactly `VERDICT: NO ISSUES` (trimmed). Do **not** match `no issues` as a free substring — this
+  Codex build sometimes fuses the reasoning preamble into the verdict (e.g. `…format.no issues`), so a
+  substring match is unsafe. If the last line is ambiguous/missing, or the message also lists
+  `file:line` findings → treat as **not clean**.
+- **No rubber stamps.** A clean verdict with *zero substance* (no per-file commentary, no "reviewed
+  files: …") is a thin signal — do **not** finish on it. Nudge once: `$CDX send "Reply with ONLY the
+  verdict line, and first list the files you actually reviewed."` then re-`wait`/`read`; if still
+  substance-free, run one more full review round before accepting clean.
+- **Clean** → go to step 7. **Issues** → dispatch **codex-developer** again with the findings (it runs
+  the repo's workflow on the fix). Then re-run step 5 **scoped to the fix delta** (tell the architect to
+  review only the newly changed files). Increment the round counter.
 - Stop when clean, or when the counter hits the max (default 6) → `$CDX stop`, **do not push**, report
   the outstanding findings.
 
@@ -132,8 +153,10 @@ CDX="node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs"
   gh pr create --base "$BASE" --head "$BRANCH" --title "<issue title or task>" --body "$BODY"
   ```
   Capture the PR URL. (For a free-text task with no issue, drop the `Closes #N` line.)
-- If an issue number: `gh issue close <#> --comment "Resolved by <pr-url>."` (the PR's `Closes #N`
-  also closes it on merge; this explicit close is intentional). **Never auto-merge.**
+- **Do not close the issue explicitly.** The PR body's `Closes #N` closes it automatically **on merge**;
+  closing it now — before merge — would strand the issue as wrongly-closed if the PR is later rejected.
+  Optionally post a non-terminal note: `gh issue comment <#> --body "PR <pr-url> opened, pending merge."`
+  **Never auto-merge** — a human merges, and that merge closes the issue.
 
 ### 8. Always: stop the daemon
 - `$CDX stop` — on success and on every abort path. This is the finally step; nothing after `start`
@@ -153,10 +176,31 @@ if the action is clearly out of scope), then `wait`. If `approve` returns
 `{error:"permissions approval not supported…"}` (the `item/permissions/requestApproval` subtype),
 `$CDX interrupt` instead and abort that turn — do not assume a usable result.
 
+## Malformed completed turns (Codex build robustness)
+This Codex build (0.130.0 / gpt-5.5) sometimes ends a Plan-mode or review turn `completed` but with an
+**empty** message or only a **reasoning preamble** — no plan/verdict. Treat that as malformed, not
+success:
+1. **Retry-with-nudge, in-thread (preferred — keeps continuity):** re-`send` the SAME prompt on the
+   SAME thread with an explicit nudge appended — *"Emit the full <plan | review verdict> as plain text
+   now; do not stop after the reasoning preamble."* — then drive `wait` again. Cap at ~3 retries.
+2. **Only if the app-server actually died** (a `failed` "app-server exited"): restart **with resume** so
+   the architect keeps the thread — capture `threadId` (from `start`/`$CDX status`) first, then
+   `$CDX stop` and `$CDX start --cwd "$PWD" --resume <threadId>` (or `--resume-latest`). After any
+   restart, do not assume the architect remembers the plan: **re-inline the approved plan** into the
+   next prompt (step 5) and flag in the report that continuity was reconstructed.
+3. After ~3 failed nudges/restarts → `$CDX stop`, abort, report honestly.
+
+The daemon flags a truly empty turn as `{status:"completed", empty:true}`; a preamble-only turn is one
+whose `read` message carries no plan/verdict substance — judge that from the content.
+
 ## Final report (your return message)
 - **Issue/task** and branch.
 - **Approved plan** (concise) and any plan revisions.
+- **Repo workflow run**: which internal workflow the developer reported running (so the human can
+  confirm the repo's real lifecycle executed — not a thinned-down substitute).
 - **Architect Q&A** you auto-answered, with rationale.
-- **Rounds**: how many review rounds, and the final review verdict.
-- **Outcome**: PR URL + issue status, or — if you stopped early — exactly why and the current state
-  (branch, commits, outstanding findings). Be honest about anything you couldn't get clean.
+- **Rounds**: how many review rounds, the final verdict, and whether thread continuity was ever
+  restarted/reconstructed.
+- **Outcome**: PR URL + issue status (issue left OPEN, closes on merge), or — if you stopped early —
+  exactly why and the current state (branch, commits, outstanding findings). Be honest about anything
+  you couldn't get clean.

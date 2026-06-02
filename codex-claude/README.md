@@ -29,10 +29,10 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs doctor
 | **skill** `codex-claude` | The brain: daemon lifecycle, the full verb contract, the architect→implement→review loop, and human-supervised question/approval handling. Auto-activates when you ask Claude to use Codex as an architect/reviewer. |
 | **command** `/codex-architect <task>` | Runs a Plan-mode architect turn **in the main thread**, surfacing Codex's clarifying questions to you. You implement the resulting plan. |
 | **command** `/codex-review [scope]` | Dispatches the `codex-reviewer` subagent for an independent review of your changes (defaults to the current diff). |
-| **command** `/codex-issue <#\|task>` | **Fully autonomous** end-to-end loop: architect → approve → implement → review-until-clean → push + PR + close issue. Add `--dry-run` to stop before integration. |
+| **command** `/codex-issue <#\|task>` | **Fully autonomous** end-to-end loop: architect → approve → implement (via the repo's own workflow) → review-until-clean → push + PR (issue closes on merge). Add `--dry-run` to stop before integration. |
 | **agent** `codex-reviewer` | Autonomous, isolated read-only review on its own **ephemeral** Codex session; returns a clean findings report. |
-| **agent** `codex-orchestrator` | Drives the full `/codex-issue` loop on the persistent daemon; owns plan approval, the review loop, and the push/PR/close finish. |
-| **agent** `codex-developer` | The repo-agnostic **black box**: implements/fixes by following THIS repo's own `CLAUDE.md`/QA/review, then reports `DONE` + a diff. |
+| **agent** `codex-orchestrator` | Drives the full `/codex-issue` loop on the persistent daemon; owns plan approval, the review loop, and the push/PR finish (the issue closes on merge). |
+| **agent** `codex-developer` | The repo-agnostic **black box**: **discovers and runs THIS repo's own full internal workflow** wherever defined (`CLAUDE.md`/`AGENTS.md`/`.claude/` docs, commands, agents) — however many internal reviews/QA/tests — then reports `DONE` + a diff. Stops before landing. |
 | **runtime** `bin/` + `lib/` | The `codex-drive` CLI + session daemon (JSON-RPC client, turn state machine, question/approval parking). |
 | `scripts/review-round.mjs` | One-shot ephemeral-daemon review used by the `codex-reviewer` agent. |
 
@@ -50,12 +50,16 @@ hands-off via the `codex-orchestrator` agent:
 2. **Architect** plans it (Plan mode); the orchestrator **auto-answers** clarifying questions and
    **auto-approves** the plan (optionally getting a second opinion from an independent plan-review
    subagent such as `plan-reviewer`, if one is configured — not shipped with this plugin).
-3. **Implement** — dispatches the `codex-developer` black box, which follows **this repo's own**
-   `CLAUDE.md`/QA/review and reports back only `DONE` + a diff.
-4. **Architect review** of impl-vs-plan on the same thread → fix → re-review until **"no issues"**.
-5. **Finish** — `git push`, `gh pr create` (`Closes #N`), `gh issue close`, then `stop` the daemon.
+3. **Implement** — dispatches the `codex-developer` black box, which **discovers and runs this repo's
+   own full internal workflow** wherever it lives (`CLAUDE.md`/`AGENTS.md`/`.claude/`), however many
+   internal reviews/QA/tests it has, **stops before landing**, and reports back `DONE` + a diff.
+4. **Architect review** of impl-vs-plan on the same thread → fix → re-review until the architect's
+   structured `VERDICT: NO ISSUES`.
+5. **Finish** — `git push`, `gh pr create` (`Closes #N`), then `stop` the daemon. The issue closes
+   **on merge** — the loop never auto-merges and never closes the issue itself (avoids stranding a
+   wrongly-closed issue if the PR is rejected).
 
-It is **fully autonomous and ends in irreversible actions** (push / PR / close). Brakes: `--dry-run`
+It is **fully autonomous and ends in irreversible actions** (push / PR). Brakes: `--dry-run`
 stops before integration; the loop halts after a max round count (default 6) rather than push an
 un-clean change. This deliberately overrides the human-supervised model of `/codex-architect` +
 `/codex-review` — use those when you want to drive each step yourself. Requires `gh` (GitHub CLI)

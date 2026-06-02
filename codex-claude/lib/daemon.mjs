@@ -77,7 +77,7 @@ export class Daemon {
       case 'wait': return this._wait();
       case 'answer': return this._answer(cmd.id, cmd.answers);
       case 'approve': return this._approve(cmd.decision);
-      case 'read': return { status: this.turn.status, message: this.turn.message };
+      case 'read': return this._completedResult();
       case 'interrupt': return this._interrupt();
       case 'status': return { threadId: this.threadId, turnStatus: this.turn.status, parked: this.turn.parked ? this.turn.parked.kind : null };
       case 'stop': return { ok: true }; // actual teardown happens in _onClient after this response
@@ -132,7 +132,16 @@ export class Daemon {
     return new Promise((resolve) => this._waiters.push(resolve));
   }
 
-  _terminalResult() { return { status: this.turn.status, message: this.turn.message }; }
+  _terminalResult() { return this._completedResult(); }
+  // Terminal/read result. Flags a `completed` turn whose final message is empty/whitespace-only as
+  // `empty:true` so the orchestrator can deterministically detect a malformed (no-content) Codex turn
+  // instead of treating it as a valid-but-empty plan/review.
+  _completedResult() {
+    const res = { status: this.turn.status, message: this.turn.message };
+    const blank = !(this.turn.message && String(this.turn.message).trim());
+    if (this.turn.status === 'completed' && blank) res.empty = true;
+    return res;
+  }
   _parkedResult() {
     const p = this.turn.parked;
     if (p.kind === 'question') return { status: 'question', question: p.params };
@@ -197,6 +206,11 @@ export class Daemon {
     return this.turn.id && turnId && turnId !== this.turn.id;
   }
 
+  // Final assistant text is assembled ONLY from item/agentMessage/delta chunks (this.turn.buffer).
+  // item/completed (NOTIFY.ITEM_COMPLETED) is intentionally NOT consumed: a turn that completes with no
+  // deltas yields an empty buffer, which _completedResult flags as empty:true (the orchestrator then
+  // retries). If a future Codex build delivers the final message ONLY via item/completed, add a branch
+  // here to capture it as an authoritative source.
   _onNotification(method, params) {
     if (method === NOTIFY.TURN_STARTED) {
       // Adopt the id of the turn we just started (only while running and not yet identified).
