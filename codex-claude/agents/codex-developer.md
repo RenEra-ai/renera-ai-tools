@@ -31,11 +31,11 @@ just "run the tests."** Look in all of these (use Glob/Read; read what exists):
   process.
 - `.claude/agents/*.md` — repo-defined subagents (e.g. a `developer`, `code-reviewer`, `qa`/tester
   agent) that the process expects you to use.
-- `.claude/workflows/*.js` — a deterministic Claude Code **Workflow** that IS the repo's lifecycle.
+- `.claude/workflows/*.js` / `*.mjs` — a deterministic Claude Code **Workflow** that IS the repo's lifecycle.
 - `.claude/settings.json` hooks and `README.md`/`CONTRIBUTING.md` for required checks.
 
 **Escape hatch — if the repo's lifecycle is itself a Claude Code Workflow** (`.claude/workflows/*.js`
-that you'd have to *run*, not just read): you **cannot** invoke it — subagents can't use the Workflow
+or `*.mjs` that you'd have to *run*, not just read): you **cannot** invoke it — subagents can't use the Workflow
 tool. Do **not** hand-replay a whole deterministic Workflow from prose. Stop and report
 `STATUS: BLOCKED: lifecycle is a Claude Code Workflow — run /codex-compose-setup so /codex-issue uses
 composition mode (which runs the Workflow natively)`. (If `noLand` were present the orchestrator would

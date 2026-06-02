@@ -56,7 +56,7 @@ Open the matched file and statically confirm the composition contract — report
 
 ```bash
 DEFAULT=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null)
-git ls-remote --heads origin dev >/dev/null 2>&1 && echo "origin/dev exists" || echo "no origin/dev"
+git ls-remote --heads origin dev | grep -q . && echo "origin/dev exists" || echo "no origin/dev"
 ```
 
 The loop resolves BASE as `dev` if `origin/dev` exists, else `$DEFAULT`. Report the resolved BASE and
