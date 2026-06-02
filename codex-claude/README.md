@@ -55,9 +55,10 @@ hands-off via the `codex-orchestrator` agent:
    internal reviews/QA/tests it has, **stops before landing**, and reports back `DONE` + a diff.
 4. **Architect review** of impl-vs-plan on the same thread → fix → re-review until the architect's
    structured `VERDICT: NO ISSUES`.
-5. **Finish** — `git push`, `gh pr create` (`Closes #N`), then `stop` the daemon. The issue closes
-   **on merge** — the loop never auto-merges and never closes the issue itself (avoids stranding a
-   wrongly-closed issue if the PR is rejected).
+5. **Finish** — `git push`, `gh pr create` (`Closes #N`), then `stop` the daemon. The loop never
+   auto-merges and never closes the issue itself (avoids stranding a wrongly-closed issue). `Closes #N`
+   auto-closes the issue only when the PR merges into the **default branch**; for a non-default base
+   (e.g. `dev`) the orchestrator flags that the issue needs a manual close.
 
 It is **fully autonomous and ends in irreversible actions** (push / PR). Brakes: `--dry-run`
 stops before integration; the loop halts after a max round count (default 6) rather than push an

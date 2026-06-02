@@ -16,7 +16,8 @@ Run the fully automated Codex-architect loop for:
 > $ARGUMENTS
 
 This is **autonomous and ends in irreversible actions** (git push and PR creation) unless `--dry-run`
-is passed. The issue is **not** closed directly — the PR's `Closes #N` closes it on merge. Proceed:
+is passed. The issue is **not** closed directly — the PR's `Closes #N` closes it when merged into the
+default branch (for a non-default base it stays open; the orchestrator flags it). Proceed:
 
 1. Parse `$ARGUMENTS`: the leading token/phrase is the GitHub issue number (if numeric) or the
    free-text task; honor any `--dry-run` and `--base <branch>` flags.
