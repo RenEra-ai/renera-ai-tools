@@ -35,8 +35,14 @@ while ((res.status === 'question' || res.status === 'approval') && guard++ < 20)
   res = await sendCommand(socketPath, { cmd: 'wait' });
 }
 
-console.log('STATUS: ' + res.status);
+// Deterministic verdict: the LAST standalone "VERDICT: NO ISSUES|ISSUES FOUND" line, else UNCLEAR.
+const msg = res.message || '';
+const vline = msg.split('\n').map((l) => l.trim()).filter(Boolean).reverse()
+  .find((l) => /^VERDICT:\s*(NO ISSUES|ISSUES FOUND)$/i.test(l));
+const parsed = vline ? vline.replace(/^VERDICT:\s*/i, '').toUpperCase() : 'UNCLEAR';
+console.log('STATUS: ' + res.status + (res.empty ? ' (empty)' : ''));
+console.log('PARSED_VERDICT: ' + parsed);
 console.log('=== REVIEW ===');
-console.log(res.message || '(empty)');
+console.log(msg || '(empty)');
 await daemon.stop();
 process.exit(0);

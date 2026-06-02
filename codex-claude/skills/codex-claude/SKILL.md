@@ -1,6 +1,6 @@
 ---
 name: codex-claude
-version: 1.2.0
+version: 1.3.0
 description: >-
   Use Codex (GPT-5.x) as a second-opinion architect and reviewer during Claude Code
   development, without GUI automation. This skill drives a headless `codex app-server`
@@ -188,6 +188,14 @@ ends `completed` but empty/preamble-only (a known gpt-5.5 quirk; the daemon flag
 verdicts use a structured last-line `VERDICT: …` to avoid fragile substring matching. This orchestrated path
 deliberately **overrides** the human-supervised default — use the manual `/codex-architect` +
 `/codex-review` flow when you want to see and decide each step yourself.
+
+**Workflow-mode repos.** If a repo's dev lifecycle is itself a Claude Code Workflow
+(`.claude/workflows/*.js`), a subagent can't run it — so for those repos `/codex-issue` **composes**
+instead of wrapping from outside: the command (main thread) runs a wrapper workflow
+(`workflows/codex-wrap.js`) that brackets the repo's **own** workflow (called with `noLand:true`, all
+its gates intact) with the architect plan + review, then lands. Detected by
+`grep -l noLand .claude/workflows/*.js`; falls back to the subagent path above when no composable
+workflow is present. Contract + details: `${CLAUDE_PLUGIN_ROOT}/docs/WORKFLOW-MODE.md`.
 
 ## Verb reference
 
