@@ -1,6 +1,6 @@
 ---
 name: codex-claude
-version: 1.0.0
+version: 1.2.0
 description: >-
   Use Codex (GPT-5.x) as a second-opinion architect and reviewer during Claude Code
   development, without GUI automation. This skill drives a headless `codex app-server`
@@ -122,14 +122,14 @@ Codex does not touch the code.
 ### 4. Review turn (read-only)
 
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs send "Review the implementation in <files>. Report concrete issues with file:line, or reply exactly 'no issues'."
+node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs send "Review the implementation in <files>. List concrete issues with file:line. END with a verdict on its own final line: exactly 'VERDICT: NO ISSUES' or 'VERDICT: ISSUES FOUND'."
 node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait
 node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs read
 ```
 
-If the review lists issues → fix them → `send` another review → `wait`/`read`. Repeat until the
-review says it's clean. (For a hands-off review that keeps this loop out of your context, dispatch
-the `codex-reviewer` subagent instead — see below.)
+If the last line isn't `VERDICT: NO ISSUES` → fix the listed issues → `send` another review →
+`wait`/`read`. Repeat until clean. (For a hands-off review that keeps this loop out of your context,
+dispatch the `codex-reviewer` subagent instead — see below.)
 
 ### 5. Stop
 
@@ -154,16 +154,20 @@ Never silently guess your way through a parked question — surfacing it is the 
 
 For a hands-off run, **`/codex-issue <#|task>`** drives the entire architect→implement→review→ship loop
 via the **codex-orchestrator** agent — no human in the loop except `--dry-run` and a max-rounds guard.
-Requires the `gh` CLI (authenticated) for issue intake + push/PR/close. Unlike the manual loop above
+Requires the `gh` CLI (authenticated) for issue intake + push/PR. Unlike the manual loop above
 (human-supervised), the orchestrator **auto-answers** the architect's clarifying questions and
 **auto-approves** the plan, then integrates the result.
 
 Pieces:
 - **codex-orchestrator** (agent) — drives the *persistent* daemon; owns plan → approval → review loop →
-  finish (push + PR + close issue).
-- **codex-developer** (agent) — the repo-agnostic **black box**: implements/fixes by following THIS
-  repo's own `CLAUDE.md`/QA/review, then reports `STATUS: DONE` + a diff. The orchestrator never looks
-  inside; it only consumes that report.
+  finish (push + PR; the issue closes on merge via `Closes #N` — no explicit close).
+- **codex-developer** (agent) — the repo-agnostic **black box**: it **discovers and runs THIS repo's
+  own full internal workflow wherever it's defined** (`CLAUDE.md`, `AGENTS.md`, or `.claude/` process
+  docs / commands / agents) — however many internal reviews / QA agents / tests it has — then reports
+  `STATUS: DONE/BLOCKED` + a diff. It **stops before landing** (push/PR are the orchestrator's job).
+  The orchestrator never looks inside; it only consumes that report. *(The plugin only adds the
+  architect plan at the front and the architect review→fix loop at the back — it wraps, never replaces,
+  the repo's lifecycle.)*
 - *(optional)* an independent **plan-review subagent** (e.g. an agent named `plan-reviewer`, if one is
   configured in your environment) — a second-opinion approve/adjust verdict on the architect's plan;
   the orchestrator falls back to judging the plan itself when none is available. Not shipped with this
@@ -171,13 +175,16 @@ Pieces:
 
 Flow: intake (`gh issue view`) → `plan` (architect, Plan mode) → approve → dispatch developer (black box)
 → `send` a review of impl-vs-plan **on the same thread** (so the architect remembers the plan) →
-fix→re-review scoped to the fix delta until "no issues" → `git push` + `gh pr create` (`Closes #N`) +
-`gh issue close` → `stop`. The codex↔claude **messaging handoff** is just the verbs: `read` carries the
+fix→re-review scoped to the fix delta until clean → `git push` + `gh pr create` (`Closes #N` — the issue
+closes on merge) → `stop`. The codex↔claude **messaging handoff** is just the verbs: `read` carries the
 plan/review out of Codex; `send` points Codex at the developer's changed files on disk (never paste big
 diffs — ARG_MAX).
 
-Brakes: `--dry-run` stops before push/PR/close; the loop halts after the max rounds (default 6) rather
-than push an un-clean change; the daemon is always `stop`ped, even on abort. This orchestrated path
+Brakes: `--dry-run` stops before push/PR; the loop halts after the max rounds (default 6) rather
+than push an un-clean change; the daemon is always `stop`ped, even on abort. **Robustness:** a turn that
+ends `completed` but empty/preamble-only (a known gpt-5.5 quirk; the daemon flags it
+`{status:"completed", empty:true}`) is retried in-thread with a nudge — never accepted as success; review
+verdicts use a structured last-line `VERDICT: …` to avoid fragile substring matching. This orchestrated path
 deliberately **overrides** the human-supervised default — use the manual `/codex-architect` +
 `/codex-review` flow when you want to see and decide each step yourself.
 
@@ -189,10 +196,10 @@ deliberately **overrides** the human-supervised default — use the manual `/cod
 | `start` | `[--cwd <path>] [--model <m>] [--resume <uuid> \| --resume-latest]` | `{ ok, threadId, socket, pid }` |
 | `plan` | `"<prompt>" [--effort <e>] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"no_model_for_mode"}` |
 | `send` | `"<prompt>" [--effort <e>] [--mode default] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"no_model_for_mode"}` (only with `--mode`) |
-| `wait` | `[--timeout-ms <N>]` | `{status:"completed",message}` · `{status:"question",question}` · `{status:"approval",request}` · `{status:"interrupted"\|"failed",message}` · `{status:"unsupported",request}` · `{status:"timeout"}` (exit 2) |
+| `wait` | `[--timeout-ms <N>]` | `{status:"completed",message[,empty:true]}` · `{status:"question",question}` · `{status:"approval",request}` · `{status:"interrupted"\|"failed",message}` · `{status:"unsupported",request}` · `{status:"timeout"}` (exit 2) |
 | `answer` | `--id <qid> (--option <n> \| --text "<s>")` | `{ ok }` · `{error:"no_pending_question"}` (`--option` is 1-based; one selection per call — answering resumes the turn) |
 | `approve` | `--decision allow\|deny` | `{ ok }` · `{error:"no_pending_approval"}` |
-| `read` | — | `{ status, message }` (last assistant message) |
+| `read` | — | `{ status, message[, empty:true] }` (last assistant message; `empty:true` flags a completed turn that produced no content) |
 | `interrupt` | — | `{ ok }` · `{error:"no_active_turn"}` |
 | `status` | — | `{ threadId, turnStatus, parked }` |
 | `stop` | — | `{ ok }` (tears down daemon, socket, state) |
@@ -210,7 +217,11 @@ default` explicitly leaves Plan mode (only needed if you ever want Codex to edit
   set a default in `~/.codex/config.toml`, or re-`start` with `--model <name>` (e.g. a model from
   the user's Codex config). Plain `send` (review) does not need this.
 - **`{status:"failed"}` with "codex app-server exited"** — the child died mid-turn. Run `stop`,
-  then `start` again (optionally `--resume-latest`).
+  then `start` again with `--resume <threadId>`/`--resume-latest` to keep the architect's plan thread.
+- **`{status:"completed", empty:true}` or a preamble-only message** — a malformed Codex turn (no
+  plan/verdict; a gpt-5.5 build quirk). Don't treat it as success: re-`send` the same prompt **on the
+  same thread** with a nudge ("emit the full plan/verdict as plain text now; don't stop after the
+  reasoning preamble"); cap retries. Restart (with `--resume`) only if the app-server actually died.
 - **`{status:"unsupported"}`** — Codex raised an **MCP elicitation** (or an unknown request kind)
   this client can't answer. `interrupt` the turn and proceed without it.
 - **Permissions approval** — `item/permissions/requestApproval` comes back from `wait` as

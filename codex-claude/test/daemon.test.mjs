@@ -177,6 +177,28 @@ test('_onNotification ignores deltas/completion from a stale (non-active) turn',
   assert.equal(d.turn.message, 'OK');
 });
 
+test('an empty completed turn is flagged empty:true on wait and read', async () => {
+  const { daemon, socketPath } = await startDaemon();
+  await rpcCall(socketPath, { cmd: 'send', prompt: 'EMPTY now' });
+  const res = await rpcCall(socketPath, { cmd: 'wait' });
+  assert.equal(res.status, 'completed');
+  assert.equal(res.empty, true);            // malformed-turn signal for the orchestrator
+  assert.ok(!res.message || !res.message.trim());
+  const r = await rpcCall(socketPath, { cmd: 'read' });
+  assert.equal(r.empty, true);              // read carries the same flag
+  await daemon.stop();
+});
+
+test('_completedResult flags only blank completed turns (not non-empty, not non-completed)', () => {
+  const d = new Daemon({ socketPath: '/tmp/cdx-unit-none.sock', clientInfo: {} });
+  d.turn = { id: 'T', status: 'completed', buffer: '', parked: null, message: '   \n ' };
+  assert.equal(d._completedResult().empty, true);                 // whitespace-only → empty
+  d.turn.message = 'real plan';
+  assert.equal(d._completedResult().empty, undefined);            // has content → no flag
+  d.turn.status = 'failed'; d.turn.message = '';
+  assert.equal(d._completedResult().empty, undefined);            // not completed → no flag
+});
+
 test('a parked elicitation is surfaced as unsupported and cannot be answered', async () => {
   const d = new Daemon({ socketPath: '/tmp/cdx-unit-none.sock', clientInfo: {} });
   d.turn = { id: 'T1', status: 'awaiting_input', buffer: '', message: null,

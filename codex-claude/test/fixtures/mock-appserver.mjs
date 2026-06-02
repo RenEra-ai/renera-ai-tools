@@ -46,6 +46,9 @@ async function runTurn(threadId, text) {
     });
     const answer = await answered;
     notify('item/agentMessage/delta', { threadId, turnId, itemId: 'i2', delta: `decision=${JSON.stringify(answer)}` });
+  } else if (text.includes('EMPTY')) {
+    // Emit NO agent-message delta: models the gpt-5.5 build quirk where a turn ends
+    // `completed` with an empty final message (no plan/verdict content).
   } else if (text.includes('say OK')) {
     notify('item/agentMessage/delta', { threadId, turnId, itemId: 'i2', delta: 'OK' });
   } else {
