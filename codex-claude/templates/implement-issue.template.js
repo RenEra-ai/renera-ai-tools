@@ -69,7 +69,7 @@ const preSet = new Set(pf.pre_untracked || [])
 const newFiles = implUntracked.filter((p) => !preSet.has(p))
 const addNew = newFiles.length ? `git add -- ${newFiles.map(shellQuote).join(' ')}\n` : ''
 const commit = await agent(
-  `Commit ONLY the implementation (tracked edits + the new source files staged below) — NOT test artifacts or pre-existing untracked files. Run EXACTLY this, then report ok/detail (ok=true only if every command exited 0):\n\`\`\`bash\nset -e\ngit add -u\n${addNew}git commit -m "#${ISSUE}: ${safeTitle}"\ntest -z "$(git status --porcelain --untracked-files=no)"  # all tracked changes are committed (completeness)\ngit log --oneline -1\n\`\`\`\nIf nothing is staged the commit exits non-zero — report ok=false.`,
+  `Commit ONLY the implementation (tracked edits + the new source files staged below) — NOT test artifacts or pre-existing untracked files. Run EXACTLY this, then report ok/detail (ok=true only if every command exited 0):\n\`\`\`bash\nset -e\ngit reset -q                    # clear the index first, so nothing staged earlier (e.g. a stray git add) is committed\ngit add -u                      # tracked edits\n${addNew}git commit -m "#${ISSUE}: ${safeTitle}"\ntest -z "$(git status --porcelain --untracked-files=no)"  # all tracked changes are committed (completeness)\ngit log --oneline -1\n\`\`\`\nIf nothing is staged the commit exits non-zero — report ok=false.`,
   { label: `commit #${ISSUE}`, phase: 'Land', schema: OPS },
 )
 if (!commit || !commit.ok) { report.terminal = 'commit_failed'; report.detail = commit && commit.detail; return report }
