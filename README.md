@@ -22,8 +22,9 @@ Then browse and install plugins:
 
 | Plugin | Description | Version |
 |--------|-------------|---------|
-| `immigration-guide` | DIY U.S. immigration guidance — visas, green cards, asylum, naturalization, work permits | 1.0.1 |
+| `immigration-guide` | DIY U.S. immigration guidance — visas, green cards, asylum, naturalization, work permits | 1.0.3 |
 | `sound-studio` | Music production with Python audio processing — mixing, mastering, stem separation, voice synthesis, composition | 1.0.0 |
+| `codex-claude` | Use Codex (GPT-5.x) as an architect & reviewer in the Claude Code dev loop; `/codex-issue` wraps the repo's own workflow in a fully autonomous architect → implement → review → PR loop | 1.2.0 |
 
 ## Structure
 
@@ -56,6 +57,15 @@ renera-ai-tools/
 │   │   └── genre-creator/
 │   ├── commands/
 │   │   └── play.md             # /play command for audio playback
+│   └── README.md
+├── codex-claude/               # Codex as architect & reviewer (codex-drive over JSON-RPC)
+│   ├── .claude-plugin/
+│   │   └── plugin.json
+│   ├── skills/codex-claude/    # Daemon lifecycle + the codex-drive verb contract
+│   ├── commands/               # /codex-architect, /codex-review, /codex-issue
+│   ├── agents/                 # codex-reviewer, codex-orchestrator, codex-developer
+│   ├── bin/ + lib/             # codex-drive CLI + session daemon (zero deps)
+│   ├── scripts/ + test/ + docs/
 │   └── README.md
 ├── docs/                       # Research and planning docs
 ├── LICENSE
