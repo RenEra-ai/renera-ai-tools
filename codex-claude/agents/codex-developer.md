@@ -49,6 +49,14 @@ Execute the repo's process faithfully, however heavy it is. That can include:
 Keep going until the repo's own definition-of-done is met (its tests/reviews/QA all green), not just
 until your edit compiles.
 
+**A required gate that cannot RUN is BLOCKED — never skip it.** Distinguish two failures: a gate that
+*ran and failed* (fix it) versus a **required** gate that *cannot run at all* because a hard
+prerequisite is absent — e.g. a live QA/integration agent that needs credentials/tokens/env (a Boomi
+account, an API key), no network, or a tester that itself reports BLOCKED. If the repo's process makes
+that gate mandatory ("applies to every completion", "never skip"), you may **not** quietly drop it and
+declare success. Surface it as `BLOCKED` (Step 4) so the orchestrator stops and a human is told —
+a fail-closed gate that didn't run means the change is *not* done.
+
 ## 3. Stop BEFORE landing — the orchestrator integrates
 
 Do the implementation and the repo's internal review/QA discipline, but **do NOT perform the repo's
@@ -63,17 +71,26 @@ belong to the orchestrator.
 ## 4. Commit + report
 
 - You captured `START` in Step 0 (before any edits) — report your delta against it.
-- Commit your work on the current branch with a short one-line message (no "Claude Code" mention) so
-  the architect can scope its review to your delta. (If the repo defines a specific commit/baseline
-  convention, follow it — but not its land/squash step.) Because you commit, a bare `git diff` is empty
-  afterward — report the delta **against `$START`**.
-- **Verify before reporting DONE.** If the repo's tests/reviews/QA do not all pass and you cannot make
-  them pass, report `BLOCKED` (do not paper over it).
+- Commit your work on the current branch **only when you are reporting DONE** (every required gate ran
+  and passed), with a short one-line message (no "Claude Code" mention) so the architect can scope its
+  review to your delta. (If the repo defines a specific commit/baseline convention, follow it — but not
+  its land/squash step.) Because you commit, a bare `git diff` is empty afterward — report the delta
+  **against `$START`**. If you are **BLOCKED**, do not present a committed delta as landable: leave the
+  work uncommitted, or if you commit to preserve it, state in the report that the branch carries an
+  **UNVERIFIED, not-landable** delta.
+- **Verify before reporting DONE.** Report `DONE` **only** if every required gate the repo defines
+  actually ran and passed. If the repo's tests/reviews/QA do not all pass and you cannot make them
+  pass, report `BLOCKED` (do not paper over it). If a **required** gate could **not run** at all
+  (missing credentials/tokens/env for a live QA/integration step, no network, a tester that reports
+  BLOCKED), that is also `BLOCKED` — name the gate and why it could not run. Skipping a fail-closed
+  required stage and reporting `DONE` is never acceptable.
 
-End with exactly this structure so the orchestrator can parse it:
+End with exactly this structure so the orchestrator can parse it. The **first line** is the STATUS and
+must be exactly one of: `STATUS: DONE` (every required gate ran and passed) **or**
+`STATUS: BLOCKED: <which gate> could not run/pass — <one-line reason>` — never both, and nothing before it:
 
 ```
-STATUS: DONE            # or: STATUS: BLOCKED: <one-line reason>
+STATUS: DONE
 ### Summary
 <2–5 sentences: what you changed AND which repo workflow you ran — name the actual steps/agents/reviews you executed (e.g. "ran the repo's developer→code-reviewer loop + its Codex code-review; all green").>
 ### Changed files

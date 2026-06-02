@@ -110,12 +110,21 @@ on merge via `Closes #N` — the loop never closes it directly).
   development workflow wherever it is defined** — `CLAUDE.md`, `AGENTS.md`, or `.claude/` process docs /
   commands / agents — and to run that workflow **as-is** (however many internal reviews / QA agents /
   tests it has), committing on the branch but **stopping before any landing step** (push / PR / close —
-  the orchestrator owns integration). It must report `STATUS: DONE/BLOCKED` + a summary **naming which
+  the orchestrator owns integration). It must run the repo's **review/QA stages**, not just its tests
+  (e.g. a live QA/tester agent, then an internal Codex code-review) — whatever the repo's
+  definition-of-done requires. It must report `STATUS: DONE/BLOCKED` + a summary **naming which
   repo workflow it actually ran** + the `$START..HEAD` diff/paths. Consume only its report — do not
   inspect its internals; but DO sanity-check the summary names a real internal workflow (not just
   "ran pytest") when the repo defines more.
-- If it returns `STATUS: BLOCKED: <reason>` → extract `<reason>`, retry once with that blocker
-  clarified; if still blocked → `$CDX stop`, abort, report the blocker.
+- **Parse the status from the FIRST non-empty line** of the developer's report (like the verdict parse
+  in step 6): it is BLOCKED iff that line begins with `STATUS: BLOCKED` (trimmed), DONE only if it is
+  exactly `STATUS: DONE`. Do **not** substring-match `BLOCKED` elsewhere in the message (the report's
+  own template names both forms). If `STATUS: BLOCKED: <reason>` → extract `<reason>`, retry once with
+  that blocker clarified; if still blocked → `$CDX stop`, abort, report the blocker. A **required** gate
+  that **cannot run** (e.g. a credential-gated live QA stage with no credentials) is a fail-closed block,
+  not "done enough": **do not** proceed to review or finish, **do not** push, leave the issue **open**,
+  and surface the blocker in the final report. Never land a change whose required review/QA stage was
+  skipped.
 
 ### 5. Architect review (same thread → architect remembers the plan)
 - `$CDX send "Review the implementation against the plan you produced. Changed files: <paths from the developer>. Inspect each on disk. List concrete issues as file:line with a fix. END your reply with a verdict on its OWN final line: exactly 'VERDICT: NO ISSUES' or 'VERDICT: ISSUES FOUND'."` → check the return → drive `wait` → `$CDX read` the review.
