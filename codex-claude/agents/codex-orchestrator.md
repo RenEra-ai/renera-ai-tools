@@ -58,11 +58,12 @@ on merge via `Closes #N` — the loop never closes it directly).
 ### 0. Preflight
 - `$CDX doctor`. If `codexVersion` is null or `authPresent` is false → **abort** with a clear message
   (Codex not installed / not logged in). No daemon was started, so nothing to stop.
-- Resolve the Plan-mode model. If `--model` was passed, use it. Else read the configured default —
-  the daemon (`config.mjs`) only honors a **double-quoted** top-level `model`, so match that exactly
-  (portable `sed`, stops at the first `[table]`):
+- Resolve the Plan-mode model. If `--model` was passed, use it. Else read the configured default with
+  the daemon's **own** resolver (`readConfiguredModel`), so this preflight can never drift from what the
+  daemon actually accepts (it honors a top-level `model` in either quote style, stopping at the first
+  `[table]`):
   ```bash
-  CONFIG_MODEL=$(sed -n '/^\[/q; s/^[[:space:]]*model[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' ~/.codex/config.toml 2>/dev/null | head -1)
+  CONFIG_MODEL=$(node -e "import('${CLAUDE_PLUGIN_ROOT}/lib/config.mjs').then(m=>process.stdout.write(m.readConfiguredModel()||''),()=>{})" 2>/dev/null)
   ```
   If neither a `--model` flag nor `$CONFIG_MODEL` is available → **abort** with: "Plan mode needs a
   model — pass `--model <name>` or set `model = \"...\"` in ~/.codex/config.toml." (Abort before
