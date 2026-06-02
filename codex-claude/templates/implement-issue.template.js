@@ -14,8 +14,8 @@ const ISSUE = args && typeof args === 'object' ? args.issue : args
 const DRY_RUN = !!(args && typeof args === 'object' && args.dryRun)
 const NO_LAND = !!(args && typeof args === 'object' && args.noLand)
 const PLAN = (args && typeof args === 'object' && typeof args.plan === 'string') ? args.plan : ''
-if (ISSUE == null || `${ISSUE}`.trim() === '') {
-  throw new Error('implement-issue: pass {issue: <n>} (optionally {dryRun:true} or {noLand:true, plan:"..."})')
+if (ISSUE == null || !/^\d+$/.test(`${ISSUE}`.trim())) {
+  throw new Error('implement-issue: pass a NUMERIC GitHub issue number, e.g. {issue: 3} (optionally {dryRun:true} or {noLand:true, plan:"..."})')
 }
 
 const OPS = { type: 'object', additionalProperties: false, required: ['ok', 'detail'], properties: { ok: { type: 'boolean' }, detail: { type: 'string' } } }
@@ -27,10 +27,11 @@ const report = { issue: ISSUE, branch: null, base_sha: null, terminal: null }
 phase('Preflight')
 const pf = await agent(
   `PREFLIGHT for implementing GitHub issue #${ISSUE} in this git repo.
-1. \`gh issue view ${ISSUE} --json state,title\` -> issue_state ("OPEN"/"CLOSED"), issue_title.
-2. base_sha = the CURRENT commit BEFORE creating any branch: \`git rev-parse HEAD\`.
-3. branch = "issue-${ISSUE}-<slug>" (issue title slugified to kebab-case, <=40 chars). If issue_state=="OPEN" and that branch does not exist (\`git rev-parse --verify <branch>\` fails), create + checkout it: \`git switch -c <branch>\`. If it already exists, ok=false, reason="branch_exists".
-Set ok=true only if issue_state=="OPEN" AND the branch is now active. reason on failure: issue_not_open | branch_exists | error. Report every field.`,
+1. Working tree must be clean of TRACKED changes (so pre-existing work isn't swept into the commit): if \`git status --porcelain --untracked-files=no\` is NON-empty, set ok=false, reason="dirty_tree" and stop.
+2. \`gh issue view ${ISSUE} --json state,title\` -> issue_state ("OPEN"/"CLOSED"), issue_title.
+3. base_sha = the CURRENT commit BEFORE creating any branch: \`git rev-parse HEAD\`.
+4. branch = "issue-${ISSUE}-<slug>" (issue title slugified to kebab-case, <=40 chars). If issue_state=="OPEN" and that branch does not exist (\`git rev-parse --verify <branch>\` fails), create + checkout it: \`git switch -c <branch>\`. If it already exists, ok=false, reason="branch_exists".
+Set ok=true only if the tree is clean AND issue_state=="OPEN" AND the branch is now active. reason on failure: dirty_tree | issue_not_open | branch_exists | error. Report every field.`,
   { label: `preflight #${ISSUE}`, phase: 'Preflight', schema: PRE },
 )
 if (!pf || !pf.ok) { report.terminal = `preflight_${(pf && pf.reason) || 'failed'}`; log(`FAIL: ${report.terminal}`); return report }
@@ -42,7 +43,7 @@ phase('Implement')
 let green = false
 for (let attempt = 1; attempt <= 3 && !green; attempt++) {
   await agent(
-    `Implement GitHub issue #${ISSUE} ("${pf.issue_title}") in this repo. Read the full issue first: \`gh issue view ${ISSUE}\`. Follow THIS repo's conventions (its CLAUDE.md / AGENTS.md). Add or adjust the relevant tests. Do NOT commit — the pipeline commits.${PLAN ? `\n\nAn architect proposed this plan — follow it where sound, deviate only with a stated reason:\n${PLAN}` : ''}${attempt > 1 ? '\n\nThe previous attempt was not green — diagnose the failures and fix them minimally.' : ''}`,
+    `Implement GitHub issue #${ISSUE} ("${pf.issue_title}") in this repo. Read the full issue first: \`gh issue view ${ISSUE}\`. Follow THIS repo's conventions (its CLAUDE.md / AGENTS.md). Add or adjust the relevant tests. STAGE ONLY the files you changed for this issue (\`git add <those paths>\`) — do NOT \`git add -A\` (it would sweep unrelated files) and do NOT commit; the pipeline commits what you staged.${PLAN ? `\n\nAn architect proposed this plan — follow it where sound, deviate only with a stated reason:\n${PLAN}` : ''}${attempt > 1 ? '\n\nThe previous attempt was not green — diagnose the failures and fix them minimally.' : ''}`,
     { label: `dev #${ISSUE}.${attempt}`, phase: 'Implement' },
   )
   const v = await agent(
@@ -57,7 +58,7 @@ if (!green) { log(`FAIL: tests_never_green`); return report }
 phase('Land')
 const safeTitle = String(pf.issue_title || '').replace(/["`$\\]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60)
 const commit = await agent(
-  `Run EXACTLY this, then report ok/detail (ok=true only if every command exited 0):\n\`\`\`bash\nset -e\ngit add -A && git commit -m "#${ISSUE}: ${safeTitle}" && git log --oneline -1\n\`\`\``,
+  `Commit the staged implementation (the developer staged its own files — do NOT \`git add -A\`). Run EXACTLY this, then report ok/detail (ok=true only if every command exited 0):\n\`\`\`bash\nset -e\ngit commit -m "#${ISSUE}: ${safeTitle}" && git log --oneline -1\n\`\`\`\nIf nothing is staged the commit exits non-zero — report ok=false (the developer staged no changes).`,
   { label: `commit #${ISSUE}`, phase: 'Land', schema: OPS },
 )
 if (!commit || !commit.ok) { report.terminal = 'commit_failed'; report.detail = commit && commit.detail; return report }
