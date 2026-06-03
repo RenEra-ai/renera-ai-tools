@@ -21,7 +21,11 @@ const DANGEROUS_META = /[;&|<>`$()\n\r{}*?~[\]]/;
 const PYTEST_BAD_OPT = /^(--basetemp|--junitxml|--junit-xml|--report-log|--result-log|--resultlog|--override-ini|--config-file|--rootdir|--pdbcls)(=|$)/;
 
 function unwrap(cmd) {
-  const m = /^\s*\/?(?:[\w/]*\/)?(?:ba|z)?sh\s+-[a-z]*c\s+(.+)$/i.exec(cmd);
+  // Only unwrap a TRUSTED system shell — `/bin/{sh,bash,zsh}`, `/usr/bin/{sh,bash,zsh}`, or the bare
+  // name. A path like `/tmp/sh` or `bin/sh` is NOT a system shell; leaving it unwrapped makes argv[0]
+  // that arbitrary executable, which then fails the test-runner check (deny) instead of being treated
+  // as a wrapper around an "approved" inner command.
+  const m = /^\s*(?:\/bin\/|\/usr\/bin\/)?(?:sh|bash|zsh)\s+-[a-z]*c\s+(.+)$/i.exec(cmd);
   if (!m) return cmd.trim();
   let inner = m[1].trim();
   if (!DANGEROUS_META.test(inner) &&
@@ -53,12 +57,13 @@ function tokenize(s) {
   return out;
 }
 
-// A path token that escapes the working tree: absolute, home-relative, or parent traversal — checked on
-// both the whole token and its post-`=` value (so `--x=/abs` is caught).
+// A path token that escapes the working tree: an absolute (/…) or home (~…) path, or a parent
+// traversal (..). Checked not just at the token start but after any value delimiter (= : ,) so an
+// embedded escape like `--cov-report=html:/tmp/x` or `--x=a,/abs` is caught, not only a leading path.
 function isPathEscape(tok) {
-  const v = tok.includes('=') ? tok.slice(tok.indexOf('=') + 1) : tok;
-  const bad = (t) => /^\//.test(t) || /^~/.test(t) || /(^|\/)\.\.(\/|$)/.test(t);
-  return bad(tok) || bad(v);
+  if (/(^|[=:,])\s*[/~]/.test(tok)) return true;          // absolute/home path at start or after = : ,
+  if (/(^|[/=:,])\.\.(\/|$)/.test(tok)) return true;      // parent traversal anywhere
+  return false;
 }
 
 function pytestArgsOk(args) {
