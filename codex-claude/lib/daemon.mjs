@@ -16,6 +16,7 @@ export class Daemon {
     this.server = null;
     this.threadId = null;
     this.turn = { id: null, status: 'idle', buffer: '', planBuffer: '', planText: null, parked: null, message: null };
+    this.planMode = false; // thread is in Plan mode (set by a mode:'plan' turn, cleared by mode:'default')
     this._waiters = []; // resolve fns awaiting a terminal/awaiting state
     this._sockets = new Set(); // open client connections (so stop() can tear them down)
     this._stopped = false;
@@ -96,6 +97,10 @@ export class Daemon {
     // mode: 'plan' | 'default' | undefined. plan & default set collaborationMode (model required);
     // undefined = plain send (no collaborationMode; inherits the thread's current mode).
     const explicitMode = mode === 'plan' || mode === 'default' ? mode : undefined;
+    // Track Plan mode across turns: a `plan` turn enters it, a `default` turn exits it, a plain `send`
+    // (undefined) inherits the thread's current mode — so plan-round's plain-`send` re-ask stays in plan.
+    if (explicitMode === 'plan') this.planMode = true;
+    else if (explicitMode === 'default') this.planMode = false;
     let model;
     if (explicitMode) {
       model = this._resolveModel();
@@ -237,9 +242,13 @@ export class Daemon {
       if (this._isStaleTurn(completedId)) return;
       const status = params.turn ? params.turn.status : 'completed';
       this.turn.status = status === 'completed' ? 'completed' : status;
-      // Prefer the authoritative completed plan, then the streamed plan, then the agentMessage stream.
-      const plan = (this.turn.planText && this.turn.planText.trim()) ? this.turn.planText
-        : ((this.turn.planBuffer && this.turn.planBuffer.trim()) ? this.turn.planBuffer : '');
+      // In PLAN mode prefer the captured plan (authoritative completed item, else streamed deltas); in
+      // any other mode (e.g. a review `send`) use the agentMessage stream — a review's internal-checklist
+      // item/plan/delta must NOT shadow the actual review + VERDICT line.
+      const plan = this.planMode
+        ? ((this.turn.planText && this.turn.planText.trim()) ? this.turn.planText
+          : ((this.turn.planBuffer && this.turn.planBuffer.trim()) ? this.turn.planBuffer : ''))
+        : '';
       this.turn.message = plan || this.turn.buffer;
       this._resolveWaiters();
     }
