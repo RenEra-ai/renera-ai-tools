@@ -62,7 +62,7 @@ function tokenize(s) {
 // embedded escape like `--cov-report=html:/tmp/x` or `--x=a,/abs` is caught, not only a leading path.
 function isPathEscape(tok) {
   if (/(^|[=:,])\s*[/~]/.test(tok)) return true;          // absolute/home path at start or after = : ,
-  if (/(^|[/=:,])\.\.(\/|$)/.test(tok)) return true;      // parent traversal anywhere
+  if (/(^|[/=:,])\.\.([/:,]|$)/.test(tok)) return true;   // parent traversal, terminated by / : , or end
   return false;
 }
 
