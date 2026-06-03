@@ -89,6 +89,33 @@ test('plan turn with a resolved model builds valid settings and completes', asyn
   await daemon.stop();
 });
 
+test('plan turn prefers plan stream/final plan item over agent-message preamble', async () => {
+  const { daemon, socketPath } = await startDaemon({ model: 'mock-model' });
+  await rpcCall(socketPath, { cmd: 'plan', prompt: 'PLANSTREAM now' });
+  const res = await rpcCall(socketPath, { cmd: 'wait' });
+  assert.equal(res.status, 'completed');
+  assert.equal(res.message, 'src/app.js\n- Add GET /healthz.\n- Add a request test.');
+  await daemon.stop();
+});
+
+test('plan turn accepts completed plan item text when no plan delta streamed', async () => {
+  const { daemon, socketPath } = await startDaemon({ model: 'mock-model' });
+  await rpcCall(socketPath, { cmd: 'plan', prompt: 'PLANITEM now' });
+  const res = await rpcCall(socketPath, { cmd: 'wait' });
+  assert.equal(res.status, 'completed');
+  assert.equal(res.message, 'app.js\n- Add GET /healthz.');
+  await daemon.stop();
+});
+
+test('plain review send ignores incidental plan deltas and keeps review verdict text', async () => {
+  const { daemon, socketPath } = await startDaemon({ model: 'mock-model' });
+  await rpcCall(socketPath, { cmd: 'send', prompt: 'REVIEWPLAN now' });
+  const res = await rpcCall(socketPath, { cmd: 'wait' });
+  assert.equal(res.status, 'completed');
+  assert.equal(res.message, 'Reviewed src/app.js.\nVERDICT: NO ISSUES');
+  await daemon.stop();
+});
+
 test('send --mode default sets collaborationMode default (exit plan mode) and completes', async () => {
   const { daemon, socketPath } = await startDaemon({ model: 'mock-model' });
   // plain plan turn first (enters plan mode), then exit via send --mode default

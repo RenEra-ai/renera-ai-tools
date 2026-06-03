@@ -36,7 +36,7 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs doctor
 | **agent** `codex-developer` | The repo-agnostic **black box**: **discovers and runs THIS repo's own full internal workflow** wherever defined (`CLAUDE.md`/`AGENTS.md`/`.claude/` docs, commands, agents) — however many internal reviews/QA/tests — then reports `DONE` + a diff. Stops before landing. |
 | **runtime** `bin/` + `lib/` | The `codex-drive` CLI + session daemon (JSON-RPC client, turn state machine, question/approval parking). |
 | `scripts/review-round.mjs` | One-shot ephemeral-daemon review used by the `codex-reviewer` agent. |
-| **workflow** `workflows/codex-wrap.js` | **Workflow-mode** composition: brackets a repo's own no-land Workflow with a Codex architect plan + review, then lands. Invoked by `/codex-issue` when a composable `.claude/workflows/*.js` is detected. |
+| **workflow** `workflows/codex-wrap.js` | **Workflow-mode** composition: brackets a repo's own no-land Workflow with a Codex architect plan + review, then lands. Invoked by `/codex-issue` when a composable `.claude/workflows/*.js` or `.mjs` file is detected. |
 | `scripts/plan-round.mjs` | Ephemeral Plan-mode Codex session used by the wrapper's architect-plan phase. |
 | **command** `/codex-compose-setup` | Makes a repo composition-ready: adds the `noLand` seam to its workflow (diff + approval) **in place**, or scaffolds a starter workflow if none exists. |
 | `templates/implement-issue.template.js` | Repo-agnostic starter workflow (already `noLand`-aware; discovers the repo's test command) used by `/codex-compose-setup` scaffolding. |
@@ -73,13 +73,14 @@ authenticated for the integration step.
 
 ### Workflow-mode repos
 
-If a repo's dev lifecycle is itself a Claude Code **Workflow** (`.claude/workflows/*.js`), a subagent
+If a repo's dev lifecycle is itself a Claude Code **Workflow** (`.claude/workflows/*.js` or `.mjs`), a subagent
 can't run it. For those repos `/codex-issue` **composes** (after approval): a wrapper workflow
 (`workflows/codex-wrap.js`, run from the main thread) brackets the repo's **own** workflow — called
 with `noLand: true` so its full pipeline runs with all gates intact — with the Codex architect plan +
-review, then lands. Detected via `grep -l noLand .claude/workflows/*.js`; otherwise it falls back to
-subagent mode. The contract a repo's workflow must satisfy (the `noLand` arg) and the full design are
-in [`docs/WORKFLOW-MODE.md`](docs/WORKFLOW-MODE.md).
+review, then lands. `grep noLand` is only candidate discovery: `/codex-issue` treats a workflow as
+composable only if it actually reads `args.noLand` (or destructures `noLand` from `args`) in code and its
+no-land path returns `terminal: "ready_to_land"` with `branch` and `base_sha`. Otherwise it falls back to
+subagent mode. The contract and full design are in [`docs/WORKFLOW-MODE.md`](docs/WORKFLOW-MODE.md).
 
 Run **`/codex-compose-setup`** to arrange the contract automatically: it adds the `noLand` seam to your
 existing workflow (shown as a diff for approval) or scaffolds a composition-ready starter if you have

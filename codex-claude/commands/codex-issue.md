@@ -30,7 +30,7 @@ Check whether this repo has a Claude Code **Workflow**, and whether it supports 
 
 ```bash
 ls .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null            # any workflow at all?
-grep -l "noLand" .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null   # composition-ready one(s)
+grep -l "noLand" .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null   # candidates only; verify code reads args.noLand
 ```
 
 Decide (and **state which branch you took** so demotion is never silent):
@@ -59,7 +59,7 @@ genuine lifecycle instead of a subagent approximation, but it executes the full 
   composition — Codex architect plan → that workflow (land suppressed) → architect review → push + PR?"
   Options: **Run composition** · **Use subagent mode instead** · **Cancel**.
 - On **Run composition**, invoke the **Workflow** tool (resolve `${CLAUDE_PLUGIN_ROOT}` to its real path):
-  `Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/codex-wrap.js", args: { issue: <N>, repoWorkflowPath: "<absolute path to the matched .claude/workflows/*.js>", pluginRoot: "${CLAUDE_PLUGIN_ROOT}", base: "<--base value or empty>", dryRun: <true|false> } })`.
+  `Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/codex-wrap.js", args: { issue: <N>, repoWorkflowPath: "<absolute path to the matched .claude/workflows/*.js or *.mjs>", pluginRoot: "${CLAUDE_PLUGIN_ROOT}", base: "<--base value or empty>", dryRun: <true|false> } })`.
   It runs in the background; when it completes, relay its result: status, branch, PR URL, review
   rounds, and whether the issue will auto-close (default base) or needs a manual close (non-default base).
 - On **Use subagent mode instead** → Step 2B. On **Cancel** → stop and report nothing was changed.

@@ -25,13 +25,15 @@ before it lands (squash/push/PR/close), when called with `args.noLand: true`.
 ## Step 1 — detect
 
 ```bash
-ls .claude/workflows/*.js 2>/dev/null
-grep -l "noLand" .claude/workflows/*.js 2>/dev/null
+ls .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null
+grep -l "noLand" .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null   # candidates only
 ```
 
-- A workflow that **already contains `noLand`** → already composable. Report which file and stop.
-- A workflow **without `noLand`** → **Step 2** (add the seam in place).
-- **No** `.claude/workflows/*.js` → **Step 3** (scaffold a starter).
+- A workflow that actually **reads `args.noLand`** or destructures `noLand` from `args` in code (not a
+  comment-only/string-only mention) and returns `terminal: "ready_to_land"` with `branch` and `base_sha`
+  under that branch → already composable. Report which file and stop.
+- A workflow file exists but no file implements that contract → **Step 2** (add the seam in place).
+- **No** `.claude/workflows/*.js` or `.mjs` → **Step 3** (scaffold a starter).
 
 ## Step 2 — add the `noLand` seam to the existing workflow (in place, with approval)
 
@@ -56,7 +58,9 @@ original untouched:
    `cp /tmp/codex-seam.proposed.js <file>` (and `node --check` it isn't required — workflow scripts use
    top-level await/return, but confirm it still reads as the same workflow). On **Cancel**, delete the
    temp and leave the original **unchanged**.
-5. After Apply, verify: `grep -c noLand <file>` is > 0.
+5. After Apply, verify the same contract `/codex-issue` will require: the file reads `args.noLand` (or
+   destructures `noLand` from `args`) in code, and the no-land path returns `terminal: 'ready_to_land'`
+   with `branch` and `base_sha`.
 
 (Keep the edit minimal and faithful — do not restructure or "improve" the user's pipeline; only add the
 seam. If the land step is too tangled to gate safely, say so and offer Step 3's standalone template as
@@ -65,7 +69,7 @@ an alternative the wrapper can call instead.)
 ## Step 3 — scaffold a starter workflow (no workflow exists)
 
 Copy the bundled, repo-agnostic template (implement → discover-and-run the repo's tests → land, already
-`noLand`-aware):
+`args.noLand`-aware):
 
 ```bash
 mkdir -p .claude/workflows
