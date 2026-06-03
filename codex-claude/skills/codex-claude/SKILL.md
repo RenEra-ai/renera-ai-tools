@@ -199,9 +199,10 @@ deliberately **overrides** the human-supervised default — use the manual `/cod
 (`.claude/workflows/*.js`), a subagent can't run it — so for those repos `/codex-issue` **composes**
 instead of wrapping from outside: the command (main thread) runs a wrapper workflow
 (`workflows/codex-wrap.js`) that brackets the repo's **own** workflow (called with `noLand:true`, all
-its gates intact) with the architect plan + review, then lands. Detected by
-`grep -l noLand .claude/workflows/*.js`; falls back to the subagent path above when no composable
-workflow is present. Run **`/codex-compose-setup`** to add the `noLand` seam to a repo's workflow (or
+its gates intact) with the architect plan + review, then lands. Detected by scanning
+`.claude/workflows/*.{js,mjs}` for a file that actually **reads** `args.noLand` (a bare comment mention
+doesn't qualify); falls back to the subagent path above when no composable workflow is present (and a
+non-composable Workflow is nudged toward `/codex-compose-setup`). Run **`/codex-compose-setup`** to add the `noLand` seam to a repo's workflow (or
 scaffold a starter) — `noLand` is not an Anthropic-standard arg, so the repo's workflow must read it.
 In composition, the architect's fix rounds re-run the repo's **own review/QA gate(s)** on the fix (a
 gate that is a command/script runs natively; a gate that is a subagent is **replayed inline**, since
@@ -216,7 +217,7 @@ seam is intact. Contract + details: `${CLAUDE_PLUGIN_ROOT}/docs/WORKFLOW-MODE.md
 | Verb | Args | Returns |
 |---|---|---|
 | `doctor` | — | `{ codexVersion, authPresent, threads }` |
-| `start` | `[--cwd <path>] [--model <m>] [--resume <uuid> \| --resume-latest]` | `{ ok, threadId, socket, pid }` |
+| `start` | `[--cwd <path>] [--model <m>] [--resume <uuid> \| --resume-latest] [--force]` | `{ ok, threadId, socket, pid }` — **idempotent**: refuses if a live session already exists (avoids orphaning its daemon); `--force` stops the existing one first |
 | `plan` | `"<prompt>" [--effort <e>] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"no_model_for_mode"}` |
 | `send` | `"<prompt>" [--effort <e>] [--mode default] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"no_model_for_mode"}` (only with `--mode`) |
 | `wait` | `[--timeout-ms <N>]` | `{status:"completed",message[,empty:true]}` · `{status:"question",question}` · `{status:"approval",request}` · `{status:"interrupted"\|"failed",message}` · `{status:"unsupported",request}` · `{status:"timeout"}` (exit 2) |

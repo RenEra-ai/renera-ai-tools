@@ -43,7 +43,9 @@ try {
       process.stderr.write(`[driver] declining approval: ${res.request.method}\n`);
       await sendCommand(socketPath, { cmd: 'approve', decision: 'deny' });
     } else {
-      const q = res.question.questions[0];
+      const qs = res.question && res.question.questions;
+      if (!Array.isArray(qs) || qs.length === 0) { process.stderr.write('[driver] malformed question payload — stopping\n'); break; }
+      const q = qs[0];
       const first = q.options && q.options[0];
       const answer = first == null ? 'proceed' : (typeof first === 'string' ? first : first.label);
       process.stderr.write(`[driver] answering question ${q.id} -> ${answer}\n`);
