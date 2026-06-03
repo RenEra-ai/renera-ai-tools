@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { Daemon } from '../lib/daemon.mjs';
 import { sendCommand } from '../lib/client.mjs';
 import { readConfiguredModel } from '../lib/config.mjs';
+import { isSafeCommand } from '../lib/safe-command.mjs';
 
 // Prefer --prompt-file (avoids shell-quoting/injection from issue/plan text with backticks, $(), quotes).
 const pf = process.argv.indexOf('--prompt-file');
@@ -20,6 +21,29 @@ const effort = ei >= 0 ? process.argv[ei + 1] : 'xhigh';
 if (!model) {
   console.error('plan-round: Plan mode needs a model — pass --model <name> or set model = "..." in ~/.codex/config.toml');
   process.exit(1);
+}
+
+// Heuristic: did Codex actually emit a file-by-file plan, or just a reasoning preamble / the generic
+// Plan-mode help blurb? Conservative — only flags clearly non-substantive output, so a real plan is
+// never misclassified as "no plan". Used to (a) trigger a single static-only re-ask after a denied
+// command approval, and (b) mark STATUS '(no-plan)' so codex-wrap fails loud instead of accepting a
+// preamble (its agent must NOT substitute its own plan).
+function looksLikeNoPlan(msg) {
+  const t = (msg || '').trim();
+  if (!t) return true;
+  if (/^I.?m Codex in this workspace/i.test(t)) return true;       // generic Plan-mode help text
+  if (/Current mode:\s*\*?\*?Plan Mode/i.test(t)) return true;
+  // A real file-by-file plan cites concrete files and/or enumerated/bulleted steps. Output with NONE
+  // of those is narration / a reasoning preamble, not a plan — regardless of length (a chatty preamble
+  // can run long). Do NOT gate on length: that let a ~600-char "I'll inspect…" preamble slip through.
+  // Match a real filename: word + dot + LOWERCASE ext of >=2 chars (mathkit/sequences.py, pyproject.toml).
+  // Lowercase + len>=2 avoids two false positives in chatty prose: run-on sentences ("files.The" — the
+  // ext would be capitalized) and abbreviations ("e.g."/"i.e." — the ext would be 1 char).
+  const hasFileRef = /[\w/-]+\.[a-z]{2,6}\b/.test(t);
+  const hasNumberedStep = /(^|\n)\s*\d+[.)]\s/.test(t);            // 1. / 1)
+  const hasBullets = /(^|\n)\s*[-*]\s+\S/.test(t);                 // - foo / * foo
+  if (!hasFileRef && !hasNumberedStep && !hasBullets) return true;
+  return false;
 }
 
 const dir = mkdtempSync(join(tmpdir(), 'cdx-plan-'));
@@ -41,15 +65,24 @@ async function driveWait() {
   }
 }
 
-let res = { status: 'failed', message: '' };
-try {
-  await sendCommand(socketPath, { cmd: 'plan', prompt, effort });
-  res = await driveWait();
+// Drain any clarifying questions / command-approval prompts on the current turn, declining commands
+// (Plan mode is read-only). Records into `flags.declinedExec` whether a command-exec approval was
+// denied — the classic Plan-mode stall (Codex wants to run pytest, can't, then stops at a preamble).
+async function drain(res, flags) {
   let guard = 0;
   while ((res.status === 'question' || res.status === 'approval') && guard++ < 20) {
     if (res.status === 'approval') {
-      process.stderr.write(`[plan] declining approval: ${res.request.method}\n`);
-      await sendCommand(socketPath, { cmd: 'approve', decision: 'deny' });
+      const method = (res.request && res.request.method) || '';
+      const params = (res.request && res.request.params) || {};
+      const isExec = /commandExecution|execCommand/i.test(method);
+      if (isExec && isSafeCommand(params.command)) {
+        process.stderr.write(`[plan] approving safe command: ${String(params.command).slice(0, 140)}\n`);
+        await sendCommand(socketPath, { cmd: 'approve', decision: 'allow' });
+      } else {
+        if (isExec) flags.declinedExec = true;   // a DENIED exec is what triggers the static re-ask
+        process.stderr.write(`[plan] declining approval: ${method}\n`);
+        await sendCommand(socketPath, { cmd: 'approve', decision: 'deny' });
+      }
     } else {
       const qs = res.question && res.question.questions;
       if (!Array.isArray(qs) || qs.length === 0) { process.stderr.write('[plan] malformed question payload — stopping\n'); break; }
@@ -61,12 +94,34 @@ try {
     }
     res = await driveWait();
   }
+  return res;
+}
+
+let res = { status: 'failed', message: '' };
+const flags = { declinedExec: false };
+try {
+  await sendCommand(socketPath, { cmd: 'plan', prompt, effort });
+  res = await driveWait();
+  res = await drain(res, flags);
+  // Stall recovery: if we DENIED a command approval AND the turn ended with only a preamble, re-ask
+  // ONCE for a static-only plan in the SAME session (a plain `send` inherits the thread's plan mode,
+  // so it stays read-only). This directly counters Codex giving up after it couldn't run pytest.
+  if (res.status === 'completed' && flags.declinedExec && looksLikeNoPlan(res.message)) {
+    process.stderr.write('[plan] denied a command + thin plan body — re-asking for a static-only plan\n');
+    await sendCommand(socketPath, { cmd: 'send', prompt: 'Approvals are unavailable in this read-only planning session — do NOT attempt to run pytest or any command. Output the COMPLETE file-by-file plan now as plain text, based only on reading the source files.' });
+    let r2 = await driveWait();
+    r2 = await drain(r2, flags);
+    if (r2.message && r2.message.trim()) res = r2;
+  }
 } finally {
   // ALWAYS tear down the ephemeral daemon — even on timeout/error — so it never orphans a codex app-server.
   await daemon.stop();
 }
 
-console.log('STATUS: ' + res.status + (res.empty ? ' (empty)' : ''));
+// Deterministic degraded-plan signal: a completed turn whose body is a preamble / non-substantive is
+// marked '(no-plan)' so codex-wrap fails loud rather than treating it as a valid plan.
+const noPlan = res.status === 'completed' && !res.empty && looksLikeNoPlan(res.message);
+console.log('STATUS: ' + res.status + (res.empty ? ' (empty)' : (noPlan ? ' (no-plan)' : '')));
 console.log('=== PLAN ===');
 console.log(res.message || '(empty)');
 process.exit(0);

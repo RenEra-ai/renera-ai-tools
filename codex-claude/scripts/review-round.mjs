@@ -8,6 +8,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Daemon } from '../lib/daemon.mjs';
 import { sendCommand } from '../lib/client.mjs';
+import { isSafeCommand } from '../lib/safe-command.mjs';
 
 // Prefer --prompt-file (avoids shell-quoting/injection from review/plan text with backticks, $(), quotes).
 const pf = process.argv.indexOf('--prompt-file');
@@ -33,15 +34,24 @@ async function driveWait() {
   }
 }
 
-let res = { status: 'failed', message: '' };
-try {
-  await sendCommand(socketPath, { cmd: 'send', prompt });
-  res = await driveWait();
+// Drain clarifying questions / command-approval prompts, declining commands (a review only needs to
+// read). Records `flags.declinedExec` when a command-exec approval was denied — the same stall the
+// plan driver hits (Codex wants to run the tests, can't, then stops before emitting its verdict).
+async function drain(res, flags) {
   let guard = 0;
   while ((res.status === 'question' || res.status === 'approval') && guard++ < 20) {
     if (res.status === 'approval') {
-      process.stderr.write(`[driver] declining approval: ${res.request.method}\n`);
-      await sendCommand(socketPath, { cmd: 'approve', decision: 'deny' });
+      const method = (res.request && res.request.method) || '';
+      const params = (res.request && res.request.params) || {};
+      const isExec = /commandExecution|execCommand/i.test(method);
+      if (isExec && isSafeCommand(params.command)) {
+        process.stderr.write(`[driver] approving safe command: ${String(params.command).slice(0, 140)}\n`);
+        await sendCommand(socketPath, { cmd: 'approve', decision: 'allow' });
+      } else {
+        if (isExec) flags.declinedExec = true;   // a DENIED exec is what triggers the static re-ask
+        process.stderr.write(`[driver] declining approval: ${method}\n`);
+        await sendCommand(socketPath, { cmd: 'approve', decision: 'deny' });
+      }
     } else {
       const qs = res.question && res.question.questions;
       if (!Array.isArray(qs) || qs.length === 0) { process.stderr.write('[driver] malformed question payload — stopping\n'); break; }
@@ -52,6 +62,26 @@ try {
       await sendCommand(socketPath, { cmd: 'answer', id: q.id, answers: [answer] });
     }
     res = await driveWait();
+  }
+  return res;
+}
+
+const hasVerdict = (m) => /(^|\n)\s*VERDICT:\s*(NO ISSUES|ISSUES FOUND)\s*$/im.test(m || '');
+
+let res = { status: 'failed', message: '' };
+const flags = { declinedExec: false };
+try {
+  await sendCommand(socketPath, { cmd: 'send', prompt });
+  res = await driveWait();
+  res = await drain(res, flags);
+  // Stall recovery: if we DENIED a command approval AND the review ended without a verdict, re-ask
+  // ONCE for a static-only review in the SAME session so a denied test-run doesn't yield UNCLEAR.
+  if (res.status === 'completed' && flags.declinedExec && !hasVerdict(res.message)) {
+    process.stderr.write('[driver] denied a command + no verdict — re-asking for a static-only review\n');
+    await sendCommand(socketPath, { cmd: 'send', prompt: 'Approvals are unavailable in this read-only review session — do NOT attempt to run pytest or any command. Complete the review now from static reading only and END with the verdict on its own final line: exactly "VERDICT: NO ISSUES" or "VERDICT: ISSUES FOUND".' });
+    let r2 = await driveWait();
+    r2 = await drain(r2, flags);
+    if (r2.message && r2.message.trim()) res = r2;
   }
 } finally {
   // ALWAYS tear down the ephemeral daemon — even on timeout/error — so it never orphans a codex app-server.
