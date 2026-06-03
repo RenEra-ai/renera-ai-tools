@@ -18,6 +18,7 @@ export const NOTIFY = {
   TURN_STARTED: 'turn/started',
   TURN_COMPLETED: 'turn/completed',
   AGENT_MESSAGE_DELTA: 'item/agentMessage/delta',
+  PLAN_DELTA: 'item/plan/delta',        // Plan mode streams the actual plan here (NOT agentMessage)
   ITEM_COMPLETED: 'item/completed',
   ERROR: 'error',
 };

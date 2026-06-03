@@ -11,12 +11,15 @@ export const meta = {
 
 // args (passed by the /codex-issue command from the main thread):
 //   { issue, repoWorkflowPath, pluginRoot, base?, dryRun?, maxRounds? }
-const ISSUE = args && args.issue
-const REPO_WF = args && args.repoWorkflowPath
-const PLUGIN = args && args.pluginRoot
-const BASE_ARG = (args && args.base) || ''
-const DRY = !!(args && args.dryRun)
-const MAX_ROUNDS = (args && args.maxRounds) || 6
+// Some harnesses deliver the top-level Workflow `args` as a JSON string (the in-script workflow()
+// call passes an object, but the top-level Workflow tool may stringify it); coerce to an object.
+const ARGS = (typeof args === 'string' ? JSON.parse(args) : args) || {}
+const ISSUE = ARGS.issue
+const REPO_WF = ARGS.repoWorkflowPath
+const PLUGIN = ARGS.pluginRoot
+const BASE_ARG = ARGS.base || ''
+const DRY = !!ARGS.dryRun
+const MAX_ROUNDS = ARGS.maxRounds || 6
 if (!ISSUE || !REPO_WF || !PLUGIN) {
   throw new Error('codex-wrap: need args.issue, args.repoWorkflowPath, and args.pluginRoot')
 }
@@ -65,12 +68,14 @@ Steps:
 2. Build the plan prompt text — "Architect a concrete, file-by-file plan for issue #${ISSUE} (title+body below). Inspect the relevant files. Honor this repo's own conventions in CLAUDE.md / AGENTS.md (e.g. no new dependencies, minimal diff, scope discipline) — do not propose anything that violates them. Do not change anything." followed by the issue title+body — and WRITE it to a temp file using the Write tool. Do NOT put the issue text in the shell command (it may contain backticks/$()/quotes).
 3. Run the ephemeral Plan-mode driver (boots a private Codex daemon, plans, prints the plan after a '=== PLAN ===' line):
    node ${PLUGIN}/scripts/plan-round.mjs --prompt-file <that temp file>
-4. If STATUS is not 'completed' OR the plan body is empty/(empty), rebuild the prompt file with a nudge ("emit the full plan as plain text now; do not stop after the reasoning preamble") and run ONCE more.
-Return: status = the STATUS line value (e.g. 'completed'); planText = the full plan text printed after '=== PLAN ==='.`,
+4. If STATUS is not exactly 'completed' (e.g. it shows a '(no-plan)' or '(empty)' marker, or is 'timeout') OR the plan body is empty/(empty)/only a reasoning preamble, rebuild the prompt file with a nudge ("Approvals are unavailable in this read-only planning session — do NOT attempt to run pytest or any command. Emit the FULL file-by-file plan as plain text NOW from static reading only; do not stop after the reasoning preamble.") and run ONCE more.
+REPORT FAITHFULLY — do NOT improvise. You are a transcriber here, not the architect: do NOT write, synthesize, summarize, or substitute your own plan if Codex failed to produce one. If after the retry the driver STILL did not emit a usable plan (STATUS not exactly 'completed', or body is '(empty)'/'(no-plan)'/just a preamble), return that exact status and the driver's raw body verbatim — the workflow will fail loud so a human can intervene, which is the correct outcome.
+Return: status = the EXACT text after 'STATUS:' INCLUDING any '(empty)'/'(no-plan)' marker (do not strip it); planText = the verbatim text printed after '=== PLAN ===' (do not edit, augment, or replace it with your own).`,
   { label: `plan #${ISSUE}`, phase: 'Architect plan', schema: PLAN_SCHEMA },
 )
-if (!plan || plan.status !== 'completed' || !plan.planText || !plan.planText.trim() || plan.planText.trim() === '(empty)') {
-  return { status: 'failed', stage: 'architect-plan', detail: 'architect produced no usable plan' }
+if (!plan || plan.status !== 'completed' || /\(no-plan\)|\(empty\)/.test(plan.status || '') ||
+    !plan.planText || !plan.planText.trim() || plan.planText.trim() === '(empty)') {
+  return { status: 'failed', stage: 'architect-plan', detail: `architect produced no usable plan (driver status: ${plan && plan.status})` }
 }
 log(`architect plan captured (${plan.planText.length} chars)`)
 
@@ -107,7 +112,7 @@ while (round < MAX_ROUNDS) {
 Steps:
 1. Changed files (two-dot, the direct base→HEAD delta): \`git diff --name-only ${REPO_BASE}..HEAD\`.
 2. Build the review prompt text — "Review the implementation against the plan below, then inspect the changed files on disk: <the changed files>. Judge it against this repo's own conventions in CLAUDE.md / AGENTS.md — do NOT raise findings that would violate them (e.g. demanding a new dependency the repo forbids). List concrete issues as file:line with a fix. END with a verdict on its OWN FINAL line, with NOTHING after it: exactly 'VERDICT: NO ISSUES' or 'VERDICT: ISSUES FOUND'." followed by the PLAN text — and WRITE it to a temp file using the Write tool. Do NOT put it in the shell command (it may contain backticks/$()/quotes).
-3. Run the ephemeral review driver (it prints a deterministic 'PARSED_VERDICT:' line, then the raw review after '=== REVIEW ==='):
+3. Run the ephemeral review driver (it prints a deterministic 'PARSED_VERDICT:' line, then the raw review after '=== REVIEW ==='). You MUST use EXACTLY this driver and nothing else — do NOT substitute \`codex-companion review\`, \`codex review\`, \`codex exec\`, or any other Codex entrypoint: only review-round.mjs has a bounded client-side timeout (it interrupts a wedged turn), so only it cannot hang and wedge the whole pipeline. If this command itself errors, report that as the failure — do NOT fall back to another tool.
    node ${PLUGIN}/scripts/review-round.mjs --prompt-file <that temp file>
 4. Read the driver's 'PARSED_VERDICT:' line (NO ISSUES | ISSUES FOUND | UNCLEAR) as the verdict; collect any file:line findings from the '=== REVIEW ===' body.
 Return verdict, reviewedFiles, and findings[].

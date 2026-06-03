@@ -15,7 +15,7 @@ export class Daemon {
     this.app = null;
     this.server = null;
     this.threadId = null;
-    this.turn = { id: null, status: 'idle', buffer: '', parked: null, message: null };
+    this.turn = { id: null, status: 'idle', buffer: '', planBuffer: '', planText: null, parked: null, message: null };
     this._waiters = []; // resolve fns awaiting a terminal/awaiting state
     this._sockets = new Set(); // open client connections (so stop() can tear them down)
     this._stopped = false;
@@ -107,7 +107,7 @@ export class Daemon {
     } catch (e) {
       return { error: e.message };
     }
-    this.turn = { id: null, status: 'running', buffer: '', parked: null, message: null };
+    this.turn = { id: null, status: 'running', buffer: '', planBuffer: '', planText: null, parked: null, message: null };
     // Don't await the response: notifications drive turn state, and awaiting would race
     // turn/completed on a fast server (response + notifications arrive in one stdout burst).
     // But a turn/start REJECTION must be surfaced — otherwise `wait` hangs forever.
@@ -206,11 +206,14 @@ export class Daemon {
     return this.turn.id && turnId && turnId !== this.turn.id;
   }
 
-  // Final assistant text is assembled ONLY from item/agentMessage/delta chunks (this.turn.buffer).
-  // item/completed (NOTIFY.ITEM_COMPLETED) is intentionally NOT consumed: a turn that completes with no
-  // deltas yields an empty buffer, which _completedResult flags as empty:true (the orchestrator then
-  // retries). If a future Codex build delivers the final message ONLY via item/completed, add a branch
-  // here to capture it as an authoritative source.
+  // The turn's text is assembled from streamed deltas, with the authoritative final item text from
+  // item/completed preferred when present. TWO content channels matter:
+  //   - item/agentMessage/delta  → the chat/answer/review stream (this.turn.buffer)
+  //   - item/plan/delta          → Plan-mode's actual PLAN stream (this.turn.planBuffer)
+  // In Plan mode Codex narrates its reasoning via agentMessage but emits the real file-by-file plan via
+  // item/plan/delta and a final item/completed{item.type:'plan'}. Listening to agentMessage alone
+  // captured only the "I'll inspect…" preamble and DROPPED the plan — so we capture both and, at turn
+  // end, prefer the plan text when there is one (else fall back to the agentMessage buffer for reviews).
   _onNotification(method, params) {
     if (method === NOTIFY.TURN_STARTED) {
       // Adopt the id of the turn we just started (only while running and not yet identified).
@@ -220,12 +223,24 @@ export class Daemon {
     } else if (method === NOTIFY.AGENT_MESSAGE_DELTA) {
       if (this._isStaleTurn(params.turnId)) return;
       if (typeof params.delta === 'string') this.turn.buffer += params.delta;
+    } else if (method === NOTIFY.PLAN_DELTA) {
+      if (this._isStaleTurn(params.turnId)) return;
+      if (typeof params.delta === 'string') this.turn.planBuffer += params.delta;
+    } else if (method === NOTIFY.ITEM_COMPLETED) {
+      // Authoritative final text for an item. Capture the completed PLAN item (and a plan delivered as
+      // an agentMessage, just in case). item/completed often omits turnId, so guard leniently.
+      if (this._isStaleTurn(params.turnId)) return;
+      const item = (params && params.item) || {};
+      if (item.type === 'plan' && typeof item.text === 'string' && item.text.trim()) this.turn.planText = item.text;
     } else if (method === NOTIFY.TURN_COMPLETED) {
       const completedId = params.turn && params.turn.id;
       if (this._isStaleTurn(completedId)) return;
       const status = params.turn ? params.turn.status : 'completed';
       this.turn.status = status === 'completed' ? 'completed' : status;
-      this.turn.message = this.turn.buffer;
+      // Prefer the authoritative completed plan, then the streamed plan, then the agentMessage stream.
+      const plan = (this.turn.planText && this.turn.planText.trim()) ? this.turn.planText
+        : ((this.turn.planBuffer && this.turn.planBuffer.trim()) ? this.turn.planBuffer : '');
+      this.turn.message = plan || this.turn.buffer;
       this._resolveWaiters();
     }
   }
