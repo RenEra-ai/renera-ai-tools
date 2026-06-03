@@ -66,7 +66,12 @@ async function drain(res, flags) {
   return res;
 }
 
-const hasVerdict = (m) => /(^|\n)\s*VERDICT:\s*(NO ISSUES|ISSUES FOUND)\s*$/im.test(m || '');
+// Mirror the deterministic parser below exactly: ONLY the FINAL non-empty line may be the verdict
+// (trailing text after an earlier VERDICT line → no verdict → the static re-ask must still fire).
+const hasVerdict = (m) => {
+  const ls = String(m || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  return /^VERDICT:\s*(NO ISSUES|ISSUES FOUND)$/i.test(ls.length ? ls[ls.length - 1] : '');
+};
 
 let res = { status: 'failed', message: '' };
 const flags = { declinedExec: false };
