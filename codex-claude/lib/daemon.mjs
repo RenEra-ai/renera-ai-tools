@@ -97,10 +97,6 @@ export class Daemon {
     // mode: 'plan' | 'default' | undefined. plan & default set collaborationMode (model required);
     // undefined = plain send (no collaborationMode; inherits the thread's current mode).
     const explicitMode = mode === 'plan' || mode === 'default' ? mode : undefined;
-    // Track Plan mode across turns: a `plan` turn enters it, a `default` turn exits it, a plain `send`
-    // (undefined) inherits the thread's current mode — so plan-round's plain-`send` re-ask stays in plan.
-    if (explicitMode === 'plan') this.planMode = true;
-    else if (explicitMode === 'default') this.planMode = false;
     let model;
     if (explicitMode) {
       model = this._resolveModel();
@@ -113,6 +109,13 @@ export class Daemon {
       return { error: e.message };
     }
     this.turn = { id: null, status: 'running', buffer: '', planBuffer: '', planText: null, parked: null, message: null };
+    // Update Plan-mode tracking ONLY now that the turn is actually being dispatched — AFTER the
+    // synchronous validation above (no model / invalid effort return early), so a rejected start can't
+    // desync planMode from the server thread. A `plan` turn enters Plan mode, `default` exits, a plain
+    // `send` (undefined) inherits. Captured prior value is restored if the server rejects the start.
+    const prevPlanMode = this.planMode;
+    if (explicitMode === 'plan') this.planMode = true;
+    else if (explicitMode === 'default') this.planMode = false;
     // Don't await the response: notifications drive turn state, and awaiting would race
     // turn/completed on a fast server (response + notifications arrive in one stdout burst).
     // But a turn/start REJECTION must be surfaced — otherwise `wait` hangs forever.
@@ -120,6 +123,7 @@ export class Daemon {
       () => {},
       (err) => {
         if (this.turn.status === 'running' || this.turn.status === 'awaiting_input') {
+          this.planMode = prevPlanMode;   // server rejected the start → undo the mode change
           this.turn.status = 'failed';
           this.turn.message = `turn/start failed: ${err.message}`;
           this._resolveWaiters();
