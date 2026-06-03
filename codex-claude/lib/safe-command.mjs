@@ -9,8 +9,11 @@
 // and no path that escapes the working tree (absolute, `~`, or `..`). Defence in depth: we still unwrap
 // one `sh -c` layer, reject shell metacharacters, and reject env-assignment prefixes. Deny is always safe.
 
-// Chaining / pipe / redirection / command-or-var substitution / subshell / background / newline.
-const DANGEROUS_META = /[;&|<>`$()\n\r]/;
+// Chaining / pipe / redirection / command-or-var substitution / subshell / background / newline, PLUS
+// shell-EXPANSION metacharacters (brace `{}`, glob `* ? [ ]`, tilde `~`). The latter matter because the
+// command is run via `sh -c`, so the shell expands them AFTER this static check — e.g. `.{.,}/x` expands
+// to `../x`, escaping the tree past isPathEscape(). Any of these → deny (the verify path uses none).
+const DANGEROUS_META = /[;&|<>`$()\n\r{}*?~[\]]/;
 
 // pytest LONG options that write, delete, redirect config, or load/exec code — never auto-approve.
 // (Short `-c`/`-o` are handled separately below: they accept ATTACHED values like `-cFILE`/`-oNAME=VAL`,
