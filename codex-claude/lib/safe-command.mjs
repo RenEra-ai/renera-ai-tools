@@ -77,7 +77,8 @@ export function isSafeCommand(raw) {
   const prog = argv[0];
 
   if (prog === 'pytest') return pytestArgsOk(argv.slice(1));
-  if (prog === 'tox' || prog === 'nox') return argv.slice(1).every((a) => !isPathEscape(a));
+  // NOTE: tox/nox are deliberately NOT auto-approved — they run arbitrary repo-defined sessions
+  // (`nox -s deploy`, `tox -e clean`), not just tests, so they're not a safe blanket approval.
   if (prog === 'python' || prog === 'python3') {
     const mi = argv.indexOf('-m');
     if (mi < 1) return false;                          // must be `-m <module>`, never `-c <code>`
