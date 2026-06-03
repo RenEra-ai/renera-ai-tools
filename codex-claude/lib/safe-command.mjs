@@ -12,8 +12,10 @@
 // Chaining / pipe / redirection / command-or-var substitution / subshell / background / newline.
 const DANGEROUS_META = /[;&|<>`$()\n\r]/;
 
-// pytest options that write, delete, redirect config, or load/exec code — never auto-approve.
-const PYTEST_BAD_OPT = /^(--basetemp|--junitxml|--junit-xml|--report-log|--result-log|--resultlog|-o|--override-ini|-c|--config-file|--rootdir|--pdbcls)(=|$)/;
+// pytest LONG options that write, delete, redirect config, or load/exec code — never auto-approve.
+// (Short `-c`/`-o` are handled separately below: they accept ATTACHED values like `-cFILE`/`-oNAME=VAL`,
+// which a `(=|$)`-anchored match would miss.)
+const PYTEST_BAD_OPT = /^(--basetemp|--junitxml|--junit-xml|--report-log|--result-log|--resultlog|--override-ini|--config-file|--rootdir|--pdbcls)(=|$)/;
 
 function unwrap(cmd) {
   const m = /^\s*\/?(?:[\w/]*\/)?(?:ba|z)?sh\s+-[a-z]*c\s+(.+)$/i.exec(cmd);
@@ -60,6 +62,7 @@ function pytestArgsOk(args) {
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (PYTEST_BAD_OPT.test(a)) return false;
+    if (/^-[co]/.test(a)) return false;       // -c config-file / -o override-ini, incl. attached -cFILE / -oNAME=VAL
     if (a === '-p') { if (!/^no:/.test(args[++i] || '')) return false; continue; }        // -p VALUE
     if (/^-p./.test(a)) { if (!/^no:/.test(a.replace(/^-p=?/, ''))) return false; continue; } // -pVALUE
     if (isPathEscape(a)) return false;
