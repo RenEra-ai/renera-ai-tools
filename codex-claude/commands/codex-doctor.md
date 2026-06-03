@@ -29,7 +29,7 @@ Report `codexVersion` / `authPresent`. If `codexVersion` is null → Codex CLI n
 
 ```bash
 ls .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null            # any Workflow at all?
-grep -l "noLand" .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null   # composition-ready one(s)
+grep -l "noLand" .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null   # candidates only; verify code reads args.noLand
 ```
 
 - **A file reads `noLand`** → for a **numeric issue**, `/codex-issue` will use **workflow-mode

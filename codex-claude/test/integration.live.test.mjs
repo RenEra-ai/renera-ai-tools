@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Daemon } from '../lib/daemon.mjs';
 import { sendCommand } from '../lib/client.mjs';
+import { looksLikeNoPlan } from '../lib/plan-output.mjs';
 
 const LIVE = process.env.CODEX_DRIVE_LIVE === '1';
 
@@ -38,7 +39,7 @@ test('live: plan mode produces a plan', { skip: !LIVE, timeout: 180000 }, async 
     res = await sendCommand(socketPath, { cmd: 'wait' });
   }
   assert.equal(res.status, 'completed');
-  assert.ok(res.message.length > 0);
+  assert.equal(looksLikeNoPlan(res.message), false);
   await daemon.stop();
 });
 

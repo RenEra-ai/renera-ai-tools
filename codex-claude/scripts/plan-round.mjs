@@ -9,6 +9,7 @@ import { Daemon } from '../lib/daemon.mjs';
 import { sendCommand } from '../lib/client.mjs';
 import { readConfiguredModel } from '../lib/config.mjs';
 import { isSafeCommand } from '../lib/safe-command.mjs';
+import { looksLikeNoPlan } from '../lib/plan-output.mjs';
 
 // Prefer --prompt-file (avoids shell-quoting/injection from issue/plan text with backticks, $(), quotes).
 const pf = process.argv.indexOf('--prompt-file');
@@ -21,29 +22,6 @@ const effort = ei >= 0 ? process.argv[ei + 1] : 'xhigh';
 if (!model) {
   console.error('plan-round: Plan mode needs a model — pass --model <name> or set model = "..." in ~/.codex/config.toml');
   process.exit(1);
-}
-
-// Heuristic: did Codex actually emit a file-by-file plan, or just a reasoning preamble / the generic
-// Plan-mode help blurb? Conservative — only flags clearly non-substantive output, so a real plan is
-// never misclassified as "no plan". Used to (a) trigger a single static-only re-ask after a denied
-// command approval, and (b) mark STATUS '(no-plan)' so codex-wrap fails loud instead of accepting a
-// preamble (its agent must NOT substitute its own plan).
-function looksLikeNoPlan(msg) {
-  const t = (msg || '').trim();
-  if (!t) return true;
-  if (/^I.?m Codex in this workspace/i.test(t)) return true;       // generic Plan-mode help text
-  if (/Current mode:\s*\*?\*?Plan Mode/i.test(t)) return true;
-  // A real file-by-file plan cites concrete files and/or enumerated/bulleted steps. Output with NONE
-  // of those is narration / a reasoning preamble, not a plan — regardless of length (a chatty preamble
-  // can run long). Do NOT gate on length: that let a ~600-char "I'll inspect…" preamble slip through.
-  // Match a real filename: word + dot + LOWERCASE ext of >=2 chars (mathkit/sequences.py, pyproject.toml).
-  // Lowercase + len>=2 avoids two false positives in chatty prose: run-on sentences ("files.The" — the
-  // ext would be capitalized) and abbreviations ("e.g."/"i.e." — the ext would be 1 char).
-  const hasFileRef = /[\w/-]+\.[a-z]{2,6}\b/.test(t);
-  const hasNumberedStep = /(^|\n)\s*\d+[.)]\s/.test(t);            // 1. / 1)
-  const hasBullets = /(^|\n)\s*[-*]\s+\S/.test(t);                 // - foo / * foo
-  if (!hasFileRef && !hasNumberedStep && !hasBullets) return true;
-  return false;
 }
 
 const dir = mkdtempSync(join(tmpdir(), 'cdx-plan-'));

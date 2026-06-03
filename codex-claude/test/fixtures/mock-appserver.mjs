@@ -5,6 +5,9 @@
 //   "ASK"         -> emits a server-request item/tool/requestUserInput, waits for the
 //                    client's response, then emits delta + turn/completed
 //   "BADTURN"     -> rejects turn/start with a JSON-RPC error (models a server-side rejection)
+//   "PLANSTREAM"  -> emits preamble chat plus Plan-mode item/plan/delta and completed plan text
+//   "PLANITEM"    -> emits preamble chat plus only completed plan item text
+//   "REVIEWPLAN"  -> emits incidental item/plan/delta plus agent-message verdict text
 //   anything else -> emits delta "done" then turn/completed
 // turn/start validation mirrors the real app-server: if collaborationMode is present, its
 // settings.model MUST be a non-empty string, else the request is rejected with -32600
@@ -49,6 +52,16 @@ async function runTurn(threadId, text) {
   } else if (text.includes('EMPTY')) {
     // Emit NO agent-message delta: models the gpt-5.5 build quirk where a turn ends
     // `completed` with an empty final message (no plan/verdict content).
+  } else if (text.includes('PLANSTREAM')) {
+    notify('item/agentMessage/delta', { threadId, turnId, itemId: 'i2', delta: "I'll inspect the repo before planning." });
+    notify('item/plan/delta', { threadId, turnId, itemId: 'p1', delta: 'src/app.js\n- Add GET /healthz.\n' });
+    notify('item/completed', { threadId, turnId, item: { type: 'plan', id: 'p1', text: 'src/app.js\n- Add GET /healthz.\n- Add a request test.' } });
+  } else if (text.includes('PLANITEM')) {
+    notify('item/agentMessage/delta', { threadId, turnId, itemId: 'i2', delta: "I'll inspect the repo before planning." });
+    notify('item/completed', { threadId, turnId, item: { type: 'plan', id: 'p1', text: 'app.js\n- Add GET /healthz.' } });
+  } else if (text.includes('REVIEWPLAN')) {
+    notify('item/plan/delta', { threadId, turnId, itemId: 'p1', delta: 'internal checklist, not final review' });
+    notify('item/agentMessage/delta', { threadId, turnId, itemId: 'i2', delta: 'Reviewed src/app.js.\nVERDICT: NO ISSUES' });
   } else if (text.includes('say OK')) {
     notify('item/agentMessage/delta', { threadId, turnId, itemId: 'i2', delta: 'OK' });
   } else {

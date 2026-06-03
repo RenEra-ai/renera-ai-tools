@@ -1,7 +1,7 @@
 # Workflow-mode composition contract
 
 Some repos implement their development lifecycle as a **Claude Code Workflow** — a deterministic
-`.claude/workflows/*.js` script (developer → reviewer loops, QA, internal Codex review, land), invoked
+`.claude/workflows/*.js` or `.mjs` script (developer → reviewer loops, QA, internal Codex review, land), invoked
 via the Workflow tool or a slash command.
 
 A plugin **subagent cannot run such a Workflow**: the Workflow tool is a session-level capability, not
@@ -23,7 +23,7 @@ real; the plugin only adds the architect bookends and the landing.
 
 ## The contract (what a repo's workflow must support)
 
-To be composable, the repo's `.claude/workflows/*.js` must accept:
+To be composable, the repo's `.claude/workflows/*.js` or `.mjs` file must accept:
 
 | arg | required | behavior |
 |---|---|---|
@@ -31,15 +31,17 @@ To be composable, the repo's `.claude/workflows/*.js` must accept:
 | `args.noLand` | **yes** | run the full pipeline (implement + all internal reviews/QA) but **return before landing** — no squash, push, PR, or issue-close. Leave the implemented + reviewed commits on the branch. Return `{ terminal: "ready_to_land", branch, base_sha, ready: true }`. |
 | `args.plan` | optional | an architect plan (string) to guide implementation; inject it into the implement step. Ignore if unsupported. |
 
-The plugin **detects** a composable workflow by `grep -l noLand .claude/workflows/*.js`. If none is
-found, `/codex-issue` falls back to **subagent mode** (the `codex-developer` black box) and works as
-before.
+The plugin uses `grep noLand` only to discover candidates. `/codex-issue` treats a workflow as
+composable only after opening the candidate and confirming it actually reads `args.noLand` (or
+destructures `noLand` from `args`) in code, not only in comments/strings. The no-land branch must return
+`terminal: "ready_to_land"` with `branch` and `base_sha`; otherwise `/codex-issue` falls back to
+**subagent mode** and nudges `/codex-compose-setup`.
 
 ## Making a repo composable — `/codex-compose-setup`
 
 Run **`/codex-compose-setup`** in a repo to arrange the contract automatically instead of editing by
 hand:
-- An existing `.claude/workflows/*.js` → it adds the `noLand` seam **in place** (gate `land()` → return
+- An existing `.claude/workflows/*.js` or `.mjs` → it adds the `noLand` seam **in place** (gate `land()` → return
   `ready_to_land`), shown as a diff for your approval.
 - No workflow → it scaffolds a minimal, composition-ready starter from
   `templates/implement-issue.template.js` (implement → discover-and-run the repo's tests → land,
