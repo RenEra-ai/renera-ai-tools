@@ -15,8 +15,7 @@ export class Daemon {
     this.app = null;
     this.server = null;
     this.threadId = null;
-    this.turn = { id: null, status: 'idle', buffer: '', planBuffer: '', planText: null, parked: null, message: null };
-    this.planMode = false; // thread is in Plan mode (set by a mode:'plan' turn, cleared by mode:'default')
+    this.turn = { id: null, status: 'idle', buffer: '', planBuffer: '', planText: null, parked: null, message: null, isPlan: false };
     this._waiters = []; // resolve fns awaiting a terminal/awaiting state
     this._sockets = new Set(); // open client connections (so stop() can tear them down)
     this._stopped = false;
@@ -108,14 +107,12 @@ export class Daemon {
     } catch (e) {
       return { error: e.message };
     }
-    this.turn = { id: null, status: 'running', buffer: '', planBuffer: '', planText: null, parked: null, message: null };
-    // Update Plan-mode tracking ONLY now that the turn is actually being dispatched — AFTER the
-    // synchronous validation above (no model / invalid effort return early), so a rejected start can't
-    // desync planMode from the server thread. A `plan` turn enters Plan mode, `default` exits, a plain
-    // `send` (undefined) inherits. Captured prior value is restored if the server rejects the start.
-    const prevPlanMode = this.planMode;
-    if (explicitMode === 'plan') this.planMode = true;
-    else if (explicitMode === 'default') this.planMode = false;
+    // isPlan marks THIS turn as plan-producing (explicit `mode:'plan'`). The plan stream is preferred at
+    // turn end ONLY for such turns — a plain `send` (a review, or a send in a thread that earlier ran a
+    // plan) is NOT plan-producing, so a review's internal-checklist item/plan/delta can't shadow its
+    // agentMessage/VERDICT. (plan-round's static re-ask therefore issues an explicit `plan` turn, not a
+    // bare `send`.) Per-turn, so a rejected start can never desync it from the server thread.
+    this.turn = { id: null, status: 'running', buffer: '', planBuffer: '', planText: null, parked: null, message: null, isPlan: explicitMode === 'plan' };
     // Don't await the response: notifications drive turn state, and awaiting would race
     // turn/completed on a fast server (response + notifications arrive in one stdout burst).
     // But a turn/start REJECTION must be surfaced — otherwise `wait` hangs forever.
@@ -123,7 +120,6 @@ export class Daemon {
       () => {},
       (err) => {
         if (this.turn.status === 'running' || this.turn.status === 'awaiting_input') {
-          this.planMode = prevPlanMode;   // server rejected the start → undo the mode change
           this.turn.status = 'failed';
           this.turn.message = `turn/start failed: ${err.message}`;
           this._resolveWaiters();
@@ -249,7 +245,7 @@ export class Daemon {
       // In PLAN mode prefer the captured plan (authoritative completed item, else streamed deltas); in
       // any other mode (e.g. a review `send`) use the agentMessage stream — a review's internal-checklist
       // item/plan/delta must NOT shadow the actual review + VERDICT line.
-      const plan = this.planMode
+      const plan = this.turn.isPlan
         ? ((this.turn.planText && this.turn.planText.trim()) ? this.turn.planText
           : ((this.turn.planBuffer && this.turn.planBuffer.trim()) ? this.turn.planBuffer : ''))
         : '';
