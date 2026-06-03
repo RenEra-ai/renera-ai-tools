@@ -167,9 +167,11 @@ on merge via `Closes #N` — the loop never closes it directly).
 - Ensure everything is committed (the developer commits each round).
 - Resolve the default branch and the base. `$DEFAULT` = `gh repo view --json defaultBranchRef -q
   .defaultBranchRef.name`. The base **branch name** (`gh pr create --base` wants a bare name, never a
-  remote-tracking ref): `--base` if given; else `dev` if `origin/dev` exists
-  (`git show-ref --verify --quiet refs/remotes/origin/dev`); else `$DEFAULT`. `$BASE` must be e.g.
-  `dev`, not `origin/dev`. **Record whether `$BASE == $DEFAULT`** — it decides issue auto-close (below).
+  remote-tracking ref): `--base` if given; else `dev` if it exists **on the remote**
+  (`git ls-remote --heads origin dev | grep -q .` — the live remote, matching `/codex-doctor`,
+  `codex-wrap.js`, and the template; a local `show-ref` can be stale/missing and drift); else `$DEFAULT`.
+  `$BASE` must be e.g. `dev`, not `origin/dev`. **Record whether `$BASE == $DEFAULT`** — it decides issue
+  auto-close (below).
 - `git push -u origin <branch>`.
 - Build the PR body with **real newlines** (literal `\n` in a double-quoted string will NOT render):
   ```bash
