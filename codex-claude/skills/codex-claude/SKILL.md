@@ -150,67 +150,49 @@ auto-answering. When you hit `status:"question"` or `status:"approval"`:
 
 Never silently guess your way through a parked question — surfacing it is the point.
 
-## Full-issue orchestration (autonomous)
+## Full-issue orchestration (autonomous, main-thread)
 
-For a hands-off run, **`/codex-issue <#|task>`** drives the entire architect→implement→review→ship loop
-via the **codex-orchestrator** agent — no human in the loop except `--dry-run` and a max-rounds guard.
+For a hands-off run, **`/codex-issue <#|task>`** drives the entire architect → implement → review →
+ship loop **in the main thread** — so it has `Task` and runs **this repo's own development workflow,
+including its subagents**, for real. No human in the loop except `--dry-run` and a max-rounds guard.
 Requires the `gh` CLI (authenticated) for issue intake + push/PR. Unlike the manual loop above
-(human-supervised), the orchestrator **auto-answers** the architect's clarifying questions and
-**auto-approves** the plan, then integrates the result.
+(human-supervised), the loop **auto-answers** the architect's clarifying questions (via the helper
+agents) and **auto-approves** the implementation plan, then integrates the result.
 
-Pieces:
-- **codex-orchestrator** (agent) — drives the *persistent* daemon; owns plan → approval → review loop →
-  finish (push + PR; `Closes #N` closes the issue on merge **into the default branch** — no explicit
-  close; a non-default base like `dev` is flagged for manual close).
-- **codex-developer** (agent) — the repo-agnostic **black box**: it **discovers and runs THIS repo's
-  own full internal workflow wherever it's defined** (`CLAUDE.md`, `AGENTS.md`, or `.claude/` process
-  docs / commands / agents) — however many internal reviews / QA agents / tests it has — then reports
-  `STATUS: DONE/BLOCKED` + a diff. It **stops before landing** (push/PR are the orchestrator's job).
-  It is **fail-closed**: a required review/QA gate that *cannot run* (e.g. a live QA stage needing
-  credentials it doesn't have) is reported `BLOCKED`, never silently skipped — so the orchestrator
-  stops rather than landing an under-reviewed change. Because a subagent **cannot dispatch another
-  subagent**, a repo gate that is itself a subagent is **replayed inline** from its `.md` (and labeled
-  `replayed inline` vs `natively run` in the report, so reduced fidelity is visible); a repo whose whole
-  lifecycle is a Workflow it cannot run returns `BLOCKED` pointing to `/codex-compose-setup`. The
-  orchestrator never looks inside; it only consumes that report. *(The plugin only adds the architect
-  plan at the front and the architect review→fix loop at the back — it wraps, never replaces, the
-  repo's lifecycle.)*
-- *(optional)* an independent **plan-review subagent** (e.g. an agent named `plan-reviewer`, if one is
-  configured in your environment) — a second-opinion approve/adjust verdict on the architect's plan;
-  the orchestrator falls back to judging the plan itself when none is available. Not shipped with this
-  plugin.
+Codex is driven by thin, `Task`-free helper subagents (they isolate the verbose Codex wait-loop):
+- **codex-architect** (agent) — drives an *ephemeral* Codex Plan-mode session to produce the
+  file-by-file **design plan**; persists it to `.codex/plans/issue-<#>.md` and returns the path.
+- **codex-planner** (agent, dispatched `mode:"plan"`, **read-only**) — **Claude** authoring its own
+  concrete **implementation plan** from the design plan (Codex is not involved in this step); returns
+  the text, which the main thread persists to `.codex/plans/issue-<#>.claude.md`.
+- **codex-reviewer** (agent) — drives an *ephemeral* Codex review of impl-vs-**design-plan** and
+  returns a structured last-line `VERDICT:`.
 
-Flow: intake (`gh issue view`) → `plan` (architect, Plan mode) → approve → dispatch developer (black box)
-→ `send` a review of impl-vs-plan **on the same thread** (so the architect remembers the plan) →
-fix→re-review scoped to the fix delta until clean → `git push` + `gh pr create` (`Closes #N` — closes the
-issue when merged into the default branch) → `stop`. The codex↔claude **messaging handoff** is just the verbs: `read` carries the
-plan/review out of Codex; `send` points Codex at the developer's changed files on disk (never paste big
-diffs — ARG_MAX).
+The main thread does the rest itself: it **develops** (running the repo's own workflow, dispatching its
+QA/review subagents via `Task`), then **addresses** each review round's findings via the
+**receiving-code-review** skill (verify, fix genuine issues, push back on false positives — never blind
+compliance), re-running the repo's gates, until the verdict is `VERDICT: NO ISSUES` or the max rounds
+(default 6) is hit. All Codex sessions are **ephemeral**; the design-plan text is re-inlined into each
+review, so there is **no persistent daemon** to manage. Finish: `git push` + `gh pr create` (`Closes #N`
+closes the issue on a merge **into the default branch**; a non-default base like `dev` is flagged for a
+manual close). The loop never auto-merges and never closes the issue itself.
 
-Brakes: `--dry-run` stops before push/PR; the loop halts after the max rounds (default 6) rather
-than push an un-clean change; the daemon is always `stop`ped, even on abort. **Robustness:** a turn that
-ends `completed` but empty/preamble-only (a known gpt-5.5 quirk; the daemon flags it
-`{status:"completed", empty:true}`) is retried in-thread with a nudge — never accepted as success; review
-verdicts use a structured last-line `VERDICT: …` to avoid fragile substring matching. This orchestrated path
-deliberately **overrides** the human-supervised default — use the manual `/codex-architect` +
-`/codex-review` flow when you want to see and decide each step yourself.
+Brakes: `--dry-run` stops before push/PR; the loop halts after the max rounds rather than push an
+un-clean change. **Robustness:** a Codex turn that ends `completed` but empty/preamble-only is retried
+in-thread by the driver; review verdicts use a structured last-line `VERDICT: …` (no fragile substring
+matching). This autonomous path deliberately **overrides** the human-supervised default — use the
+manual `/codex-architect` + `/codex-review` flow when you want to see and decide each step yourself.
 
-**Workflow-mode repos.** If a repo's dev lifecycle is itself a Claude Code Workflow
-(`.claude/workflows/*.js`), a subagent can't run it — so for those repos `/codex-issue` **composes**
-instead of wrapping from outside: the command (main thread) runs a wrapper workflow
-(`workflows/codex-wrap.js`) that brackets the repo's **own** workflow (called with `noLand:true`, all
-its gates intact) with the architect plan + review, then lands. Detected by scanning
-`.claude/workflows/*.{js,mjs}` for a file that actually **reads** `args.noLand` (a bare comment mention
-doesn't qualify); falls back to the subagent path above when no composable workflow is present (and a
-non-composable Workflow is nudged toward `/codex-compose-setup`). Run **`/codex-compose-setup`** to add the `noLand` seam to a repo's workflow (or
-scaffold a starter) — `noLand` is not an Anthropic-standard arg, so the repo's workflow must read it.
-In composition, the architect's fix rounds re-run the repo's **own review/QA gate(s)** on the fix (a
-gate that is a command/script runs natively; a gate that is a subagent is **replayed inline**, since
-subagents can't nest), a clean-but-substance-free verdict is nudged once rather than rubber-stamped, and
-a gate that can't run is fail-closed (not landed). If a repo has a Workflow that **isn't**
-composition-ready (no `noLand`), `/codex-issue` says so and nudges `/codex-compose-setup` instead of
-silently degrading. Run **`/codex-doctor`** to preflight which mode a repo will use and whether the
-seam is intact. Contract + details: `${CLAUDE_PLUGIN_ROOT}/docs/WORKFLOW-MODE.md`.
+**Workflow-mode repos.** If a repo's dev lifecycle is itself a composable Claude Code Workflow
+(`.claude/workflows/*.js` that **reads** `args.noLand`), the main thread runs that Workflow (with
+`noLand:true`, all its gates intact) as the **development engine** via `workflows/codex-wrap.js`, while
+everything around it — the architect plan, the implementation plan, the review, and the fixes — stays
+in the main thread. Detected by scanning `.claude/workflows/*.{js,mjs}` for a file that actually reads
+`args.noLand` (a bare comment mention doesn't qualify); it falls back to main-thread development when no
+composable workflow is present (and nudges a non-composable Workflow toward `/codex-compose-setup`). Run
+**`/codex-compose-setup`** to add the `noLand` seam (`noLand` is not an Anthropic-standard arg, so the
+repo's workflow must read it), and **`/codex-doctor`** to preflight which mode a repo will use. Contract
++ details: `${CLAUDE_PLUGIN_ROOT}/docs/WORKFLOW-MODE.md`.
 
 ## Verb reference
 
