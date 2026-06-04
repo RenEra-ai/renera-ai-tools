@@ -119,8 +119,9 @@ The plugin must wrap a repo's lifecycle **whatever shape it has**. Two real repo
   If it doesn't, `/codex-issue` detects nothing and falls back to main-thread mode, which needs no contract.
 - Approval is requested **before** launch (workflows can't prompt mid-run). The main-thread loop runs
   in the background and reports on completion.
-- The architect plan is **inlined** into the review (no shared Codex thread across phases), so each
-  architect touchpoint is a self-contained ephemeral session — no daemon-continuity fragility.
+- The architect plan is **inlined verbatim** into the review (the driver appends the saved plan file
+  byte-for-byte; no shared Codex thread across phases), so each architect touchpoint is a self-contained
+  ephemeral session — no daemon-continuity fragility.
 - **Two reviews, two goals (by design — not redundant).** If the repo's own workflow contains a Codex
   code-review of the implementation (reviewing the code and specific fixes in the developer loop, with
   the developer's context) AND the main-thread architect review judges the implementation against the

@@ -31,11 +31,13 @@ result, and shuts down.
 ## What you are given
 
 The dispatcher passes you the **changed files / scope** to review, and — when run inside the
-`/codex-issue` loop — the **architect design-plan text** (the approved intent). The plan is
-**optional**: if you were given one, judge the implementation **against that plan**; if not (a
-standalone `/codex-review`), review the changed files for **correctness bugs, missing edge cases, and
-contract/interface mismatches** on their own merits. Either way, judge against this repo's own
-conventions (CLAUDE.md / AGENTS.md).
+`/codex-issue` loop — the **path** to the architect design-plan file (`PLAN_PATH`, the approved
+intent). The plan is **optional**: if you were given a path, judge the implementation **against that
+plan**; if not (a standalone `/codex-review`), review the changed files for **correctness bugs, missing
+edge cases, and contract/interface mismatches** on their own merits. Either way, judge against this
+repo's own conventions (CLAUDE.md / AGENTS.md). **Never paraphrase the plan**: you pass the path to the
+driver, which inlines the saved file **byte-for-byte** — you must not summarize, compress, reorder, or
+re-author it.
 
 ## Steps
 
@@ -47,26 +49,32 @@ conventions (CLAUDE.md / AGENTS.md).
    it from the diff via Bash (`git diff --name-only <base>..HEAD`).
 
 3. **Build the review prompt in a temp FILE with the Write tool** (never inline the plan/file text in a
-   shell argument — it may contain backticks/`$()`/quotes). Pick the body by whether you got a plan:
-   - **With a plan:** "Review the implementation against the plan below, then inspect the changed files
-     on disk: `<file list>`. Judge it against this repo's own conventions in CLAUDE.md / AGENTS.md — do
-     NOT raise findings that would violate them (e.g. demanding a new dependency the repo forbids).
-     List concrete issues as `file:line` with a fix. END with a verdict on its OWN FINAL line, with
-     NOTHING after it: exactly 'VERDICT: NO ISSUES' or 'VERDICT: ISSUES FOUND'." …followed by the PLAN text.
+   shell argument — it may contain backticks/`$()`/quotes). This file holds the **instructions only** —
+   do NOT paste the plan into it; the driver appends the plan verbatim from `PLAN_PATH` (step 4). Pick
+   the body by whether you got a plan:
+   - **With a plan:** "Review the implementation against the architect design plan provided below, then
+     inspect the changed files on disk: `<file list>`. Judge it against this repo's own conventions in
+     CLAUDE.md / AGENTS.md — do NOT raise findings that would violate them (e.g. demanding a new
+     dependency the repo forbids). List concrete issues as `file:line` with a fix. END with a verdict on
+     its OWN FINAL line, with NOTHING after it: exactly 'VERDICT: NO ISSUES' or 'VERDICT: ISSUES FOUND'."
+     (The driver appends the verbatim plan after this body.) If the dispatcher ALSO gave you acceptance
+     criteria, paste them into this body under a separate `=== ISSUE ACCEPTANCE CRITERIA ===` header —
+     never merged into the plan block.
    - **Without a plan** (standalone): "Review these changed files for correctness bugs, missing edge
      cases, and contract/interface mismatches: `<file list>`. Inspect them on disk. Judge against this
      repo's own conventions in CLAUDE.md / AGENTS.md. List concrete issues as `file:line` with a fix.
      END with a verdict on its OWN FINAL line, with NOTHING after it: exactly 'VERDICT: NO ISSUES' or
-     'VERDICT: ISSUES FOUND'." (no plan text).
+     'VERDICT: ISSUES FOUND'." (no plan text; omit `--plan-file` in step 4).
    (Keep the changed-file argument small — name files; do NOT paste big diffs: ARG_MAX. Codex reads
    them on disk.)
 
 4. **Run the review** from the repo root so Codex sees the project as its cwd. Use EXACTLY this driver
    and nothing else — do NOT substitute `codex review`, `codex exec`, or `codex-companion`: only
    `review-round.mjs` has a bounded client-side timeout (it interrupts a wedged turn), so only it
-   cannot hang and wedge the pipeline:
+   cannot hang and wedge the pipeline. **With a plan**, pass `--plan-file <PLAN_PATH>` so the driver
+   inlines the saved plan **verbatim** (you never paste it yourself); **without a plan**, omit it:
    ```bash
-   node ${CLAUDE_PLUGIN_ROOT}/scripts/review-round.mjs --prompt-file <that temp file>
+   node ${CLAUDE_PLUGIN_ROOT}/scripts/review-round.mjs --prompt-file <that temp file> [--plan-file <PLAN_PATH>]
    ```
    Stdout returns a deterministic `PARSED_VERDICT:` line (`NO ISSUES | ISSUES FOUND | UNCLEAR`), then
    the raw review after `=== REVIEW ===`. If `STATUS` is not `completed`, report that the Codex review

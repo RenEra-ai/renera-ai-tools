@@ -88,8 +88,9 @@ Decide and **say which branch you took**:
 
 Dispatch the **codex-architect** subagent (Task) with the issue/task text and instruct it to save to
 `--out .codex/plans/issue-<#>.md` (a slug for free-text). Parse its **first line**: `STATUS: DONE` →
-**Read** the plan body from the `PLAN_PATH` it returns; hold it as `$DESIGN`. `STATUS: FAILED` →
-**abort** (no usable architect plan — fail loud; do not improvise one).
+hold the absolute path it returns as `$PLAN_PATH` and **Read** the plan body from it as `$DESIGN` (the
+reviewer in §6 receives `$PLAN_PATH`; `$DESIGN` feeds the §4 planner). `STATUS: FAILED` → **abort** (no
+usable architect plan — fail loud; do not improvise one).
 
 ## 4. Claude implementation plan (read-only, plan-mode)
 
@@ -125,8 +126,13 @@ with its `detail`.
 
 Compute the changed files: `git diff --name-only <START | base_sha>..HEAD` (use `base_sha` in
 Workflow-engine mode, `$START` in main-thread mode). Dispatch the **codex-reviewer** subagent (Task)
-with `$DESIGN` (re-inlined — the reviewer judges against the architect's intent) and the changed-file
-list. Read its **last line**: clean **only** when it is exactly `VERDICT: NO ISSUES`. A clean verdict
+with the **plan file path `$PLAN_PATH`** (`.codex/plans/issue-<#>.md`) — **NOT** the plan prose — and
+the changed-file list; the reviewer hands `$PLAN_PATH` to its driver, which inlines the plan
+**verbatim**. You **MUST NOT** summarize, compress, drop sections from, reorder, or re-author the plan
+when handing it off — doing so lets a load-bearing constraint silently vanish before the review ever
+sees it. You **MAY** additionally pass the issue's acceptance criteria, but only as a **separate,
+clearly-labeled** block — never in place of, or merged into, the verbatim plan. Read its **last line**:
+clean **only** when it is exactly `VERDICT: NO ISSUES`. A clean verdict
 with **no** `Reviewed files:` line and no findings is a thin signal → dispatch the reviewer once more
 asking it to list the files it reviewed first; if still substance-free, accept clean. `VERDICT: ISSUES
 FOUND` / `VERDICT: UNCLEAR` with findings → §7.

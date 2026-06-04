@@ -172,8 +172,10 @@ The main thread does the rest itself: it **develops** (running the repo's own wo
 QA/review subagents via `Task`), then **addresses** each review round's findings via the
 **receiving-code-review** skill (verify, fix genuine issues, push back on false positives — never blind
 compliance), re-running the repo's gates, until the verdict is `VERDICT: NO ISSUES` or the max rounds
-(default 6) is hit. All Codex sessions are **ephemeral**; the design-plan text is re-inlined into each
-review, so there is **no persistent daemon** to manage. Finish: `git push` + `gh pr create` (`Closes #N`
+(default 6) is hit. All Codex sessions are **ephemeral**; the saved design-plan **file** is inlined
+**verbatim** into each review (the driver appends it byte-for-byte via `--plan-file`, so the gate always
+judges against the exact approved plan — never a paraphrase), so there is **no persistent daemon** to
+manage. Finish: `git push` + `gh pr create` (`Closes #N`
 closes the issue on a merge **into the default branch**; a non-default base like `dev` is flagged for a
 manual close). The loop never auto-merges and never closes the issue itself.
 
