@@ -77,7 +77,10 @@ If a repo's dev lifecycle is itself a Claude Code **Workflow** (`.claude/workflo
 can't run it. For those repos `/codex-issue` **composes** (after approval): a wrapper workflow
 (`workflows/codex-wrap.js`, run from the main thread) brackets the repo's **own** workflow — called
 with `noLand: true` so its full pipeline runs with all gates intact — with the Codex architect plan +
-review, then lands. `grep noLand` is only candidate discovery: `/codex-issue` treats a workflow as
+review, then lands. Between the architect plan and the repo workflow, Claude authors its **own**
+file-by-file implementation plan (the developer implements that; the architect review still checks
+against the architect plan); both plans are saved under `.codex/plans/` as durable artifacts.
+`grep noLand` is only candidate discovery: `/codex-issue` treats a workflow as
 composable only if it actually reads `args.noLand` (or destructures `noLand` from `args`) in code and its
 no-land path returns `terminal: "ready_to_land"` with `branch` and `base_sha`. Otherwise it falls back to
 subagent mode. The contract and full design are in [`docs/WORKFLOW-MODE.md`](docs/WORKFLOW-MODE.md).

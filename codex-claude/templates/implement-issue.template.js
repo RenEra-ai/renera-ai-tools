@@ -46,7 +46,7 @@ let green = false
 let implChanged = []
 for (let attempt = 1; attempt <= 3 && !green; attempt++) {
   await agent(
-    `Implement GitHub issue #${ISSUE} ("${pf.issue_title}") in this repo. Read the full issue first: \`gh issue view ${ISSUE}\`. Follow THIS repo's conventions (its CLAUDE.md / AGENTS.md). Add or adjust the relevant tests. Do NOT commit — the pipeline commits your changes (tracked edits + the new source files you write), so write every change needed for the tests to pass to disk.${PLAN ? `\n\nAn architect proposed this plan — follow it where sound, deviate only with a stated reason:\n${PLAN}` : ''}${attempt > 1 ? '\n\nThe previous attempt was not green — diagnose the failures and fix them minimally.' : ''}`,
+    `Implement GitHub issue #${ISSUE} ("${pf.issue_title}") in this repo. Read the full issue first: \`gh issue view ${ISSUE}\`. Follow THIS repo's conventions (its CLAUDE.md / AGENTS.md). Add or adjust the relevant tests. Do NOT commit — the pipeline commits your changes (tracked edits + the new source files you write), so write every change needed for the tests to pass to disk.${PLAN ? `\n\nFollow this implementation plan where sound, deviate only with a stated reason:\n${PLAN}` : ''}${attempt > 1 ? '\n\nThe previous attempt was not green — diagnose the failures and fix them minimally.' : ''}`,
     { label: `dev #${ISSUE}.${attempt}`, phase: 'Implement' },
   )
   const v = await agent(

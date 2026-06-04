@@ -2,14 +2,14 @@
 // session), run ONE Plan-mode architect turn, auto-answer any clarifying question (first option) and
 // decline any approval (Plan mode is read-only), print the plan, and exit. Used by the codex-wrap
 // workflow's "architect plan" phase. Mirrors review-round.mjs but in Plan mode (needs a model).
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { Daemon } from '../lib/daemon.mjs';
 import { sendCommand } from '../lib/client.mjs';
 import { readConfiguredModel } from '../lib/config.mjs';
 import { isSafeCommand } from '../lib/safe-command.mjs';
-import { looksLikeNoPlan } from '../lib/plan-output.mjs';
+import { looksLikeNoPlan, isUsablePlan } from '../lib/plan-output.mjs';
 
 // Prefer --prompt-file (avoids shell-quoting/injection from issue/plan text with backticks, $(), quotes).
 const pf = process.argv.indexOf('--prompt-file');
@@ -17,6 +17,8 @@ const prompt = pf >= 0 ? readFileSync(process.argv[pf + 1], 'utf8') : process.ar
 if (!prompt) { console.error('usage: plan-round.mjs ("<prompt>" | --prompt-file <path>) [--model <m>] [--effort <e>]'); process.exit(1); }
 const mi = process.argv.indexOf('--model');
 const ei = process.argv.indexOf('--effort');
+const oi = process.argv.indexOf('--out');
+const outPath = oi >= 0 ? process.argv[oi + 1] : null;   // persist the plan body here when usable
 const model = (mi >= 0 ? process.argv[mi + 1] : null) || readConfiguredModel();
 const effort = ei >= 0 ? process.argv[ei + 1] : 'xhigh';
 if (!model) {
@@ -99,7 +101,22 @@ try {
 // Deterministic degraded-plan signal: a completed turn whose body is a preamble / non-substantive is
 // marked '(no-plan)' so codex-wrap fails loud rather than treating it as a valid plan.
 const noPlan = res.status === 'completed' && !res.empty && looksLikeNoPlan(res.message);
+
+// Durable artifact: when --out is given AND the turn produced a usable plan, write the verbatim body to
+// that path (creating parent dirs) so the approved plan survives as a reviewable file — not just an
+// in-memory string / a journal field. A degraded turn writes nothing; we print 'PLAN_FILE: (none)' so
+// the caller never reports a path that does not exist. The retry above already settled `res`, so the
+// final (post-retry) plan is what lands on disk.
+let planFile = '(none)';
+if (outPath && isUsablePlan(res.status, res.message, res.empty)) {
+  const abs = resolve(outPath);
+  mkdirSync(dirname(abs), { recursive: true });
+  writeFileSync(abs, res.message.endsWith('\n') ? res.message : res.message + '\n');
+  planFile = abs;
+}
+
 console.log('STATUS: ' + res.status + (res.empty ? ' (empty)' : (noPlan ? ' (no-plan)' : '')));
+if (outPath) console.log('PLAN_FILE: ' + planFile);
 console.log('=== PLAN ===');
 console.log(res.message || '(empty)');
 process.exit(0);

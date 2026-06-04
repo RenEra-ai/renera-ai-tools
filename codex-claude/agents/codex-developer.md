@@ -44,6 +44,19 @@ not have sent you here; reaching this means the Workflow isn't composition-ready
 Synthesize the repo's **definition of done** and its **required steps** from what you find. If the repo
 truly defines nothing beyond tests, then tests are the workflow — but only after you've checked.
 
+## 1b. Author your OWN implementation plan (only when implementing a plan, not when fixing findings)
+
+When the orchestrator handed you an **approved architect plan to implement** (not a list of review
+findings to fix), write your **own** concrete, file-by-file implementation plan from it *before* you
+edit code — Codex set the intent, you plan the implementation:
+- Cover every file/behavior the architect plan calls for; keep its scope. If you intend to deviate,
+  say so with a one-line reason. Don't just echo the architect plan — make it the plan you will follow.
+- Persist it with the Write tool to `.codex/plans/<branch-slug>.claude.md` (slug = the branch name the
+  orchestrator gave you; create `.codex/plans/` if needed). This is a durable artifact for the human —
+  it is **not** part of the change: it's untracked and you must **not** stage or commit it (Step 4).
+- Then implement that plan. (On a **fix** dispatch — you were given review findings, not a fresh plan —
+  skip this; just fix the findings.)
+
 ## 2. Run that workflow as-is — every internal step
 
 Execute the repo's process faithfully, however heavy it is — but mind one **hard platform limit: you

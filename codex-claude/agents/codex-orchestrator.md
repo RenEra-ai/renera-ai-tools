@@ -104,10 +104,17 @@ on merge via `Closes #N` — the loop never closes it directly).
 - On **adjust/reject**: `$CDX send "<the specific gaps/feedback>. Revise the plan accordingly."` →
   drive `wait` → `read` → re-judge (cap revisions at ~3, then proceed with the best plan and note it).
   On **approve**: continue.
+- **Persist the approved plan** (so it survives as a reviewable artifact, not just an in-thread message):
+  re-read it to a durable file with `$CDX read --out .codex/plans/issue-<#>.md` (for a free-text task use
+  a slug, e.g. `.codex/plans/<short-slug>.md`). `read --out` still prints the JSON object to stdout —
+  parse it as usual; it just also writes the verbatim plan body to that path. Record the path for the
+  final report.
 
 ### 4. Implement (black box — runs the repo's OWN full workflow)
 - Dispatch the **codex-developer** subagent (Task) with: the approved plan (full text) and the branch
-  name. Instruct it to implement the plan by **discovering and running THIS repo's own internal
+  name. Tell it to FIRST author its **own** file-by-file implementation plan from the architect plan and
+  persist it (`.codex/plans/<branch-slug>.claude.md`) before writing code — Codex sets the intent, Claude
+  plans the implementation — per its own agent spec. Instruct it to implement the plan by **discovering and running THIS repo's own internal
   development workflow wherever it is defined** — `CLAUDE.md`, `AGENTS.md`, or `.claude/` process docs /
   commands / agents — and to run that workflow **as-is** (however many internal reviews / QA agents /
   tests it has), committing on the branch but **stopping before any landing step** (push / PR / close —
@@ -226,7 +233,9 @@ whose `read` message carries no plan/verdict substance — judge that from the c
 
 ## Final report (your return message)
 - **Issue/task** and branch.
-- **Approved plan** (concise) and any plan revisions.
+- **Approved plan** (concise) and any plan revisions. Name the persisted plan artifacts: the architect
+  plan (`.codex/plans/issue-<#>.md`) and the developer's own implementation plan
+  (`.codex/plans/<branch-slug>.claude.md`).
 - **Repo workflow run**: which internal workflow the developer reported running (so the human can
   confirm the repo's real lifecycle executed — not a thinned-down substitute).
 - **Architect Q&A** you auto-answered, with rationale.

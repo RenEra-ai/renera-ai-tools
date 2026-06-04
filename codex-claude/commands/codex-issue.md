@@ -50,13 +50,15 @@ Decide (and **state which branch you took** so demotion is never silent):
 
 ## Step 2A — workflow-mode composition (runs the repo's REAL pipeline, bracketed by Codex)
 
-This composes: Codex architect plan → the repo's own workflow with **land suppressed** (its full
-pipeline, all gates intact) → Codex architect review→fix loop → land (push + PR). It runs the repo's
-genuine lifecycle instead of a subagent approximation, but it executes the full pipeline and — unless
-`--dry-run` — pushes and opens a PR. **Get approval first:**
+This composes: Codex architect plan → Claude's own implementation plan → the repo's own workflow with
+**land suppressed** (its full pipeline, all gates intact) → Codex architect review→fix loop → land (push
++ PR). Codex sets the intent; Claude authors its own implementation plan from it (both are saved under
+`.codex/plans/`); the repo's developer implements Claude's plan; the architect review checks the result
+against the architect plan. It runs the repo's genuine lifecycle instead of a subagent approximation,
+but it executes the full pipeline and — unless `--dry-run` — pushes and opens a PR. **Get approval first:**
 
 - Use **AskUserQuestion**: "Detected a composable repo workflow (`<matched path>`). Run the
-  composition — Codex architect plan → that workflow (land suppressed) → architect review → push + PR?"
+  composition — Codex architect plan → Claude implementation plan → that workflow (land suppressed) → architect review → push + PR?"
   Options: **Run composition** · **Use subagent mode instead** · **Cancel**.
 - On **Run composition**, invoke the **Workflow** tool (resolve `${CLAUDE_PLUGIN_ROOT}` to its real path):
   `Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/codex-wrap.js", args: { issue: <N>, repoWorkflowPath: "<absolute path to the matched .claude/workflows/*.js or *.mjs>", pluginRoot: "${CLAUDE_PLUGIN_ROOT}", base: "<--base value or empty>", dryRun: <true|false> } })`.
