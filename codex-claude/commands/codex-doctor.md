@@ -42,15 +42,16 @@ git ls-files --error-unmatch <matched-file> 2>/dev/null && echo tracked || echo 
   - **Unmodified scaffold:** if the matched file still contains `codex-claude:generic-scaffold`, flag it
     outright — "this workflow is the untouched generic starter; in workflow-mode it will **NOT** run the
     QA/`codex-companion` review gates documented in CLAUDE.md. Encode your gates (and remove the marker),
-    or use subagent mode." This is a CONCERN, not a clean pass.
+    or use main-thread mode." This is a CONCERN, not a clean pass.
   - **Tracked-ness:** report whether the matched file is git-tracked. **UNTRACKED** is a CONCERN — the
     mode depends on an ephemeral file, so a `git clean`/fresh clone silently flips the repo to subagent
     mode. Advise committing `.claude/` (or running `/codex-compose-setup`, which offers to stage it).
-- **A workflow exists but none reads `noLand`** → `/codex-issue` will use **subagent mode** and should
+- **A workflow exists but none reads `noLand`** → `/codex-issue` will use **main-thread mode** and should
   nudge `/codex-compose-setup`. Say so — composition would be higher fidelity here.
-- **No workflow** → **subagent mode** (the main-thread loop discovers + runs the repo's prose
-  lifecycle). Note that a repo-defined *subagent* review gate will be **replayed inline** (subagents
-  can't dispatch subagents), and a live credential-gated gate will fail-closed **BLOCKED**.
+- **No workflow** → **main-thread mode** (the loop discovers + runs the repo's prose lifecycle in the
+  main thread). A repo-defined *subagent* review gate is **dispatched via `Task`** — the main thread has
+  it, so the repo's real review/QA agent runs (not an inline replay) — and a live credential-gated gate
+  fail-closes **BLOCKED**.
 
 ## 3. Seam integrity (only if a composable workflow was matched)
 

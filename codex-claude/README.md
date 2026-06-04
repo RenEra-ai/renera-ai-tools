@@ -83,7 +83,7 @@ against the architect plan); both plans are saved under `.codex/plans/` as durab
 `grep noLand` is only candidate discovery: `/codex-issue` treats a workflow as
 composable only if it actually reads `args.noLand` (or destructures `noLand` from `args`) in code and its
 no-land path returns `terminal: "ready_to_land"` with `branch` and `base_sha`. Otherwise it falls back to
-subagent mode. The contract and full design are in [`docs/WORKFLOW-MODE.md`](docs/WORKFLOW-MODE.md).
+main-thread mode. The contract and full design are in [`docs/WORKFLOW-MODE.md`](docs/WORKFLOW-MODE.md).
 
 Run **`/codex-compose-setup`** to arrange the contract automatically: it adds the `noLand` seam to your
 existing workflow (shown as a diff for approval) or scaffolds a composition-ready starter if you have

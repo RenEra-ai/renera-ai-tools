@@ -4,7 +4,8 @@ description: >-
   Drives Codex (GPT-5.x) to produce a read-only, file-by-file ARCHITECT design plan for an issue or
   task, on its own ephemeral Codex session, and persists it. Returns just a STATUS + the saved path —
   it keeps the verbose Codex plan wait-loop out of the main conversation. It is a transcriber, not the
-  author: it never writes a plan of its own if Codex fails to produce one. Dispatched by /codex-issue.
+  author: it never writes a plan of its own if Codex fails to produce one. Dispatched by /codex-issue —
+  this is the autonomous loop's plan-driver subagent, distinct from the interactive `/codex-architect` command.
 model: claude-sonnet-4-6
 color: cyan
 tools: Bash, Read, Write
