@@ -35,7 +35,9 @@ git ls-files --error-unmatch <matched-file> 2>/dev/null && echo tracked || echo 
 ```
 
 - **A file reads `noLand`** → for a **numeric issue**, `/codex-issue` will use **workflow-mode
-  composition** (the repo's real pipeline, bracketed by the architect). Name the matched file. Also
+  composition**: the loop runs in the main thread; the repo's workflow runs with `noLand:true` as the
+  **development engine** (all its gates intact), bracketed by the main-thread architect plan, Claude
+  plan, review, fix, and land steps. Name the matched file. Also
   report two fidelity/reproducibility signals:
   - **Unmodified scaffold:** if the matched file still contains `codex-claude:generic-scaffold`, flag it
     outright — "this workflow is the untouched generic starter; in workflow-mode it will **NOT** run the
@@ -46,7 +48,7 @@ git ls-files --error-unmatch <matched-file> 2>/dev/null && echo tracked || echo 
     mode. Advise committing `.claude/` (or running `/codex-compose-setup`, which offers to stage it).
 - **A workflow exists but none reads `noLand`** → `/codex-issue` will use **subagent mode** and should
   nudge `/codex-compose-setup`. Say so — composition would be higher fidelity here.
-- **No workflow** → **subagent mode** (the black-box developer discovers + runs the repo's prose
+- **No workflow** → **subagent mode** (the main-thread loop discovers + runs the repo's prose
   lifecycle). Note that a repo-defined *subagent* review gate will be **replayed inline** (subagents
   can't dispatch subagents), and a live credential-gated gate will fail-closed **BLOCKED**.
 
