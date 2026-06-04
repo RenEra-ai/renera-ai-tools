@@ -49,6 +49,6 @@ if (landed && landed.landed) {
   return { status: 'danger_landed', detail: `DANGER: repo workflow landed despite noLand:true — the architect review was BYPASSED. ${landed.detail || ''}`, repo }
 }
 const why = c.status === 'needs_land_check'
-  ? `did not reach ready_to_land (${c.terminal || 'unknown'})`
+  ? `did not reach ready_to_land (${c.terminal || 'unknown'})${c.detail ? ': ' + c.detail : ''}`
   : (c.detail || 'no usable result')
 return { status: 'failed', detail: `repo workflow ${why}`, repo }
