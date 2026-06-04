@@ -37,17 +37,18 @@ if (c.status === 'ready') {
   return { status: 'ready', branch: c.branch, base_sha: c.base_sha, repo }
 }
 
-if (c.status === 'needs_land_check') {
-  // It was asked for noLand but didn't return ready_to_land. Distinguish a clean fail-closed from a
-  // DANGEROUS noLand-contract violation where it landed anyway (which would bypass the architect review).
-  const landed = await agent(
-    `The repo workflow for issue #${ISSUE} was called with noLand:true but did NOT return ready_to_land. Determine whether it nevertheless ALREADY LANDED: check \`gh pr list --search "${ISSUE} in:body" --state all --json url\` for a PR referencing this issue, and \`gh issue view ${ISSUE} --json state\` (the issue was OPEN at start). landed=true if a PR for this issue now exists OR the issue is CLOSED; else false. In detail give the PR url + issue state.`,
-    { label: `land-check #${ISSUE}`, phase: 'Repo workflow', schema: LANDCHK_SCHEMA },
-  )
-  if (landed && landed.landed) {
-    return { status: 'danger_landed', detail: `DANGER: repo workflow landed despite noLand:true — the architect review was BYPASSED. ${landed.detail || ''}`, repo }
-  }
-  return { status: 'failed', detail: `repo workflow did not reach ready_to_land (${c.terminal || 'unknown'})${c.detail ? ': ' + c.detail : ''}`, repo }
+// ANY non-ready result — a non-ready terminal, a `ready_to_land` missing `branch`/`base_sha`, or no
+// result at all (null/undefined) — might be a noLand-contract violation where the workflow LANDED
+// anyway (which would bypass the architect review). ALWAYS check before failing, so a stealth landing
+// is never masked behind a generic failure.
+const landed = await agent(
+  `The repo workflow for issue #${ISSUE} was called with noLand:true but did NOT return a valid ready_to_land. Determine whether it nevertheless ALREADY LANDED: check \`gh pr list --search "${ISSUE} in:body" --state all --json url\` for a PR referencing this issue, and \`gh issue view ${ISSUE} --json state\` (the issue was OPEN at start). landed=true if a PR for this issue now exists OR the issue is CLOSED; else false. In detail give the PR url + issue state.`,
+  { label: `land-check #${ISSUE}`, phase: 'Repo workflow', schema: LANDCHK_SCHEMA },
+)
+if (landed && landed.landed) {
+  return { status: 'danger_landed', detail: `DANGER: repo workflow landed despite noLand:true — the architect review was BYPASSED. ${landed.detail || ''}`, repo }
 }
-
-return { status: 'failed', detail: c.detail || 'unknown', repo }
+const why = c.status === 'needs_land_check'
+  ? `did not reach ready_to_land (${c.terminal || 'unknown'})`
+  : (c.detail || 'no usable result')
+return { status: 'failed', detail: `repo workflow ${why}`, repo }
