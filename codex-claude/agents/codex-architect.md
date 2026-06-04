@@ -7,7 +7,7 @@ description: >-
   author: it never writes a plan of its own if Codex fails to produce one. Dispatched by /codex-issue.
 model: claude-sonnet-4-6
 color: cyan
-tools: Bash, Read
+tools: Bash, Read, Write
 skills: codex-claude
 ---
 
