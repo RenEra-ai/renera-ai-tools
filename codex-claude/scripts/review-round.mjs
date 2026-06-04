@@ -9,11 +9,36 @@ import { fileURLToPath } from 'node:url';
 import { Daemon } from '../lib/daemon.mjs';
 import { sendCommand } from '../lib/client.mjs';
 import { isSafeCommand } from '../lib/safe-command.mjs';
+import { buildReviewPrompt } from '../lib/review-prompt.mjs';
 
 // Prefer --prompt-file (avoids shell-quoting/injection from review/plan text with backticks, $(), quotes).
 const pf = process.argv.indexOf('--prompt-file');
-const prompt = pf >= 0 ? readFileSync(process.argv[pf + 1], 'utf8') : process.argv[2];
-if (!prompt) { console.error('usage: review-round.mjs ("<prompt>" | --prompt-file <path>)'); process.exit(1); }
+let prompt = pf >= 0 ? readFileSync(process.argv[pf + 1], 'utf8') : process.argv[2];
+if (!prompt) { console.error('usage: review-round.mjs ("<prompt>" | --prompt-file <path>) [--plan-file <path>]'); process.exit(1); }
+
+// --plan-file (optional, additive): the driver — not the model — inlines the architect plan VERBATIM, so
+// the review judges against the exact saved bytes (no paraphrase). '(none)' (and omitting the flag) is the
+// ONLY sanctioned plan-less route. A REQUESTED plan — the flag is present — that has no path value, can't
+// be read, or is empty FAILS CLOSED (UNCLEAR), never a silent fall back to a plan-less review that could
+// emit NO ISSUES having never seen the plan.
+function failClosed(reason) {
+  process.stderr.write(`[driver] ${reason} — refusing a plan-less review\n`);
+  console.log('STATUS: failed');
+  console.log('PARSED_VERDICT: UNCLEAR');
+  console.log('=== REVIEW ===');
+  console.log(`Codex review did not run: ${reason}`);
+  process.exit(0);
+}
+const plf = process.argv.indexOf('--plan-file');
+const planPath = plf >= 0 ? process.argv[plf + 1] : null;
+if (plf >= 0 && !planPath) failClosed('--plan-file was given without a path');   // requested plan, no value → fail closed
+if (planPath && planPath !== '(none)') {
+  let planText = null;
+  try { planText = readFileSync(planPath, 'utf8'); }
+  catch (e) { failClosed(`requested plan file could not be read: ${planPath}: ${e.message}`); }
+  if (planText == null || !planText.trim()) failClosed(`requested plan file is empty: ${planPath}`);
+  prompt = buildReviewPrompt(prompt, planText);
+}
 
 const dir = mkdtempSync(join(tmpdir(), 'cdx-review-'));
 const socketPath = join(dir, 'r.sock');
