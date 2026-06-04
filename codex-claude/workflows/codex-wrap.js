@@ -65,6 +65,19 @@ const LAND_SCHEMA = {
   },
 }
 
+// Inlined mirror of lib/plan-output.mjs `isSubstantivePlan` (a sandboxed Workflow script can't import
+// modules). A Claude plan only REPLACES the architect plan when it is genuinely substantive — a
+// non-empty but thin response (generic preamble, no files/steps, or a one-liner) must fall back to the
+// architect plan rather than strip its file-by-file detail from the implementation. Keep in sync with
+// the tested lib copy.
+function isSubstantivePlan(text) {
+  const t = (text || '').trim()
+  if (t.length < 80) return false
+  const hasFileRef = /[\w/-]+\.[a-z]{2,6}\b/.test(t)
+  const hasStep = /(^|\n)\s*(\d+[.)]|[-*])\s+\S/.test(t)
+  return hasFileRef || hasStep
+}
+
 // ── 1. Architect plan (ephemeral Codex Plan-mode session) ─────────────────────
 phase('Architect plan')
 const plan = await agent(
@@ -106,10 +119,11 @@ Return: planText = the full implementation plan you wrote; planPath = the absolu
 ${plan.planText}`,
   { label: `claude-plan #${ISSUE}`, phase: 'Claude plan', schema: CLAUDE_PLAN_SCHEMA },
 )
-const implPlan = (claudePlan && claudePlan.planText && claudePlan.planText.trim()) ? claudePlan.planText : plan.planText
-log(claudePlan && claudePlan.planText && claudePlan.planText.trim()
+const claudeOk = !!(claudePlan && isSubstantivePlan(claudePlan.planText))
+const implPlan = claudeOk ? claudePlan.planText : plan.planText
+log(claudeOk
   ? `claude implementation plan captured (${claudePlan.planText.length} chars)${claudePlan.planPath ? ` → ${claudePlan.planPath}` : ''}`
-  : 'claude plan empty — falling back to the architect plan for implementation')
+  : 'claude plan thin/empty — falling back to the architect plan for implementation')
 
 // ── 2. Run the repo's OWN workflow with land suppressed ───────────────────────
 // The developer implements CLAUDE's plan (implPlan); the architect review still checks vs plan.planText.

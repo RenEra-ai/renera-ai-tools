@@ -26,3 +26,17 @@ export function isUsablePlan(status, message, empty) {
   if (!t || t === '(empty)') return false;
   return !looksLikeNoPlan(t);
 }
+
+// Decide whether a Claude implementation plan is substantive enough to REPLACE the architect plan in the
+// implementation handoff. A non-empty but thin response (a generic "I'll follow the architect plan"
+// preamble, no files/steps, or a one-liner) must NOT strip the architect's file-by-file plan — those
+// fall back to the architect plan. Requires both real length AND structure (a file ref or an
+// enumerated/bulleted step). NOTE: codex-wrap.js inlines an identical copy (a sandboxed Workflow script
+// can't import this module); keep the two in sync — this one is the tested source of truth.
+export function isSubstantivePlan(text) {
+  const t = (text || '').trim();
+  if (t.length < 80) return false;
+  const hasFileRef = /[\w/-]+\.[a-z]{2,6}\b/.test(t);
+  const hasStep = /(^|\n)\s*(\d+[.)]|[-*])\s+\S/.test(t);
+  return hasFileRef || hasStep;
+}

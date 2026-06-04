@@ -57,9 +57,11 @@ async function main() {
   // Subagent-mode plan persistence: `read --out <path>` writes the completed turn's verbatim message to
   // a durable file (the JSON object still goes to stdout so the caller parses it exactly as before). The
   // orchestrator uses this to persist the approved architect plan to `.codex/plans/issue-<N>.md` — the
-  // workflow-mode counterpart of plan-round.mjs's --out. Only a non-empty message is written.
+  // workflow-mode counterpart of plan-round.mjs's --out. Only a non-empty message is written. A RELATIVE
+  // --out resolves against the daemon's recorded cwd (`state.cwd`, set at `start`), NOT this process's
+  // cwd — so the artifact lands in the repo the daemon runs against even if the caller cd'd elsewhere.
   if (parsed.verb === 'read' && parsed.flags.out && res && typeof res.message === 'string' && res.message.trim()) {
-    const abs = resolve(String(parsed.flags.out));
+    const abs = resolve(state.cwd || process.cwd(), String(parsed.flags.out));
     mkdirSync(dirname(abs), { recursive: true });
     writeFileSync(abs, res.message.endsWith('\n') ? res.message : res.message + '\n');
   }
