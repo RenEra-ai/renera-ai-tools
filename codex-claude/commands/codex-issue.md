@@ -1,95 +1,186 @@
 ---
 name: codex-issue
 description: >-
-  Run the full autonomous Codex-architect loop for a GitHub issue or free-text task. For repos whose
-  dev workflow is a Claude Code Workflow that supports the composition contract (a `noLand` arg), it
-  COMPOSES: Codex architect plan → the repo's own workflow (full pipeline, land suppressed) → Codex
-  architect review → land. Otherwise it falls back to subagent mode (a black-box developer that
-  discovers + runs the repo's workflow). Codex plans/reviews; the repo implements; push + PR (the
-  issue closes on a default-branch merge). Add --dry-run to stop before push/PR.
+  Run the autonomous Codex-architect ↔ Claude loop for a GitHub issue or free-text task, IN THE MAIN
+  THREAD (so it can run this repo's real development workflow, including its subagents). Codex
+  architects a design plan → Claude (read-only) writes its own implementation plan → Claude develops
+  here, running the repo's own workflow → Codex reviews impl-vs-plan → Claude addresses findings via
+  receiving-code-review → push + PR. For repos whose lifecycle is a composable Claude Code Workflow,
+  development runs that workflow (noLand) as the engine. Add --dry-run to stop before push/PR.
 argument-hint: "<issue number | free-text task> [--dry-run] [--base <branch>]"
 allowed-tools:
   - Task
   - Bash
   - Read
+  - Edit
+  - Write
+  - Grep
+  - Glob
   - Workflow
   - AskUserQuestion
 ---
 
-Run the autonomous Codex-architect loop for:
+Run the autonomous Codex-architect ↔ Claude loop for:
 
 > $ARGUMENTS
 
-Parse `$ARGUMENTS`: the leading token is the GitHub issue number (if numeric) or the free-text task;
-honor `--dry-run` and `--base <branch>`.
-
-## Step 1 — detect the repo's integration mode
-
-Check whether this repo has a Claude Code **Workflow**, and whether it supports the codex-claude
-**composition contract** (an `args.noLand` branch that runs the full pipeline but returns before landing):
+You run this loop **yourself, in the main thread** — you have `Task`, so the repo's own subagents run
+for real (unlike a nested-subagent design, which cannot dispatch them). Parse `$ARGUMENTS`: the
+leading token is the GitHub issue number (if numeric) or the free-text task; honor `--dry-run` and
+`--base <branch>`. Define the CLI once:
 
 ```bash
-ls .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null            # any workflow at all?
-grep -l "noLand" .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null   # candidates only; verify code reads args.noLand
-grep -l "codex-claude:generic-scaffold" .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null  # unmodified starter?
-git ls-files --error-unmatch <matched-file> 2>/dev/null && echo tracked || echo UNTRACKED          # reproducibility
+CDX="node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs"
 ```
 
-Decide (and **state which branch you took** so demotion is never silent):
-- **A file that actually READS `args.noLand` AND a numeric issue** → **workflow-mode composition**
-  (Step 2A). A bare `grep` match isn't enough — open the matched file(s) and confirm it references
-  `args.noLand` / destructures `noLand` from `args` **in code** (not just a comment); if several
-  qualify, pick the issue-implementation pipeline and say which. (The wrapper then hard-validates by
-  requiring the workflow to return `terminal: "ready_to_land"`.) Before proceeding, surface two things so
-  the substitution is never silent:
-  - **Faithfulness banner:** state that workflow-mode runs the **workflow's OWN phases** (name them, read
-    from its `meta.phases`), which **may differ from the process your `CLAUDE.md`/`AGENTS.md` prose
-    describes**. Also report whether the matched file is **git-tracked** (untracked → note it's a
-    reproducibility risk: a `git clean`/fresh clone would flip the repo to subagent mode).
-  - **Unmodified-scaffold tripwire:** if the matched file still contains `codex-claude:generic-scaffold`,
-    it is the **untouched generic starter** — it will **NOT** run any QA/review gates your `CLAUDE.md`
-    documents. Do **not** silently default to workflow-mode: **warn loudly** and make the Step 2A choice
-    fail-safe (recommend subagent mode or fixing the scaffold first). Carry this warning into the Step 2A
-    approval question.
-- **A workflow file EXISTS but none actually reads `args.noLand`** (no match, or only a comment-only
-  mention; or the task is free-text on such a repo) → this
-  repo has a real Workflow that **isn't composition-ready**; composition would be higher-fidelity than
-  the black box. **Tell the user and nudge:** "This repo has `.claude/workflows/<file>` but it's not
-  composition-ready (no `noLand` seam) — run **`/codex-compose-setup`** to enable the higher-fidelity
-  composition path. Proceeding in subagent mode for now." Then go to **Step 2B**.
-- **No workflow at all** → **subagent mode** (Step 2B). Say plainly: "No composable workflow detected —
-  using subagent mode."
+This is **fully autonomous**: you make the judgment calls (answering ambiguity from the issue/code,
+approving the implementation plan, deciding when a review is clean) — the only brakes are `--dry-run`
+(stop before push/PR) and **max review rounds** (default 6 → stop before push, report state; never
+push an un-clean change). `gh` (authenticated) is required for issue intake and the finish.
 
-## Step 2A — workflow-mode composition (runs the repo's REAL pipeline, bracketed by Codex)
+Follow the **codex-claude** skill for the exact `codex-drive` verb contract used by the helper agents.
 
-This composes: Codex architect plan → Claude's own implementation plan → the repo's own workflow with
-**land suppressed** (its full pipeline, all gates intact) → Codex architect review→fix loop → land (push
-+ PR). Codex sets the intent; Claude authors its own implementation plan from it (both are saved under
-`.codex/plans/`); the repo's developer implements Claude's plan; the architect review checks the result
-against the architect plan. It runs the repo's genuine lifecycle instead of a subagent approximation,
-but it executes the full pipeline and — unless `--dry-run` — pushes and opens a PR. **Get approval first:**
+## 0. Preflight
 
-- Use **AskUserQuestion**: "Detected a composable repo workflow (`<matched path>`, phases: `<X→Y→Z>`,
-  `<tracked|UNTRACKED>`). Run the composition — Codex architect plan → Claude implementation plan → that
-  workflow (land suppressed) → architect review → push + PR?" Options: **Run composition** · **Use
-  subagent mode instead** · **Cancel**. **If the matched file is an unmodified `codex-claude:generic-scaffold`**,
-  prepend a warning to the question ("⚠ this is the untouched generic scaffold — it will NOT run the
-  QA/review gates your CLAUDE.md documents") and make **Use subagent mode instead** the recommended,
-  fail-safe default.
-- On **Run composition**, invoke the **Workflow** tool (resolve `${CLAUDE_PLUGIN_ROOT}` to its real path):
-  `Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/codex-wrap.js", args: { issue: <N>, repoWorkflowPath: "<absolute path to the matched .claude/workflows/*.js or *.mjs>", pluginRoot: "${CLAUDE_PLUGIN_ROOT}", base: "<--base value or empty>", dryRun: <true|false> } })`.
-  It runs in the background; when it completes, relay its result: status, branch, PR URL, review
-  rounds, and whether the issue will auto-close (default base) or needs a manual close (non-default base).
-- On **Use subagent mode instead** → Step 2B. On **Cancel** → stop and report nothing was changed.
+- `$CDX doctor`. If `codexVersion` is null or `authPresent` is false → **abort** (Codex not installed /
+  not logged in).
+- Confirm a Plan-mode model is configured (the architect's driver reads it from `~/.codex/config.toml`):
+  ```bash
+  CONFIG_MODEL=$(node -e "import('${CLAUDE_PLUGIN_ROOT}/lib/config.mjs').then(m=>process.stdout.write(m.readConfiguredModel()||''),()=>{})" 2>/dev/null)
+  ```
+  If `$CONFIG_MODEL` is empty → **abort**: "Plan mode needs a model — set `model = \"…\"` in
+  ~/.codex/config.toml."
+- Record the starting commit: `START=$(git rev-parse HEAD)`. Require `gh auth status` only on the
+  paths that need it: a numeric issue (for `gh issue view`) or a non-`--dry-run` run (the finish
+  pushes + opens a PR). A free-text `--dry-run` needs no `gh`.
 
-## Step 2B — subagent mode (default)
+## 1. Intake
 
-Dispatch the **codex-orchestrator** subagent (Task) with the task and the flags. It owns the loop:
-architect plan → approval → a black-box `codex-developer` that discovers and runs THIS repo's own
-workflow → architect review-until-clean → push/PR. When it returns, relay its milestone report.
+- Numeric → `gh issue view <#> --json number,title,body`. Free text → use as-is.
+- Create + checkout the working branch: `codex/issue-<#>` (or `codex/<short-slug>`).
 
----
+## 2. Detect the repo's development mode (state which branch you take — never silent)
 
-In **both** modes the loop never auto-merges and never closes the issue itself — the PR's `Closes #N`
-closes it on a **default-branch** merge; a non-default base (e.g. `dev`) is flagged for manual close.
-Do not drive `codex-drive` yourself — the workflow/orchestrator does that.
+Scan for a composable Claude Code **Workflow** that the dev step can run as an engine:
+
+```bash
+ls .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null
+grep -l "noLand" .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null
+grep -l "codex-claude:generic-scaffold" .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null
+git ls-files --error-unmatch <matched-file> 2>/dev/null && echo tracked || echo UNTRACKED
+```
+
+Decide and **say which branch you took**:
+- A file that actually **reads** `args.noLand` in code (open it and confirm — a bare comment mention
+  doesn't qualify) **and** a numeric issue → **Workflow-engine mode** (§5 develops via that workflow).
+  Surface, so the substitution is never silent: a **faithfulness banner** naming the workflow's own
+  `meta.phases` (which may differ from your `CLAUDE.md`/`AGENTS.md` prose) and whether the file is
+  **git-tracked** (untracked → reproducibility risk: a `git clean`/fresh clone flips it to main-thread
+  mode). **Unmodified-scaffold tripwire:** if the matched file still contains
+  `codex-claude:generic-scaffold`, it is the untouched generic starter that runs **no** real gates —
+  warn loudly and prefer main-thread mode (or fixing the scaffold first).
+- A workflow exists but none reads `noLand` (or a free-text task) → say so and nudge:
+  "This repo has `.claude/workflows/<file>` but it's not composition-ready (no `noLand` seam) — run
+  **`/codex-compose-setup`** for the higher-fidelity engine. Proceeding in **main-thread mode**."
+- No composable workflow → **main-thread mode**. Say: "No composable workflow detected — main-thread mode."
+
+## 3. Architect design plan (Codex, read-only)
+
+Dispatch the **codex-architect** subagent (Task) with the issue/task text and instruct it to save to
+`--out .codex/plans/issue-<#>.md` (a slug for free-text). Parse its **first line**: `STATUS: DONE` →
+**Read** the plan body from the `PLAN_PATH` it returns; hold it as `$DESIGN`. `STATUS: FAILED` →
+**abort** (no usable architect plan — fail loud; do not improvise one).
+
+## 4. Claude implementation plan (read-only, plan-mode)
+
+Dispatch the **codex-planner** subagent **with `mode: "plan"`** (Task), passing the issue text and
+`$DESIGN`. Its returned message is Claude's own file-by-file implementation plan. If it is exactly
+`STATUS: THIN` (or is < 80 chars / has no file or step), set `$IMPL = $DESIGN`; otherwise `$IMPL` =
+its returned markdown. **You (main thread) persist** `$IMPL` with Write to
+`.codex/plans/issue-<#>.claude.md`. (The planner is read-only — it returns text; you save it.)
+
+## 5. Develop — branch on mode
+
+**Main-thread mode:** implement `$IMPL` **yourself, here**. First DISCOVER this repo's own development
+workflow — read `CLAUDE.md`, `AGENTS.md`, `.claude/` process docs / commands / agents — then RUN it
+as-is, however many internal steps it has, **dispatching its real QA / code-reviewer / tester
+subagents via `Task`** (you can — you are the main thread). Run its **review/QA gates**, not just its
+tests. Commit on the branch as the repo's workflow dictates, but **stop before any landing step**
+(no push / PR / close — you own integration in §8). A **required** gate that cannot run (missing
+credentials/live QA/network) is a **fail-closed block** → stop and report; never land a change whose
+required gate was skipped.
+
+**Workflow-engine mode:** run the repo's deterministic workflow as the development engine via the wrapper:
+```
+Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/codex-wrap.js",
+  args: { issue: <#>, repoWorkflowPath: "<abs path to the matched .claude/workflows file>",
+          plan: "<$IMPL>", base: "<--base value or empty>" } })
+```
+It runs in the background; on completion branch on its `status`: `ready` → record `branch` + `base_sha`
+(use `base_sha` as the review base below); `danger_landed` → **abort** with its danger message (the
+repo landed despite `noLand` — the review was bypassed; manual inspection needed); `failed` → **abort**
+with its `detail`.
+
+## 6. Architect review (Codex, against the design plan)
+
+Compute the changed files: `git diff --name-only <START | base_sha>..HEAD` (use `base_sha` in
+Workflow-engine mode, `$START` in main-thread mode). Dispatch the **codex-reviewer** subagent (Task)
+with `$DESIGN` (re-inlined — the reviewer judges against the architect's intent) and the changed-file
+list. Read its **last line**: clean **only** when it is exactly `VERDICT: NO ISSUES`. A clean verdict
+with **no** `Reviewed files:` line and no findings is a thin signal → dispatch the reviewer once more
+asking it to list the files it reviewed first; if still substance-free, accept clean. `VERDICT: ISSUES
+FOUND` / `VERDICT: UNCLEAR` with findings → §7.
+
+## 7. Address findings (you, with full development context)
+
+Invoke the **receiving-code-review** skill on the reviewer's findings: verify each against the code,
+fix only genuinely-wrong things, and **push back (in your report) on false positives** with technical
+reasoning — do not implement blindly. Then **re-run this repo's own review/QA gates on the fix**:
+- main-thread mode → dispatch the repo's gate subagents (Task) / run its gate commands, as in §5;
+- Workflow-engine mode → re-run the repo's **discoverable** gate commands on the fix delta (you have
+  `Task` + `Bash`), since a full re-run of the deterministic Workflow per fix is unnecessary. **State
+  in the final report which path each gate took** (native command / dispatched repo subagent) — fixes
+  trade the Workflow's determinism for gate independence; that's intended for a small fix delta.
+
+Commit the fix delta (no landing). Increment the round counter; return to §6 **scoped to the fix
+delta** (tell the reviewer to review only the newly changed files). Stop when clean, or at the max
+(default 6) → do **not** push; report the outstanding findings and current state.
+
+## 8. Finish — integrate (skip entirely if `--dry-run`)
+
+- **Pre-finish landing guard.** `git ls-remote --heads origin <branch>` must be **empty** and, for a
+  numeric issue, `gh issue view <#> --json state` must still be **OPEN**. If the branch is already
+  pushed or the issue already closed → the developer landed prematurely → **do not push/re-PR**;
+  abort with `DANGER: landed before review — manual inspection needed` and the current state.
+- Ensure everything is committed. Resolve the default branch and base (a **bare** name, never
+  `origin/…`): `$DEFAULT = gh repo view --json defaultBranchRef -q .defaultBranchRef.name`; `$BASE` =
+  `--base` if given, else `dev` if it exists **on the remote** (`git ls-remote --heads origin dev | grep -q .`),
+  else `$DEFAULT`. Record whether `$BASE == $DEFAULT`.
+- `git push -u origin <branch>`.
+- Set `$PLAN_SUMMARY` to a 1–2 sentence summary of what shipped (derive it from `$IMPL`). Build the
+  PR body with **real newlines**:
+  ```bash
+  BODY=$(printf 'Closes #%s\n\n%s\n\nArchitect review: clean after %s round(s).' "$NUM" "$PLAN_SUMMARY" "$K")
+  gh pr create --base "$BASE" --head "$BRANCH" --title "<issue title or task>" --body "$BODY"
+  ```
+  (Drop the `Closes #N` line for a free-text task with no issue.) Capture the PR URL.
+- **Never auto-merge; never close the issue directly.** `Closes #N` auto-closes only on a merge into
+  the **default branch**: `$BASE == $DEFAULT` → leave it (the merge closes it); `$BASE != $DEFAULT`
+  (e.g. `dev`) → it will **not** auto-close — leave it OPEN and **flag a manual close** in the report.
+
+## Final report (report what ACTUALLY happened — never narrate an intended architecture)
+
+- **Issue/task** and branch; the two plan artifacts (`.codex/plans/issue-<#>.md` and `…claude.md`).
+- **Which development path ran** — main-thread (you ran the repo's workflow) or Workflow-engine (the
+  repo Workflow) — and **which gates ran how**: a native command vs a **dispatched repo subagent**
+  (name it). This is the fidelity record: the human can see the repo's real lifecycle executed.
+- **Architect Q&A** you auto-answered (via the helper agents) with rationale; any findings you pushed
+  back on and why.
+- **Rounds**: how many review rounds and the final verdict.
+- **Outcome**: PR URL + whether the issue **auto-closes** (`$BASE == $DEFAULT`) or **needs a manual
+  close**. Or — if you stopped early — exactly why and the current state (branch, commits, outstanding
+  findings). Be honest about anything you could not get clean or any gate that could not run.
+
+In both modes the loop never auto-merges and never closes the issue itself. Do not drive `codex-drive`
+yourself for the plan/review turns — the `codex-architect` / `codex-reviewer` subagents do that, and
+isolate their verbose wait-loops from this conversation.
