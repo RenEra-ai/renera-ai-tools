@@ -5,8 +5,8 @@ Some repos implement their development lifecycle as a **Claude Code Workflow** �
 via the Workflow tool or a slash command.
 
 A plugin **subagent cannot run such a Workflow**: the Workflow tool is a session-level capability, not
-a grantable subagent tool, and subagents can't invoke slash commands. So the `codex-developer` black
-box can only *approximate* a Workflow-mode repo's pipeline by replaying its steps — losing the gates
+a grantable subagent tool, and subagents can't invoke slash commands. So a subagent-based approach can
+only *approximate* a Workflow-mode repo's pipeline by replaying its steps — losing the gates
 baked into the JS (loop caps, scope confinement, verdict classification).
 
 **Composition** solves this. The `/codex-issue` command runs in the **main thread**, where the Workflow
@@ -105,8 +105,8 @@ The plugin must wrap a repo's lifecycle **whatever shape it has**. Two real repo
 - **Prose policy with a live gate → subagent mode.** `Boomi/boomi-mcp-server` has no workflow — a
   prose-only `CLAUDE.md` two-stage gate (live `boomi-qa-tester` QA via real tool calls → Codex review,
   "skipping either stage is never acceptable"). `/codex-issue` falls back to subagent mode; the
-  `codex-developer` discovers and runs both stages. Because that QA stage needs live credentials, it
-  can be **BLOCKED** — which the developer reports fail-closed (the loop stops, nothing is landed)
+  main-thread loop discovers and runs both stages. Because that QA stage needs live credentials, it
+  can be **BLOCKED** — which the loop reports fail-closed (the loop stops, nothing is landed)
   rather than silently skipping a required gate.
 
 ## Notes / limits
