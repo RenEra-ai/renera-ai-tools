@@ -100,7 +100,10 @@ Steps:
 2. Honor THIS repo's conventions in CLAUDE.md / AGENTS.md (no new dependencies, minimal diff, scope discipline).
 3. Write the plan to \`.codex/plans/issue-${ISSUE}.claude.md\` with the Write tool — resolve it to an ABSOLUTE path under the repo root first (run \`git rev-parse --show-toplevel\` and join it with \`.codex/plans/issue-${ISSUE}.claude.md\`; create the directory if needed). The plan should have a short Summary, a File-by-File section, a Test Plan, and any Deviations-from-architect-plan.
 DO NOT modify, create, or stage any source or test files — your ONLY write is that one plan file. Do not run the tests.
-Return: planText = the full implementation plan you wrote; planPath = the absolute path you saved it to.`,
+Return: planText = the full implementation plan you wrote; planPath = the absolute path you saved it to.
+
+--- ARCHITECT PLAN (honor this; it is the approved intent) ---
+${plan.planText}`,
   { label: `claude-plan #${ISSUE}`, phase: 'Claude plan', schema: CLAUDE_PLAN_SCHEMA },
 )
 const implPlan = (claudePlan && claudePlan.planText && claudePlan.planText.trim()) ? claudePlan.planText : plan.planText
