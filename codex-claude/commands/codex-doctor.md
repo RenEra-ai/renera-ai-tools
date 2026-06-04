@@ -30,10 +30,20 @@ Report `codexVersion` / `authPresent`. If `codexVersion` is null → Codex CLI n
 ```bash
 ls .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null            # any Workflow at all?
 grep -l "noLand" .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null   # candidates only; verify code reads args.noLand
+grep -l "codex-claude:generic-scaffold" .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null  # unmodified starter?
+git ls-files --error-unmatch <matched-file> 2>/dev/null && echo tracked || echo UNTRACKED          # reproducibility
 ```
 
 - **A file reads `noLand`** → for a **numeric issue**, `/codex-issue` will use **workflow-mode
-  composition** (the repo's real pipeline, bracketed by the architect). Name the matched file.
+  composition** (the repo's real pipeline, bracketed by the architect). Name the matched file. Also
+  report two fidelity/reproducibility signals:
+  - **Unmodified scaffold:** if the matched file still contains `codex-claude:generic-scaffold`, flag it
+    outright — "this workflow is the untouched generic starter; in workflow-mode it will **NOT** run the
+    QA/`codex-companion` review gates documented in CLAUDE.md. Encode your gates (and remove the marker),
+    or use subagent mode." This is a CONCERN, not a clean pass.
+  - **Tracked-ness:** report whether the matched file is git-tracked. **UNTRACKED** is a CONCERN — the
+    mode depends on an ephemeral file, so a `git clean`/fresh clone silently flips the repo to subagent
+    mode. Advise committing `.claude/` (or running `/codex-compose-setup`, which offers to stage it).
 - **A workflow exists but none reads `noLand`** → `/codex-issue` will use **subagent mode** and should
   nudge `/codex-compose-setup`. Say so — composition would be higher fidelity here.
 - **No workflow** → **subagent mode** (the black-box developer discovers + runs the repo's prose
@@ -66,4 +76,5 @@ branch — so if BASE ≠ default, the issue will **not** auto-close and needs a
 ## Report
 
 Summarize: **mode** (+ why), **seam** (intact / not composition-ready → run `/codex-compose-setup`),
-**base + auto-close**, **Codex health**. Keep it to a few lines. Change nothing.
+**scaffold/tracked** (unmodified generic scaffold? matched workflow git-tracked?), **base + auto-close**,
+**Codex health**. Keep it to a few lines. Change nothing.
