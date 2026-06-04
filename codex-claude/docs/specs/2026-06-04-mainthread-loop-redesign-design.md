@@ -58,14 +58,17 @@ a Claude Code Workflow:
 |---|---|---|
 | Subagents can spawn subagents? | **No.** Max nesting depth = 1. `Task`/`Agent` is withheld from subagents. | High |
 | Subagents get `AskUserQuestion`/`EnterPlanMode`/`ExitPlanMode`? | **No** (except a subagent spawned with `permissionMode:"plan"`, which is read-only). | High |
+| Which tools DO subagents actually get? (**empirically verified 2026-06-04, this env**) | **`Bash`, `Read`, `Edit`, `Write`** — but **NOT** `Grep`, `Glob`, `Task`, `AskUserQuestion`, `EnterPlanMode`, `ExitPlanMode`. A probe subagent's `Grep`/`Glob` calls hard-failed `No such tool available`; `Bash`/`Read` worked. (Docs imply `Grep`/`Glob` are available; this env strips them. The design uses `Bash` for search, so it is robust either way.) | **Verified** |
 | Slash commands run in the main agent loop with their `allowed-tools`? | **Yes** — a command can drive a multi-step loop, dispatch subagents via `Task`, and use Plan mode. | High |
 | `EnterPlanMode`/`ExitPlanMode` are main-thread tools; ExitPlanMode auto-approves under auto/bypass mode? | **Yes.** | High |
-| A subagent can be spawned `permissionMode:"plan"` (read-only)? | **Yes.** Note: if the parent is in `auto`/`bypassPermissions`/`acceptEdits`, the child may inherit that — so read-only discipline is also enforced via tool set + prompt. | High/Medium |
+| A subagent can be spawned `permissionMode:"plan"` (read-only)? | **Yes**, but if the parent is in `auto`/`bypassPermissions`/`acceptEdits` the child may inherit that and plan mode is ignored — so this design does **not** rely on plan mode for read-only; the planner's `Read`-only tool set is the guarantee (§6 step 3, §8 F3). Plan mode is belt-and-suspenders. | High/Medium |
 | Workflow `agent()` agents can enter Plan mode / nest `Task`? | **Unconfirmed / treat as no.** Workflow nesting is one level (`workflow()` cannot call `workflow()` again). | Medium |
 
 **Design consequence:** anything that needs `Task`, Plan mode, or the development context (planning,
 developing, fixing) must run in the **main thread**. Only the *verbose, Task-free* Codex driving may
-be isolated in subagents.
+be isolated in subagents — and those thin subagents get only `Bash`/`Read`/`Edit`/`Write`, so they
+use `Bash` (`grep`/`rg`/`ls`/`find`) for any search, never the `Grep`/`Glob` tools, and the
+`mode:plan` planner is `Read`-only (no `Write`/`Edit`/`Bash` — see §6 step 3).
 
 ## 4. The inversion
 
@@ -82,10 +85,11 @@ be isolated in subagents.
 |---|---|---|
 | `agents/codex-orchestrator.md` | **Retire** | Premise impossible; logic moves to the main-thread playbook. |
 | `agents/codex-developer.md` | **Retire** | Replaced by real main-thread `Task` dispatch of the repo's own subagents. |
-| `agents/codex-architect.md` | **New (thin)** | Tools: Bash, Read, Grep, Glob (no `Task`). Runs the ephemeral `scripts/plan-round.mjs`, persists `.codex/plans/issue-N.md`, returns the verbatim Codex design-plan text + status. Transcriber, not author — fails loud if Codex emits no usable plan. |
-| `agents/codex-reviewer.md` | **Keep, adapt** | Already thin (Bash/Read) + ephemeral (`scripts/review-round.mjs`). Adapt to take *plan text + changed files*, return structured `{verdict, reviewedFiles[], findings[]}` with the deterministic last-line `VERDICT:` parse. |
+| `agents/codex-architect.md` | **New (thin)** | Tools: **`Bash`, `Read`** (no `Task`/`Grep`/`Glob`; uses `Bash` for any search). Runs the ephemeral `scripts/plan-round.mjs` (which writes `--out .codex/plans/issue-N.md`), returns the verbatim Codex design-plan text + status. Transcriber, not author — fails loud if Codex emits no usable plan. |
+| `agents/codex-planner.md` | **New (thin, read-only)** | Tools: **`Read` only**. Spawned `mode:"plan"`. The main thread passes the issue text + design-plan text; the planner reads the named files and **returns** its concrete impl-plan text. No `Write`/`Edit`/`Bash` → read-only by construction (permission-mode-independent; §6 step 3, §8 F3). The **main thread** persists the returned text to `.codex/plans/issue-N.claude.md`. |
+| `agents/codex-reviewer.md` | **Keep, adapt** | Already thin + ephemeral (`scripts/review-round.mjs`). **Drop the dead `Grep`/`Glob`** from its `tools:` (non-functional in subagents) → `tools: Bash, Read`. Adapt to take *plan text + changed files*, return structured `{verdict, reviewedFiles[], findings[]}` with the deterministic last-line `VERDICT:` parse. |
 | `workflows/codex-wrap.js` | **Shrink to a noLand runner** | Delete plan / claude-plan / review / fix / land. Keep only: invoke the repo's Workflow with `noLand:true` (+ `plan`), validate `terminal:"ready_to_land"` (branch, base_sha), and the danger-landed contract check. Used **only** for Workflow-repos' bulk implementation. |
-| `commands/codex-issue.md` | **Rebuild thin** | Entry: parse args → preflight → detect mode → run the main-thread loop (steps in the skill). `allowed-tools`: Task, Bash, Read, Edit, Write, Grep, Glob, Workflow, EnterPlanMode, ExitPlanMode, AskUserQuestion. |
+| `commands/codex-issue.md` | **Rebuild thin** | Entry: parse args → preflight → detect mode → run the main-thread loop (steps in the skill). `allowed-tools`: Task, Bash, Read, Edit, Write, Grep, Glob, Workflow, AskUserQuestion. (The main thread *does* have `Grep`/`Glob`. **No** `EnterPlanMode`/`ExitPlanMode` — step 3 uses the `mode:plan` planner subagent, per gap E.) |
 | `skills/codex-claude/SKILL.md` | **Replace the orchestration section** | Document the autonomous **main-thread** playbook (below) instead of "dispatch the orchestrator." Keep the verb reference + manual loop. |
 | `commands/codex-doctor.md`, `commands/codex-compose-setup.md`, `docs/WORKFLOW-MODE.md` | **Update wording** | Reflect main-thread orchestration; keep mode detection + the `noLand` seam contract. |
 | `templates/implement-issue.template.js` | **Review** | The composition-ready starter; keep the `noLand` contract, align comments. |
@@ -98,10 +102,11 @@ be isolated in subagents.
 1. Intake      gh issue view N (or free text); create + checkout codex/issue-N.
 2. Design plan dispatch codex-architect (thin subagent, no Task) → verbatim Codex design plan,
                persisted .codex/plans/issue-N.md. Fail loud if no usable plan (no improvised plan).
-3. Impl plan   dispatch a planning subagent spawned permissionMode:"plan" (tools: Read, Grep, Glob,
-               Bash, Write-restricted-to-the-plan-file; NO Edit). It reads the design plan + the code
-               and writes .codex/plans/issue-N.claude.md, returns the plan text. Read-only by tools +
-               prompt + plan mode. If the plan is thin/empty, fall back to the design plan.   [F3]
+3. Impl plan   dispatch codex-planner (tools: Read only) spawned mode:"plan". The main thread passes
+               the issue text + design-plan text; the planner reads the named files and RETURNS its
+               concrete impl-plan text (no Write/Edit/Bash → read-only by construction). The MAIN
+               THREAD persists it to .codex/plans/issue-N.claude.md. Thin/empty → fall back to the
+               design plan.   [F3]
 4. DEVELOP     branch on mode (§7). The main thread has Task → the repo's REAL subagents run.   [F1,F2]
 5. Review      dispatch codex-reviewer (thin subagent) with the DESIGN-plan text re-inlined + the
                changed files (git diff --name-only base..HEAD) → {verdict, reviewedFiles, findings}.
@@ -143,8 +148,10 @@ non-composable-Workflow nudge to `/codex-compose-setup`) is preserved from today
   (`codex-architect`, `codex-reviewer`, the `mode:plan` planner) need no `Task`.
 - **F2 (loop collapse / lost independence)** — the repo's own QA/review subagents are dispatched for
   real, in both modes, including during fixes.
-- **F3 (plan not in Plan mode)** — step 3 runs read-only via a `permissionMode:"plan"` subagent
-  constrained by tools + prompt.
+- **F3 (plan not in Plan mode)** — step 3 runs in a `mode:"plan"` subagent whose tool set is `Read`
+  only (no `Write`/`Edit`/`Bash`), so read-only is guaranteed **by construction** regardless of
+  parent permission-mode inheritance; the main thread persists the returned text. Plan mode is
+  belt-and-suspenders, not the primary control.
 - **F4 (fabricated report)** — no orchestrator subagent narrating an imagined architecture. The main
   thread reports what it actually did; a thin Codex-driver subagent makes no dispatches it could lie
   about. The report names the real dev path (direct main-thread vs repo-Workflow) and the real gates.
@@ -155,8 +162,12 @@ non-composable-Workflow nudge to `/codex-compose-setup`) is preserved from today
   validation and the danger-landed check (mock repo workflow returning each terminal). Keep
   `plan-output`, `safe-command`, daemon, verbs tests green; drop tests asserting the retired
   orchestrator/composition-loop behavior, add tests for the noLand-runner contract.
-- **Agent contracts:** `codex-architect` returns `{status, planText, planPath}`; `codex-reviewer`
-  returns `{verdict, reviewedFiles, findings}` with last-line verdict parsing.
+- **Agent contracts:** `codex-architect` returns `{status, planText, planPath}`; `codex-planner`
+  (`mode:plan`, `Read`-only) returns the impl-plan text; `codex-reviewer` returns
+  `{verdict, reviewedFiles, findings}` with last-line verdict parsing.
+- **Subagent tool grant:** empirically verified 2026-06-04 (`Bash`/`Read`/`Edit`/`Write` granted;
+  `Grep`/`Glob`/`Task` not) — re-probe if the Claude Code version changes, since this contradicts the
+  general docs and may be environment-specific.
 - **End-to-end (manual, on `mathkit-codex-test`):** re-run the reported scenario (`/codex-issue 9`,
   no `.claude/workflows/`). Assert: the repo's *independent* QA subagent actually runs (visible
   dispatch), the Claude impl plan exists as a plan-mode artifact, the final report names the real
@@ -164,16 +175,27 @@ non-composable-Workflow nudge to `/codex-compose-setup`) is preserved from today
 
 ## 10. Risks & open items
 
-- **Main-context cost:** the loop playbook + development happen in the main conversation (the old
-  design's "isolation" is what broke it). Accepted trade — correctness over brevity. Mitigation: keep
-  the command thin and the detailed playbook in the skill (loaded on demand).
-- **`mode:plan` parent-inheritance:** if the parent session is in `auto`/`bypass`/`acceptEdits`, the
-  planner may inherit it; read-only is still enforced by its tool set (no `Edit`; `Write` only the
-  plan file) + prompt.
-- **Permission mode for unattended runs:** development edits + push need a non-blocking permission
+- **Main-context cost (the genuine price of correctness):** the dominant cost is **development
+  output**, not instruction tokens — running the repo's dev loop where the main thread codes directly
+  dumps that work into the live context, and it is **largely irreducible**: you cannot both isolate
+  development and let it dispatch real subagents (isolation is exactly what removes `Task`). It is
+  *partly* bounded by repo shape — where the repo's lifecycle is itself a Workflow (runs in the
+  background) or itself dispatches subagents (which return only summaries), that output is isolated;
+  only the main thread's own direct edits are unavoidably in-context. The skill-loading trick trims
+  *instruction* tokens, not this. This is the right price for fidelity; name it, don't hide it.
+- **`mode:plan` parent-inheritance is NOT load-bearing:** the planner is `Read`-only (no
+  `Write`/`Edit`/`Bash`), so read-only holds even if an `auto`/`bypass`/`acceptEdits` parent causes
+  plan mode to be ignored. Plan mode is secondary.
+- **Permission mode for unattended runs:** main-thread development edits + push need a non-blocking
   posture; document that fully-unattended runs use auto/bypass mode.
-- **Workflow-repo fix fidelity:** fixes use the repo's gates via the main thread rather than re-running
-  the full deterministic Workflow; this is the intended trade and should be stated in the report.
+- **Workflow-repo fix fidelity (determinism vs independence):** for Workflow-repos the bulk build is
+  deterministic (the Workflow's coded gate sequence/retry), but fixes route through the main thread —
+  preserving gate **independence** (real subagents) while losing the Workflow's **determinism**
+  (ad-hoc dispatch ≠ its coded sequence). Right trade for a small fix delta; the final report **must
+  state which path each gate took** (native command / repo-subagent dispatch / repo Workflow).
+- **Subagent tool grant (verified, not assumed):** thin subagents get `Bash`/`Read`/`Edit`/`Write`
+  but not `Grep`/`Glob`/`Task` in this env (§3) — agent prompts use `Bash` for search; the design
+  never relies on `Grep`/`Glob` inside a subagent.
 - **`codex` vs `codex-claude` plugins:** unchanged coexistence.
 
 ## 11. Out of scope
@@ -181,3 +203,20 @@ non-composable-Workflow nudge to `/codex-compose-setup`) is preserved from today
 - Changing the `codex-drive` JSON-RPC protocol or the ephemeral drivers' internals.
 - The separate `codex` plugin (rescue/setup).
 - Multi-issue / parallel-issue orchestration.
+
+## 12. Review log
+
+**2026-06-04 — Codex review of this spec, accepted via `receiving-code-review`:**
+
+- **A (verify subagent tool grant):** done **empirically** — a probe subagent's `Grep`/`Glob` calls
+  hard-failed `No such tool available`; `Bash`/`Read`/`Edit`/`Write` work; `Task` absent. Confirmed
+  the bug report's hunch (not imprecise self-reporting). Thin agents now use `Bash` for search (§3,§5).
+- **B (Write can't be path-restricted by `tools:`):** resolved better than a permission rule — the
+  planner has **no `Write`**; it returns text, the main thread persists it (§5,§6 step 3).
+- **C (plan-mode read-only is Medium-confidence):** read-only now rests on the planner's `Read`-only
+  tool set, not plan mode (§3,§8). 
+- **D (main-context mitigation mis-aimed):** §10 rewritten — the irreducible cost is development
+  output, only bounded by repo shape.
+- **E (`EnterPlanMode`/`ExitPlanMode` unused):** dropped from the command's `allowed-tools` (§5).
+- **F (Workflow-repo fix trade):** §7/§10 sharpened — determinism-vs-independence; report states each
+  gate's path.
