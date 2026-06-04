@@ -70,7 +70,11 @@ async function main() {
 }
 
 async function startDaemon(parsed, store) {
-  const cwd = parsed.flags.cwd || process.cwd();
+  // Normalize to an ABSOLUTE path: a relative `--cwd repo` is anchored to the start-time process cwd
+  // (where the daemon is also spawned), so `state.cwd` stays a stable absolute anchor. Later consumers —
+  // `read --out` artifact resolution and `--resume-latest` thread-index matching — then can't drift to a
+  // different caller cwd.
+  const cwd = resolve(parsed.flags.cwd || process.cwd());
   // Idempotency: do NOT silently clobber a LIVE session — that orphans its detached codex app-server.
   // Probe the recorded socket; if a daemon answers, refuse (or, with --force, stop it first).
   const existing = store.readState();
