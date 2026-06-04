@@ -4,12 +4,14 @@ Some repos implement their development lifecycle as a **Claude Code Workflow** �
 `.claude/workflows/*.js` or `.mjs` script (developer → reviewer loops, QA, internal Codex review, land), invoked
 via the Workflow tool or a slash command.
 
-A plugin **subagent cannot run such a Workflow**: the Workflow tool is a session-level capability, not
-a grantable subagent tool, and subagents can't invoke slash commands. So a subagent-based approach can
-only *approximate* a Workflow-mode repo's pipeline by replaying its steps — losing the gates
-baked into the JS (loop caps, scope confinement, verdict classification).
+Running such a Workflow needs the **Workflow tool**, a session-level capability — available to the
+**main thread** but not grantable to a subagent. `/codex-issue` runs its loop in the main thread, so it
+*can* invoke the repo's Workflow. The catch is **landing**: to bracket the repo's pipeline with a Codex
+architect plan + review, the main thread must run that pipeline **without** letting it push/PR/close
+first. That needs the repo's Workflow to expose a land-suppression seam (`noLand`) — otherwise running it
+would land prematurely and bypass the architect review.
 
-**Composition** solves this. The `/codex-issue` command runs the loop in the **main thread**, where the
+**Composition** provides that. The `/codex-issue` command runs the loop in the **main thread**, where the
 Workflow tool *is* available. For a composable workflow, the main thread uses the repo's Workflow as the
 **development engine** — running it with `noLand:true` so it executes its full pipeline (all gates
 intact) without landing — while the main thread owns the architect plan, Claude plan, review, fix, and
@@ -40,7 +42,7 @@ The plugin uses `grep noLand` only to discover candidates. `/codex-issue` treats
 composable only after opening the candidate and confirming it actually reads `args.noLand` (or
 destructures `noLand` from `args`) in code, not only in comments/strings. The no-land branch must return
 `terminal: "ready_to_land"` with `branch` and `base_sha`; otherwise `/codex-issue` falls back to
-**subagent mode** and nudges `/codex-compose-setup`.
+**main-thread mode** and nudges `/codex-compose-setup`.
 
 ## Making a repo composable — `/codex-compose-setup`
 
@@ -84,13 +86,13 @@ The plugin must wrap a repo's lifecycle **whatever shape it has**. Two real repo
   a `developer ⇄ code-reviewer` loop (cap 3) then its own internal Codex loop (cap 3), already
   `noLand`+`plan`-aware. `/codex-issue` detects `noLand`, runs it as the dev engine via `codex-wrap.js`
   (gates intact), and the main-thread architect fix rounds re-apply **that repo's `code-reviewer` gate
-  discipline** on the delta (its first native pass runs the real reviewer; on fix rounds the main-thread
-  fix agent — a subagent that can't dispatch the reviewer subagent — **replays** that reviewer's
-  criteria inline, as faithfully as a single agent can).
-- **Prose policy with a live gate → subagent mode.** `Boomi/boomi-mcp-server` has no workflow — a
+  discipline** on the delta — its first native pass runs the real reviewer; on fix rounds the main thread
+  **dispatches that repo's real `code-reviewer` subagent via `Task`** (it can — it is the main thread) or
+  runs the gate's command natively, until clean. No inline replay.
+- **Prose policy with a live gate → main-thread mode.** `Boomi/boomi-mcp-server` has no workflow — a
   prose-only `CLAUDE.md` two-stage gate (live `boomi-qa-tester` QA via real tool calls → Codex review,
-  "skipping either stage is never acceptable"). `/codex-issue` falls back to subagent mode; the
-  main-thread loop discovers and runs both stages. Because that QA stage needs live credentials, it
+  "skipping either stage is never acceptable"). `/codex-issue` runs in main-thread mode and discovers
+  and runs both stages, **dispatching the repo's real `boomi-qa-tester` QA subagent via `Task`**. Because that QA stage needs live credentials, it
   can be **BLOCKED** — which the loop reports fail-closed (the loop stops, nothing is landed)
   rather than silently skipping a required gate.
 
@@ -98,23 +100,23 @@ The plugin must wrap a repo's lifecycle **whatever shape it has**. Two real repo
 
 - The main-thread **fix loop** is repo-agnostic and **gate-faithful**: it discovers the repo's
   own dev conventions, applies the fix, and re-runs the repo's **own review/QA gate(s)** plus its tests
-  before committing — not just the tests. The fix agent is itself a subagent and **cannot dispatch
-  another subagent** (no nested Task), so it runs each gate the honest way: a review/QA **command or
-  script** is run natively; a gate that is a repo-defined **subagent** is **replayed inline** from that
-  agent's `.md`; a gate that must **execute live** (credentials/network) and can't be run is **BLOCKED**.
+  before committing — not just the tests. Fixes run **in the main thread**, which has `Task`, so each gate
+  runs for real: a review/QA **command or script** is run natively; a gate that is a repo-defined
+  **subagent** is **dispatched via `Task`** (the repo's real reviewer/QA agent — not an inline replay); a
+  gate that must **execute live** (credentials/network) and can't be run is **BLOCKED**.
 - **Fail-closed.** A required review/QA gate that cannot run (missing credentials/env, no network) is
   treated as BLOCKED — the change is never landed with a skipped gate. The main thread also stages only
   the fix delta (never `git add -A`), so a pre-existing untracked file is not swept into the PR.
 - **Landing is main-thread-owned (by design).** Under `noLand` the repo's own `land()` is suppressed
   and the main thread does the squash + `git push` + `gh pr create` itself. A repo's **bespoke land
-  side-effects** (deploy, tag/release, changelog, issue-close-with-stats) are therefore **not** replayed
+  side-effects** (deploy, tag/release, changelog, issue-close-with-stats) are therefore **not** reproduced
   — only push + PR with `Closes #N`. If a repo needs those, run its real land step manually after the
   PR merges.
 - **Preflight with `/codex-doctor`** to see which mode a repo will use and whether the `noLand` seam is
   intact, before a real run.
 - The only hard requirement for composition is that the repo's Workflow implements the **`noLand`
   contract** (`noLand` is NOT an Anthropic-standard arg — the repo's script must read `args.noLand`).
-  If it doesn't, `/codex-issue` detects nothing and falls back to subagent mode, which needs no contract.
+  If it doesn't, `/codex-issue` detects nothing and falls back to main-thread mode, which needs no contract.
 - Approval is requested **before** launch (workflows can't prompt mid-run). The main-thread loop runs
   in the background and reports on completion.
 - The architect plan is **inlined** into the review (no shared Codex thread across phases), so each
@@ -131,5 +133,5 @@ The plugin must wrap a repo's lifecycle **whatever shape it has**. Two real repo
   differ from a repo's `CLAUDE.md` prose. `/codex-issue` prints a faithfulness banner naming those phases
   and reports whether the matched workflow is git-tracked; if the workflow still carries the
   `codex-claude:generic-scaffold` marker (the untouched starter that runs **no** documented QA/review
-  gates), `/codex-issue` warns and makes subagent mode the fail-safe default, and `/codex-doctor` flags
+  gates), `/codex-issue` warns and makes main-thread mode the fail-safe default, and `/codex-doctor` flags
   it. `/codex-compose-setup` won't call a scaffold "ready" while a repo's documented gates are unencoded.

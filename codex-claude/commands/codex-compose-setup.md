@@ -6,7 +6,7 @@ description: >-
   a diff for your approval. If the repo has no workflow, it scaffolds a minimal, composition-ready
   starter workflow. Composition makes the repo's Workflow the development ENGINE for /codex-issue (run
   with noLand, bracketed by main-thread architect plan + review); /codex-issue already works without
-  setup via subagent mode.
+  setup via main-thread mode.
 argument-hint: ""
 allowed-tools:
   - Read
@@ -97,7 +97,7 @@ before relying on workflow-mode. Do not describe an unmodified scaffold as "read
 exist. While the marker line remains, `/codex-issue` and `/codex-doctor` will warn it's unmodified.
 
 **Tracked-ness (reproducibility).** `.claude/` is often untracked, and mode-detection keys on the file
-being present — a `git clean`/fresh clone would silently flip the repo back to subagent mode. After
+being present — a `git clean`/fresh clone would silently flip the repo back to main-thread mode. After
 writing the file, check `git ls-files --error-unmatch .claude/workflows/implement-issue.js` and, if it's
 untracked, **offer to stage/commit it** (e.g. `git add .claude/workflows/implement-issue.js`) so the
 chosen mode is durable. Leave the commit to the user's approval.
@@ -106,5 +106,5 @@ chosen mode is durable. Leave the commit to the user's approval.
 
 Confirm: `/codex-issue <issue#>` will now detect this repo as composable and offer the composition path.
 Remind the user that this only enables the *higher-fidelity* composition; `/codex-issue` already worked
-without it via subagent mode. Note that `.claude/` may be untracked in their repo — if so the seam/
+without it via main-thread mode. Note that `.claude/` may be untracked in their repo — if so the seam/
 scaffold lives in the working tree (commit it if they want it version-controlled).
