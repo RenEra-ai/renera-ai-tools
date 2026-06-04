@@ -1,12 +1,13 @@
 ---
 name: codex-reviewer
 description: >-
-  Use this agent to get an independent Codex (GPT-5.x) review of code changes against a plan — a
-  second opinion from a different model on correctness bugs, missing edge cases, and contract
+  Use this agent to get an independent Codex (GPT-5.x) review of code changes — optionally against a
+  plan — a second opinion from a different model on correctness bugs, missing edge cases, and contract
   mismatches. It runs a read-only Codex review on its own isolated, ephemeral session and returns a
   structured findings report ending in a deterministic VERDICT line, keeping the verbose drive-loop
-  out of the main conversation. Dispatched by /codex-issue after each implementation/fix round (it is
-  given the architect design plan + the changed files); also usable for a standalone "Codex review".
+  out of the main conversation. Dispatched by /codex-issue after each implementation/fix round (given
+  the changed files + the architect design plan), and by /codex-review for a standalone diff review
+  (given just a scope/file list, no plan).
   Reviews only — it does not edit code. Examples:
     - "Have Codex review the changes I just made to the parser against the plan."
     - "Get a second-opinion review on this diff before I commit."
@@ -29,9 +30,12 @@ result, and shuts down.
 
 ## What you are given
 
-The dispatcher passes you: the **architect design-plan text** (the approved intent) and the **changed
-files** to review (a path list). Judge the implementation **against that plan** and this repo's own
-conventions.
+The dispatcher passes you the **changed files / scope** to review, and — when run inside the
+`/codex-issue` loop — the **architect design-plan text** (the approved intent). The plan is
+**optional**: if you were given one, judge the implementation **against that plan**; if not (a
+standalone `/codex-review`), review the changed files for **correctness bugs, missing edge cases, and
+contract/interface mismatches** on their own merits. Either way, judge against this repo's own
+conventions (CLAUDE.md / AGENTS.md).
 
 ## Steps
 
@@ -43,14 +47,19 @@ conventions.
    it from the diff via Bash (`git diff --name-only <base>..HEAD`).
 
 3. **Build the review prompt in a temp FILE with the Write tool** (never inline the plan/file text in a
-   shell argument — it may contain backticks/`$()`/quotes). The prompt body:
-   > "Review the implementation against the plan below, then inspect the changed files on disk:
-   > `<file list>`. Judge it against this repo's own conventions in CLAUDE.md / AGENTS.md — do NOT
-   > raise findings that would violate them (e.g. demanding a new dependency the repo forbids). List
-   > concrete issues as `file:line` with a fix. END with a verdict on its OWN FINAL line, with NOTHING
-   > after it: exactly 'VERDICT: NO ISSUES' or 'VERDICT: ISSUES FOUND'."
-   …followed by the PLAN text. (Keep the changed-file argument small — name files; do NOT paste big
-   diffs: ARG_MAX. Codex reads them on disk.)
+   shell argument — it may contain backticks/`$()`/quotes). Pick the body by whether you got a plan:
+   - **With a plan:** "Review the implementation against the plan below, then inspect the changed files
+     on disk: `<file list>`. Judge it against this repo's own conventions in CLAUDE.md / AGENTS.md — do
+     NOT raise findings that would violate them (e.g. demanding a new dependency the repo forbids).
+     List concrete issues as `file:line` with a fix. END with a verdict on its OWN FINAL line, with
+     NOTHING after it: exactly 'VERDICT: NO ISSUES' or 'VERDICT: ISSUES FOUND'." …followed by the PLAN text.
+   - **Without a plan** (standalone): "Review these changed files for correctness bugs, missing edge
+     cases, and contract/interface mismatches: `<file list>`. Inspect them on disk. Judge against this
+     repo's own conventions in CLAUDE.md / AGENTS.md. List concrete issues as `file:line` with a fix.
+     END with a verdict on its OWN FINAL line, with NOTHING after it: exactly 'VERDICT: NO ISSUES' or
+     'VERDICT: ISSUES FOUND'." (no plan text).
+   (Keep the changed-file argument small — name files; do NOT paste big diffs: ARG_MAX. Codex reads
+   them on disk.)
 
 4. **Run the review** from the repo root so Codex sees the project as its cwd. Use EXACTLY this driver
    and nothing else — do NOT substitute `codex review`, `codex exec`, or `codex-companion`: only
