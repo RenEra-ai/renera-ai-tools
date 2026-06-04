@@ -32,8 +32,6 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs doctor
 | **command** `/codex-issue <#\|task>` | **Fully autonomous** end-to-end loop: architect → approve → implement (via the repo's own workflow) → review-until-clean → push + PR (issue closes on merge). Add `--dry-run` to stop before integration. |
 | **command** `/codex-doctor` | Read-only preflight: which mode (`/codex-issue` will use composition vs subagent) and why, `noLand` seam integrity, resolved PR base + auto-close, and Codex daemon health. |
 | **agent** `codex-reviewer` | Autonomous, isolated read-only review on its own **ephemeral** Codex session; returns a clean findings report. |
-| **agent** `codex-orchestrator` | Drives the full `/codex-issue` loop on the persistent daemon; owns plan approval, the review loop, and the push/PR finish (the issue closes on merge). |
-| **agent** `codex-developer` | The repo-agnostic **black box**: **discovers and runs THIS repo's own full internal workflow** wherever defined (`CLAUDE.md`/`AGENTS.md`/`.claude/` docs, commands, agents) — however many internal reviews/QA/tests — then reports `DONE` + a diff. Stops before landing. |
 | **runtime** `bin/` + `lib/` | The `codex-drive` CLI + session daemon (JSON-RPC client, turn state machine, question/approval parking). |
 | `scripts/review-round.mjs` | One-shot ephemeral-daemon review used by the `codex-reviewer` agent. |
 | **workflow** `workflows/codex-wrap.js` | **Workflow-mode** composition: brackets a repo's own no-land Workflow with a Codex architect plan + review, then lands. Invoked by `/codex-issue` when a composable `.claude/workflows/*.js` or `.mjs` file is detected. |
@@ -48,22 +46,24 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs doctor
 
 ## Full automation (`/codex-issue`)
 
+`/codex-issue` runs the loop in the main thread; Codex is driven by the thin `codex-architect`/`codex-reviewer` subagents (dispatched via Task).
+
 `/codex-issue <issue-number | free-text task> [--dry-run] [--base <branch>]` runs the whole loop
-hands-off via the `codex-orchestrator` agent:
+hands-off in the main thread:
 
 1. **Intake** the GitHub issue (`gh issue view`) or free-text task; create a `codex/…` branch.
-2. **Architect** plans it (Plan mode); the orchestrator **auto-answers** clarifying questions and
+2. **Architect** plans it (Plan mode); the main-thread loop **auto-answers** clarifying questions and
    **auto-approves** the plan (optionally getting a second opinion from an independent plan-review
    subagent such as `plan-reviewer`, if one is configured — not shipped with this plugin).
-3. **Implement** — dispatches the `codex-developer` black box, which **discovers and runs this repo's
-   own full internal workflow** wherever it lives (`CLAUDE.md`/`AGENTS.md`/`.claude/`), however many
-   internal reviews/QA/tests it has, **stops before landing**, and reports back `DONE` + a diff.
+3. **Implement** — the main-thread loop discovers and runs this repo's own full internal workflow
+   wherever it lives (`CLAUDE.md`/`AGENTS.md`/`.claude/`), however many internal reviews/QA/tests
+   it has, **stops before landing**, and reports back `DONE` + a diff.
 4. **Architect review** of impl-vs-plan on the same thread → fix → re-review until the architect's
    structured `VERDICT: NO ISSUES`.
 5. **Finish** — `git push`, `gh pr create` (`Closes #N`), then `stop` the daemon. The loop never
    auto-merges and never closes the issue itself (avoids stranding a wrongly-closed issue). `Closes #N`
    auto-closes the issue only when the PR merges into the **default branch**; for a non-default base
-   (e.g. `dev`) the orchestrator flags that the issue needs a manual close.
+   (e.g. `dev`) the main thread flags that the issue needs a manual close.
 
 It is **fully autonomous and ends in irreversible actions** (push / PR). Brakes: `--dry-run`
 stops before integration; the loop halts after a max round count (default 6) rather than push an

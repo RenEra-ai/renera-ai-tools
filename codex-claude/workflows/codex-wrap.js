@@ -172,7 +172,7 @@ ${plan.planText}`,
   findings = (review && review.findings) || []
   const reviewedCount = (review && review.reviewedFiles && review.reviewedFiles.length) || 0
   if (verdict === 'NO ISSUES' && findings.length === 0) {
-    // GAP 2 — no rubber stamps (mirrors codex-orchestrator.md). A clean verdict with no findings AND
+    // GAP 2 — no rubber stamps. A clean verdict with no findings AND
     // no reviewedFiles is a thin signal. Nudge exactly ONCE for the whole loop (no round++, no fix
     // dispatched) to make the architect list the files it reviewed, then re-review once; if still
     // substance-free, accept clean (no infinite loop).
