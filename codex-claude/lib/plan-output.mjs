@@ -15,3 +15,14 @@ export function looksLikeNoPlan(msg) {
   const hasBullets = /(^|\n)\s*[-*]\s+\S/.test(t);
   return !hasFileRef && !hasNumberedStep && !hasBullets;
 }
+
+// Decide whether a Plan-mode turn carries a plan worth persisting as a durable artifact. Mirrors the
+// '(no-plan)'/'(empty)' gate the drivers print: persist ONLY a turn that actually completed with a
+// substantive body — never an empty/timeout/failed turn or a reasoning-preamble. Keeps the on-disk
+// `.codex/plans/*` artifact truthful (a degraded turn fails loud upstream instead of writing junk).
+export function isUsablePlan(status, message, empty) {
+  if (status !== 'completed' || empty) return false;
+  const t = (message || '').trim();
+  if (!t || t === '(empty)') return false;
+  return !looksLikeNoPlan(t);
+}

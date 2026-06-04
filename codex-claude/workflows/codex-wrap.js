@@ -3,6 +3,7 @@ export const meta = {
   description: "Wrap a repo's own no-land workflow with a Codex architect plan + review-until-clean loop, then land. For workflow-mode repos: runs the repo's real pipeline (gates intact) bracketed by Codex architect plan/review.",
   phases: [
     { title: 'Architect plan' },
+    { title: 'Claude plan' },
     { title: 'Repo workflow' },
     { title: 'Architect review' },
     { title: 'Land' },
@@ -27,7 +28,12 @@ if (!ISSUE || !REPO_WF || !PLUGIN) {
 const PLAN_SCHEMA = {
   type: 'object', additionalProperties: false,
   required: ['status', 'planText'],
-  properties: { status: { type: 'string' }, planText: { type: 'string' } },
+  properties: { status: { type: 'string' }, planText: { type: 'string' }, planPath: { type: 'string' } },
+}
+const CLAUDE_PLAN_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['planText', 'planPath'],
+  properties: { planText: { type: 'string' }, planPath: { type: 'string' } },
 }
 const REVIEW_SCHEMA = {
   type: 'object', additionalProperties: false,
@@ -66,22 +72,46 @@ const plan = await agent(
 Steps:
 1. \`gh issue view ${ISSUE} --json title,body\` to read the issue.
 2. Build the plan prompt text — "Architect a concrete, file-by-file plan for issue #${ISSUE} (title+body below). Inspect the relevant files. Honor this repo's own conventions in CLAUDE.md / AGENTS.md (e.g. no new dependencies, minimal diff, scope discipline) — do not propose anything that violates them. Do not change anything." followed by the issue title+body — and WRITE it to a temp file using the Write tool. Do NOT put the issue text in the shell command (it may contain backticks/$()/quotes).
-3. Run the ephemeral Plan-mode driver (boots a private Codex daemon, plans, prints the plan after a '=== PLAN ===' line):
-   node ${PLUGIN}/scripts/plan-round.mjs --prompt-file <that temp file>
-4. If STATUS is not exactly 'completed' (e.g. it shows a '(no-plan)' or '(empty)' marker, or is 'timeout') OR the plan body is empty/(empty)/only a reasoning preamble, rebuild the prompt file with a nudge ("Approvals are unavailable in this read-only planning session — do NOT attempt to run pytest or any command. Emit the FULL file-by-file plan as plain text NOW from static reading only; do not stop after the reasoning preamble.") and run ONCE more.
+3. Run the ephemeral Plan-mode driver (boots a private Codex daemon, plans, persists the plan to the --out file, prints the plan after a '=== PLAN ===' line, and prints the saved path after a 'PLAN_FILE:' line). Run it FROM THE REPO ROOT so the --out path lands in this repo:
+   node ${PLUGIN}/scripts/plan-round.mjs --prompt-file <that temp file> --out .codex/plans/issue-${ISSUE}.md
+4. If STATUS is not exactly 'completed' (e.g. it shows a '(no-plan)' or '(empty)' marker, or is 'timeout') OR the plan body is empty/(empty)/only a reasoning preamble, rebuild the prompt file with a nudge ("Approvals are unavailable in this read-only planning session — do NOT attempt to run pytest or any command. Emit the FULL file-by-file plan as plain text NOW from static reading only; do not stop after the reasoning preamble.") and run ONCE more (keep the same --out).
 REPORT FAITHFULLY — do NOT improvise. You are a transcriber here, not the architect: do NOT write, synthesize, summarize, or substitute your own plan if Codex failed to produce one. If after the retry the driver STILL did not emit a usable plan (STATUS not exactly 'completed', or body is '(empty)'/'(no-plan)'/just a preamble), return that exact status and the driver's raw body verbatim — the workflow will fail loud so a human can intervene, which is the correct outcome.
-Return: status = the EXACT text after 'STATUS:' INCLUDING any '(empty)'/'(no-plan)' marker (do not strip it); planText = the verbatim text printed after '=== PLAN ===' (do not edit, augment, or replace it with your own).`,
+Return: status = the EXACT text after 'STATUS:' INCLUDING any '(empty)'/'(no-plan)' marker (do not strip it); planText = the verbatim text printed after '=== PLAN ===' (do not edit, augment, or replace it with your own); planPath = the path printed after 'PLAN_FILE:' (empty string if it printed '(none)').`,
   { label: `plan #${ISSUE}`, phase: 'Architect plan', schema: PLAN_SCHEMA },
 )
 if (!plan || plan.status !== 'completed' || /\(no-plan\)|\(empty\)/.test(plan.status || '') ||
     !plan.planText || !plan.planText.trim() || plan.planText.trim() === '(empty)') {
   return { status: 'failed', stage: 'architect-plan', detail: `architect produced no usable plan (driver status: ${plan && plan.status})` }
 }
-log(`architect plan captured (${plan.planText.length} chars)`)
+log(`architect plan captured (${plan.planText.length} chars)${plan.planPath ? ` → ${plan.planPath}` : ''}`)
+
+// ── 1b. Claude implementation plan (Claude turns the architect's intent into its OWN plan) ────
+// The architect (Codex) sets the intent; before any code is written Claude authors its own concrete,
+// file-by-file IMPLEMENTATION plan from it and persists it next to the architect plan. The repo's
+// developer then implements CLAUDE's plan (passed as args.plan), while the architect review below
+// still judges the result against the ARCHITECT plan — so Codex remains the intent authority and any
+// drift Claude introduces is caught. A weak/empty Claude pass falls back to the architect plan rather
+// than blocking the run.
+phase('Claude plan')
+const claudePlan = await agent(
+  `Read GitHub issue #${ISSUE} and the architect plan at the end, then write YOUR OWN concrete, file-by-file IMPLEMENTATION plan — the plan you would follow to implement it. This is Claude's plan, distinct from the architect's: do NOT just echo the architect plan, but DO honor it (cover every file/behavior it calls for; keep the same scope; if you intend to deviate, say so with a one-line reason).
+Steps:
+1. \`gh issue view ${ISSUE} --json title,body\` and read the files the architect plan names so your plan is grounded in the real code.
+2. Honor THIS repo's conventions in CLAUDE.md / AGENTS.md (no new dependencies, minimal diff, scope discipline).
+3. Write the plan to \`.codex/plans/issue-${ISSUE}.claude.md\` with the Write tool — resolve it to an ABSOLUTE path under the repo root first (run \`git rev-parse --show-toplevel\` and join it with \`.codex/plans/issue-${ISSUE}.claude.md\`; create the directory if needed). The plan should have a short Summary, a File-by-File section, a Test Plan, and any Deviations-from-architect-plan.
+DO NOT modify, create, or stage any source or test files — your ONLY write is that one plan file. Do not run the tests.
+Return: planText = the full implementation plan you wrote; planPath = the absolute path you saved it to.`,
+  { label: `claude-plan #${ISSUE}`, phase: 'Claude plan', schema: CLAUDE_PLAN_SCHEMA },
+)
+const implPlan = (claudePlan && claudePlan.planText && claudePlan.planText.trim()) ? claudePlan.planText : plan.planText
+log(claudePlan && claudePlan.planText && claudePlan.planText.trim()
+  ? `claude implementation plan captured (${claudePlan.planText.length} chars)${claudePlan.planPath ? ` → ${claudePlan.planPath}` : ''}`
+  : 'claude plan empty — falling back to the architect plan for implementation')
 
 // ── 2. Run the repo's OWN workflow with land suppressed ───────────────────────
+// The developer implements CLAUDE's plan (implPlan); the architect review still checks vs plan.planText.
 phase('Repo workflow')
-const repo = await workflow({ scriptPath: REPO_WF }, { issue: ISSUE, noLand: true, plan: plan.planText })
+const repo = await workflow({ scriptPath: REPO_WF }, { issue: ISSUE, noLand: true, plan: implPlan })
 if (!repo || repo.terminal !== 'ready_to_land' || !repo.branch || !repo.base_sha) {
   // The repo workflow was asked for noLand but did NOT return ready_to_land. Distinguish a clean,
   // no-mutation fail-closed from a DANGEROUS contract violation where it landed anyway (pushed/PR'd/
@@ -202,7 +232,10 @@ log(`architect review clean after ${round} fix round(s)`)
 phase('Land')
 if (DRY) {
   log('DRY RUN: stopping before push/PR.')
-  return { status: 'dry_run_clean', branch: BRANCH, rounds: round, plan: plan.planText.slice(0, 400) }
+  return {
+    status: 'dry_run_clean', branch: BRANCH, rounds: round, plan: plan.planText.slice(0, 400),
+    planPath: plan.planPath || '', claudePlanPath: (claudePlan && claudePlan.planPath) || '',
+  }
 }
 const land = await agent(
   `Land branch ${BRANCH} for issue #${ISSUE}. On ANY early-stop below, still return all LAND_SCHEMA fields: ok=false, prUrl="", base="", autoClose=false, and note=<the reason>.
@@ -222,4 +255,5 @@ if (!land || !land.ok) {
 return {
   status: 'success', branch: BRANCH, prUrl: land.prUrl, base: land.base,
   rounds: round, issueAutoCloses: land.autoClose, note: land.note,
+  planPath: plan.planPath || '', claudePlanPath: (claudePlan && claudePlan.planPath) || '',
 }

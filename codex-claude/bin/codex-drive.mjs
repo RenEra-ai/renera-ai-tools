@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { parseArgs, toCommand } from '../lib/verbs.mjs';
 import { sendCommand } from '../lib/client.mjs';
 import { StateStore } from '../lib/state.mjs';
@@ -53,6 +53,15 @@ async function main() {
   } catch (e) {
     if (/timeout/i.test(e.message)) { process.stdout.write(JSON.stringify({ status: 'timeout' }) + '\n'); process.exit(2); }
     throw e;
+  }
+  // Subagent-mode plan persistence: `read --out <path>` writes the completed turn's verbatim message to
+  // a durable file (the JSON object still goes to stdout so the caller parses it exactly as before). The
+  // orchestrator uses this to persist the approved architect plan to `.codex/plans/issue-<N>.md` — the
+  // workflow-mode counterpart of plan-round.mjs's --out. Only a non-empty message is written.
+  if (parsed.verb === 'read' && parsed.flags.out && res && typeof res.message === 'string' && res.message.trim()) {
+    const abs = resolve(String(parsed.flags.out));
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, res.message.endsWith('\n') ? res.message : res.message + '\n');
   }
   process.stdout.write(JSON.stringify(res) + '\n');
   if (res.error) process.exit(2);

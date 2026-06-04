@@ -14,9 +14,15 @@ tool *is* available, so it composes a wrapper workflow (`workflows/codex-wrap.js
 repo's **own** workflow with a Codex architect plan + review:
 
 ```
-Codex architect plan  →  workflow(repo, { noLand: true })  →  Codex architect review → fix → re-review  →  land (push + PR)
-                          └── the repo's REAL pipeline, all gates intact ──┘
+Codex architect plan  →  Claude implementation plan  →  workflow(repo, { noLand: true, plan })  →  Codex architect review → fix → re-review  →  land (push + PR)
+                                                          └── the repo's REAL pipeline, all gates intact ──┘
 ```
+
+Codex (the architect) sets the **intent**; Claude then authors its **own** file-by-file implementation
+plan from it; the repo's developer implements **Claude's** plan; the architect review judges the result
+against the **architect** plan (so Codex stays the intent authority). Both plans are persisted under
+`.codex/plans/` (`issue-<N>.md` = architect, `issue-<N>.claude.md` = Claude) as durable, reviewable
+artifacts — untracked, so they never enter the issue commit/PR.
 
 `workflow()` runs another workflow inline as a one-level sub-step, so the repo's pipeline executes for
 real; the plugin only adds the architect bookends and the landing.
@@ -53,7 +59,13 @@ which is exactly what setup arranges.)
 
 ## What the plugin's wrapper does (`workflows/codex-wrap.js`)
 
-1. **Architect plan** — an ephemeral Codex Plan-mode session (`scripts/plan-round.mjs`) → plan text.
+1. **Architect plan** — an ephemeral Codex Plan-mode session (`scripts/plan-round.mjs --out`) → plan
+   text, persisted to `.codex/plans/issue-<N>.md` (the driver writes the verbatim body; `planPath` is
+   surfaced in the result).
+1b. **Claude plan** — a Claude agent reads the issue + architect plan and writes its **own** file-by-file
+   implementation plan to `.codex/plans/issue-<N>.claude.md`. This Claude plan (not the architect plan)
+   is what gets passed as `args.plan` to the repo workflow, so the developer implements Claude's plan.
+   A weak/empty Claude pass falls back to the architect plan.
 2. **Repo workflow** — `workflow({ scriptPath: <repo wf> }, { issue, noLand: true, plan })` → the repo's
    real pipeline, returning `ready_to_land` on `branch`.
 3. **Architect review** — an ephemeral Codex review (`scripts/review-round.mjs`) of the branch diff vs
