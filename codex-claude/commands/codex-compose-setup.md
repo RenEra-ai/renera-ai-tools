@@ -27,11 +27,15 @@ before it lands (squash/push/PR/close), when called with `args.noLand: true`.
 ```bash
 ls .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null
 grep -l "noLand" .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null   # candidates only
+grep -l "codex-claude:generic-scaffold" .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null  # our unmodified starter?
 ```
 
 - A workflow that actually **reads `args.noLand`** or destructures `noLand` from `args` in code (not a
   comment-only/string-only mention) and returns `terminal: "ready_to_land"` with `branch` and `base_sha`
-  under that branch → already composable. Report which file and stop.
+  under that branch → already composable. **Idempotency:** setup has nothing to add — report which file
+  and stop (do NOT re-scaffold or re-add the seam). If that file still contains the
+  `codex-claude:generic-scaffold` marker, add the caveat from Step 3 (it's our untouched starter and does
+  NOT run the repo's documented gates).
 - A workflow file exists but no file implements that contract → **Step 2** (add the seam in place).
 - **No** `.claude/workflows/*.js` or `.mjs` → **Step 3** (scaffold a starter).
 
@@ -79,6 +83,21 @@ cp "${CLAUDE_PLUGIN_ROOT}/templates/implement-issue.template.js" .claude/workflo
 Tell the user it's a **starting point** they can grow (add their own code-review / QA / lint steps
 between Implement and Land), it discovers the test command from their `CLAUDE.md` (no runner assumed),
 and it's already composition-ready.
+
+**Fidelity tripwire (do not skip).** The scaffold carries a `codex-claude:generic-scaffold` marker and
+only does implement → run-tests → land. Read the repo's `CLAUDE.md` / `AGENTS.md`: **if they document a
+real completion process** (a QA gate, a code-review/`codex-companion` review loop, lint, etc.), say
+**plainly** that the scaffold does **NOT** implement those gates and is therefore **not "ready"** for a
+faithful run yet — `/codex-issue` will run the scaffold's phases, not the documented prose. List the
+specific documented gates it is missing, and tell the user to encode them (replacing the marker line)
+before relying on workflow-mode. Do not describe an unmodified scaffold as "ready" when documented gates
+exist. While the marker line remains, `/codex-issue` and `/codex-doctor` will warn it's unmodified.
+
+**Tracked-ness (reproducibility).** `.claude/` is often untracked, and mode-detection keys on the file
+being present — a `git clean`/fresh clone would silently flip the repo back to subagent mode. After
+writing the file, check `git ls-files --error-unmatch .claude/workflows/implement-issue.js` and, if it's
+untracked, **offer to stage/commit it** (e.g. `git add .claude/workflows/implement-issue.js`) so the
+chosen mode is durable. Leave the commit to the user's approval.
 
 ## Done
 

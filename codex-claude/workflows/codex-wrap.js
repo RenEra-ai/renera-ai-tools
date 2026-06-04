@@ -140,7 +140,7 @@ if (!repo || repo.terminal !== 'ready_to_land' || !repo.branch || !repo.base_sha
   if (landed && landed.landed) {
     return { status: 'danger_landed_despite_noland', stage: 'repo-workflow', detail: `DANGER: repo workflow landed despite noLand:true — the architect review was BYPASSED. ${landed.detail || ''}`, repo }
   }
-  return { status: 'failed', stage: 'repo-workflow', detail: (repo && (repo.terminal || JSON.stringify(repo))) || 'no result', repo }
+  return { status: 'failed', stage: 'repo-workflow', detail: (repo && ((repo.terminal || JSON.stringify(repo)) + (repo.detail ? `: ${repo.detail}` : ''))) || 'no result', repo }
 }
 const BRANCH = repo.branch
 const REPO_BASE = repo.base_sha

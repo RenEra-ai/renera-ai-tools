@@ -31,6 +31,8 @@ Check whether this repo has a Claude Code **Workflow**, and whether it supports 
 ```bash
 ls .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null            # any workflow at all?
 grep -l "noLand" .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null   # candidates only; verify code reads args.noLand
+grep -l "codex-claude:generic-scaffold" .claude/workflows/*.js .claude/workflows/*.mjs 2>/dev/null  # unmodified starter?
+git ls-files --error-unmatch <matched-file> 2>/dev/null && echo tracked || echo UNTRACKED          # reproducibility
 ```
 
 Decide (and **state which branch you took** so demotion is never silent):
@@ -38,7 +40,17 @@ Decide (and **state which branch you took** so demotion is never silent):
   (Step 2A). A bare `grep` match isn't enough — open the matched file(s) and confirm it references
   `args.noLand` / destructures `noLand` from `args` **in code** (not just a comment); if several
   qualify, pick the issue-implementation pipeline and say which. (The wrapper then hard-validates by
-  requiring the workflow to return `terminal: "ready_to_land"`.)
+  requiring the workflow to return `terminal: "ready_to_land"`.) Before proceeding, surface two things so
+  the substitution is never silent:
+  - **Faithfulness banner:** state that workflow-mode runs the **workflow's OWN phases** (name them, read
+    from its `meta.phases`), which **may differ from the process your `CLAUDE.md`/`AGENTS.md` prose
+    describes**. Also report whether the matched file is **git-tracked** (untracked → note it's a
+    reproducibility risk: a `git clean`/fresh clone would flip the repo to subagent mode).
+  - **Unmodified-scaffold tripwire:** if the matched file still contains `codex-claude:generic-scaffold`,
+    it is the **untouched generic starter** — it will **NOT** run any QA/review gates your `CLAUDE.md`
+    documents. Do **not** silently default to workflow-mode: **warn loudly** and make the Step 2A choice
+    fail-safe (recommend subagent mode or fixing the scaffold first). Carry this warning into the Step 2A
+    approval question.
 - **A workflow file EXISTS but none actually reads `args.noLand`** (no match, or only a comment-only
   mention; or the task is free-text on such a repo) → this
   repo has a real Workflow that **isn't composition-ready**; composition would be higher-fidelity than
@@ -57,9 +69,13 @@ This composes: Codex architect plan → Claude's own implementation plan → the
 against the architect plan. It runs the repo's genuine lifecycle instead of a subagent approximation,
 but it executes the full pipeline and — unless `--dry-run` — pushes and opens a PR. **Get approval first:**
 
-- Use **AskUserQuestion**: "Detected a composable repo workflow (`<matched path>`). Run the
-  composition — Codex architect plan → Claude implementation plan → that workflow (land suppressed) → architect review → push + PR?"
-  Options: **Run composition** · **Use subagent mode instead** · **Cancel**.
+- Use **AskUserQuestion**: "Detected a composable repo workflow (`<matched path>`, phases: `<X→Y→Z>`,
+  `<tracked|UNTRACKED>`). Run the composition — Codex architect plan → Claude implementation plan → that
+  workflow (land suppressed) → architect review → push + PR?" Options: **Run composition** · **Use
+  subagent mode instead** · **Cancel**. **If the matched file is an unmodified `codex-claude:generic-scaffold`**,
+  prepend a warning to the question ("⚠ this is the untouched generic scaffold — it will NOT run the
+  QA/review gates your CLAUDE.md documents") and make **Use subagent mode instead** the recommended,
+  fail-safe default.
 - On **Run composition**, invoke the **Workflow** tool (resolve `${CLAUDE_PLUGIN_ROOT}` to its real path):
   `Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/codex-wrap.js", args: { issue: <N>, repoWorkflowPath: "<absolute path to the matched .claude/workflows/*.js or *.mjs>", pluginRoot: "${CLAUDE_PLUGIN_ROOT}", base: "<--base value or empty>", dryRun: <true|false> } })`.
   It runs in the background; when it completes, relay its result: status, branch, PR URL, review

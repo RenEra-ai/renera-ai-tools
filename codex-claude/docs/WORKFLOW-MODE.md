@@ -133,3 +133,17 @@ The plugin must wrap a repo's lifecycle **whatever shape it has**. Two real repo
   background and reports on completion.
 - The architect plan is **inlined** into the review (no shared Codex thread across phases), so each
   architect touchpoint is a self-contained ephemeral session — no daemon-continuity fragility.
+- **Two reviews, two goals (by design — not redundant).** If the repo's own workflow contains a Codex
+  code-review of the implementation (reviewing the code and specific fixes in the developer loop, with
+  the developer's context) AND the wrapper adds its architect review (judging the implementation against
+  the **architect session's plan/intent**, with the architect's context), a change is reviewed twice —
+  intentionally. They have **different goals and different context**, so neither is suppressed. The only
+  "double" guarded against is re-installing the plugin's own seam/scaffold: `/codex-compose-setup` is
+  **idempotent** — it detects an already-composable workflow (or its own `codex-claude:generic-scaffold`
+  marker) and does **not** re-add the seam or re-scaffold.
+- **Composition fidelity is loud, never silent.** Workflow-mode runs the *workflow's* phases, which can
+  differ from a repo's `CLAUDE.md` prose. `/codex-issue` prints a faithfulness banner naming those phases
+  and reports whether the matched workflow is git-tracked; if the workflow still carries the
+  `codex-claude:generic-scaffold` marker (the untouched starter that runs **no** documented QA/review
+  gates), `/codex-issue` warns and makes subagent mode the fail-safe default, and `/codex-doctor` flags
+  it. `/codex-compose-setup` won't call a scaffold "ready" while a repo's documented gates are unencoded.

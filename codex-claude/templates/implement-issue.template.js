@@ -1,8 +1,15 @@
+// codex-claude:generic-scaffold — GENERIC STARTER, NOT YOUR REAL PROCESS.
+// This file does implement → discover-and-run-tests → commit/land. It does NOT run any QA/review gates
+// your CLAUDE.md / AGENTS.md document (e.g. a QA subagent, a code-review or codex-companion review loop).
+// While this marker line is present, /codex-issue and /codex-doctor treat this as an UNMODIFIED scaffold
+// and warn that workflow-mode will NOT run your documented gates.
+// TODO(codex-claude): replace/extend the Implement→Land steps below with this repo's real gates
+//   (add your code-review / QA / lint phases between Implement and Land), then DELETE this marker line.
+//
 // Starter "implement one GitHub issue" workflow, scaffolded by /codex-compose-setup.
 // Minimal and repo-agnostic: it DISCOVERS this repo's test/QA command (no runner is assumed) and is
 // already composition-ready — it honors the codex-claude `noLand` contract (returns `ready_to_land`
 // before landing) so /codex-issue can wrap it with a Codex architect plan + review.
-// Grow it freely: add your own code-review / QA / lint steps between Implement and Land.
 export const meta = {
   name: 'implement-issue',
   description: 'Implement one GitHub issue: developer brings the repo\'s own tests green, commit, then land (push + PR) — unless noLand. Fail-closed.',
@@ -20,7 +27,7 @@ if (ISSUE == null || !/^\d+$/.test(`${ISSUE}`.trim())) {
 const shellQuote = (s) => `'` + String(s).replace(/'/g, `'\\''`) + `'`
 
 const OPS = { type: 'object', additionalProperties: false, required: ['ok', 'detail'], properties: { ok: { type: 'boolean' }, detail: { type: 'string' } } }
-const PRE = { type: 'object', additionalProperties: false, required: ['ok', 'reason', 'issue_state', 'issue_title', 'base_sha', 'branch', 'pre_untracked'], properties: { ok: { type: 'boolean' }, reason: { type: 'string' }, issue_state: { type: 'string' }, issue_title: { type: 'string' }, base_sha: { type: 'string' }, branch: { type: 'string' }, pre_untracked: { type: 'array', items: { type: 'string' } } } }
+const PRE = { type: 'object', additionalProperties: false, required: ['ok', 'reason', 'detail', 'issue_state', 'issue_title', 'base_sha', 'branch', 'pre_untracked'], properties: { ok: { type: 'boolean' }, reason: { type: 'string' }, detail: { type: 'string' }, issue_state: { type: 'string' }, issue_title: { type: 'string' }, base_sha: { type: 'string' }, branch: { type: 'string' }, pre_untracked: { type: 'array', items: { type: 'string' } } } }
 const VERIFY = { type: 'object', additionalProperties: false, required: ['green', 'detail', 'changed_pre_test'], properties: { green: { type: 'boolean' }, detail: { type: 'string' }, changed_pre_test: { type: 'array', items: { type: 'string' } } } }
 
 const report = { issue: ISSUE, branch: null, base_sha: null, terminal: null }
@@ -28,15 +35,15 @@ const report = { issue: ISSUE, branch: null, base_sha: null, terminal: null }
 phase('Preflight')
 const pf = await agent(
   `PREFLIGHT for implementing GitHub issue #${ISSUE} in this git repo.${DRY_RUN ? ' DRY RUN: compute the branch name you WOULD use but do NOT create or switch branches.' : ''}
-1. Working tree must be clean of TRACKED changes (so pre-existing work isn't swept into the commit): if \`git status --porcelain --untracked-files=no\` is NON-empty, set ok=false, reason="dirty_tree" and stop.
+1. Working tree must be clean of TRACKED changes (so pre-existing work isn't swept into the commit): if \`git status --porcelain --untracked-files=no\` is NON-empty, set ok=false, reason="dirty_tree", detail = the offending tracked paths (comma-separated, e.g. "CLAUDE.md, src/foo.py") so the caller can act without spelunking, and stop.
 2. pre_untracked = the currently-UNTRACKED files (\`git ls-files --others --exclude-standard\`), one path per array entry ([] if none). These pre-existing files must NOT be swept into the issue commit.
 3. \`gh issue view ${ISSUE} --json state,title\` -> issue_state ("OPEN"/"CLOSED"), issue_title.
 4. base_sha = the CURRENT commit BEFORE creating any branch: \`git rev-parse HEAD\`.
 5. branch = "issue-${ISSUE}-<slug>" (issue title slugified to kebab-case, <=40 chars). ${DRY_RUN ? 'DRY RUN: do NOT create it.' : 'If issue_state=="OPEN" and the branch does not exist (\`git rev-parse --verify <branch>\` fails), create + checkout it: \`git switch -c <branch>\`. If it already exists, ok=false, reason="branch_exists".'}
-Set ok=true only if the tree is clean AND issue_state=="OPEN"${DRY_RUN ? '' : ' AND the branch is now active'}. reason on failure: dirty_tree | issue_not_open | branch_exists | error. Report every field.`,
+Set ok=true only if the tree is clean AND issue_state=="OPEN"${DRY_RUN ? '' : ' AND the branch is now active'}. reason on failure: dirty_tree | issue_not_open | branch_exists | error. detail = a short human-readable explanation of the failure (for dirty_tree, the offending tracked paths; for branch_exists, the branch name); empty string when ok. Report every field.`,
   { label: `preflight #${ISSUE}`, phase: 'Preflight', schema: PRE },
 )
-if (!pf || !pf.ok) { report.terminal = `preflight_${(pf && pf.reason) || 'failed'}`; log(`FAIL: ${report.terminal}`); return report }
+if (!pf || !pf.ok) { report.terminal = `preflight_${(pf && pf.reason) || 'failed'}`; report.detail = (pf && pf.detail) || ''; log(`FAIL: ${report.terminal}${report.detail ? ` (${report.detail})` : ''}`); return report }
 report.branch = pf.branch
 report.base_sha = pf.base_sha
 if (DRY_RUN) { report.terminal = 'dry_run_ok'; log(`DRY RUN ok: would use branch ${pf.branch} (base ${pf.base_sha}).`); return report }
