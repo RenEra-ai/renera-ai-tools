@@ -9,7 +9,8 @@
 // Starter "implement one GitHub issue" workflow, scaffolded by /codex-compose-setup.
 // Minimal and repo-agnostic: it DISCOVERS this repo's test/QA command (no runner is assumed) and is
 // already composition-ready — it honors the codex-claude `noLand` contract (returns `ready_to_land`
-// before landing) so /codex-issue can wrap it with a Codex architect plan + review.
+// before landing) so /codex-issue can use it as the development engine (run with noLand, bracketed by
+// the main-thread architect plan, review, fix, and land).
 export const meta = {
   name: 'implement-issue',
   description: 'Implement one GitHub issue: developer brings the repo\'s own tests green, commit, then land (push + PR) — unless noLand. Fail-closed.',

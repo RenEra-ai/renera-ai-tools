@@ -9,13 +9,15 @@ a grantable subagent tool, and subagents can't invoke slash commands. So a subag
 only *approximate* a Workflow-mode repo's pipeline by replaying its steps — losing the gates
 baked into the JS (loop caps, scope confinement, verdict classification).
 
-**Composition** solves this. The `/codex-issue` command runs in the **main thread**, where the Workflow
-tool *is* available, so it composes a wrapper workflow (`workflows/codex-wrap.js`) that brackets the
-repo's **own** workflow with a Codex architect plan + review:
+**Composition** solves this. The `/codex-issue` command runs the loop in the **main thread**, where the
+Workflow tool *is* available. For a composable workflow, the main thread uses the repo's Workflow as the
+**development engine** — running it with `noLand:true` so it executes its full pipeline (all gates
+intact) without landing — while the main thread owns the architect plan, Claude plan, review, fix, and
+land:
 
 ```
-Codex architect plan  →  Claude implementation plan  →  workflow(repo, { noLand: true, plan })  →  Codex architect review → fix → re-review  →  land (push + PR)
-                                                          └── the repo's REAL pipeline, all gates intact ──┘
+[main thread] architect plan → Claude plan → workflow(repo, { noLand:true, plan }) → review → fix → re-review → land
+                                              └── the repo's REAL pipeline, all gates intact ──┘
 ```
 
 Codex (the architect) sets the **intent**; Claude then authors its **own** file-by-file implementation
@@ -23,9 +25,6 @@ plan from it; the repo's developer implements **Claude's** plan; the architect r
 against the **architect** plan (so Codex stays the intent authority). Both plans are persisted under
 `.codex/plans/` (`issue-<N>.md` = architect, `issue-<N>.claude.md` = Claude) as durable, reviewable
 artifacts — untracked, so they never enter the issue commit/PR.
-
-`workflow()` runs another workflow inline as a one-level sub-step, so the repo's pipeline executes for
-real; the plugin only adds the architect bookends and the landing.
 
 ## The contract (what a repo's workflow must support)
 
@@ -57,33 +56,19 @@ hand:
 per-repo command. `noLand` is **not** an Anthropic-standard arg — the repo's workflow must read it,
 which is exactly what setup arranges.)
 
-## What the plugin's wrapper does (`workflows/codex-wrap.js`)
+## What `workflows/codex-wrap.js` does (noLand runner only)
 
-1. **Architect plan** — an ephemeral Codex Plan-mode session (`scripts/plan-round.mjs --out`) → plan
-   text, persisted to `.codex/plans/issue-<N>.md` (the driver writes the verbatim body; `planPath` is
-   surfaced in the result).
-1b. **Claude plan** — a Claude agent reads the issue + architect plan and writes its **own** file-by-file
-   implementation plan to `.codex/plans/issue-<N>.claude.md`. This Claude plan (not the architect plan)
-   is what gets passed as `args.plan` to the repo workflow, so the developer implements Claude's plan.
-   A weak/empty Claude pass falls back to the architect plan.
-2. **Repo workflow** — `workflow({ scriptPath: <repo wf> }, { issue, noLand: true, plan })` → the repo's
-   real pipeline, returning `ready_to_land` on `branch`.
-3. **Architect review** — an ephemeral Codex review (`scripts/review-round.mjs`) of the branch diff vs
-   the inlined plan, parsed for a last-line `VERDICT: NO ISSUES` / `VERDICT: ISSUES FOUND`. A clean
-   verdict with **zero substance** (no findings, no `reviewedFiles`) is not rubber-stamped — the
-   wrapper nudges once for the list of reviewed files and re-reviews before accepting clean. On issues,
-   a single merged fix agent runs the repo's **own review/QA discipline on the fix delta**, not just
-   its tests: it discovers the repo's process (CLAUDE.md/AGENTS.md/.claude docs/commands/agents),
-   applies the fix, **re-runs the repo's own review/QA gate(s)** — the fix agent is itself a subagent
-   and **cannot nest Task**, so a gate that is a command/script is run **natively** via Bash and a gate
-   that is a repo-defined **subagent** is **replayed inline** from its `.md` (the only option on fix
-   rounds, not a fallback) — then runs the repo's discovered test/QA command — and commits **only if
-   all of that is green**. A required gate that **cannot run** (e.g. a credential-gated
-   live QA stage that needs an account the run doesn't have) is **fail-closed**: the round returns
-   `not_clean` (its `detail` is expected to begin `BLOCKED:`) and the change is **not** landed — a live
-   gate is never inline-faked from a diff. Re-reviewed up to `maxRounds` (default 6).
-4. **Land** — squash to the repo's one-commit convention, `git push`, `gh pr create` (`Closes #N`).
-   Never closes the issue directly; flags non-default bases for manual close. `--dry-run` stops here.
+`codex-wrap.js` is a thin **noLand runner**: it runs the repo's workflow with `{ noLand: true, plan }`
+and classifies the result as `ready_to_land`, `danger_landed`, or `failed`. It does **not** do
+architect planning, Claude planning, review, fix, or landing — those are all main-thread steps.
+
+- **Repo workflow** — `workflow({ scriptPath: <repo wf> }, { issue, noLand: true, plan })` → the repo's
+  real pipeline, returning `ready_to_land` on `branch`.
+- **Result classification** — `terminal === "ready_to_land"` with `branch` + `base_sha` → returns
+  `ready`. Otherwise (any other terminal, or a missing field) it does a **live check** — an agent runs
+  `gh pr list --search "<issue> in:body"` and `gh issue view <issue>` — and returns `danger_landed`
+  **only if the repo actually landed** (a PR for the issue now exists or the issue is CLOSED, i.e. it
+  landed despite `noLand` and bypassed the architect review); if it did not land, it returns `failed`.
 
 ## Reference implementation
 
@@ -97,11 +82,11 @@ The plugin must wrap a repo's lifecycle **whatever shape it has**. Two real repo
 
 - **Deterministic Workflow → workflow mode.** `Boomi/test` (mathkit) defines `.claude/workflows/implement-issue.js`:
   a `developer ⇄ code-reviewer` loop (cap 3) then its own internal Codex loop (cap 3), already
-  `noLand`+`plan`-aware. `/codex-issue` detects `noLand`, runs it as a real sub-workflow (gates intact),
-  and the architect's fix rounds re-apply **that repo's `code-reviewer` gate discipline** on the delta
-  (its first native pass runs the real reviewer; on fix rounds the wrapper's fix agent — a subagent that
-  can't dispatch the reviewer subagent — **replays** that reviewer's criteria inline, as faithfully as a
-  single agent can).
+  `noLand`+`plan`-aware. `/codex-issue` detects `noLand`, runs it as the dev engine via `codex-wrap.js`
+  (gates intact), and the main-thread architect fix rounds re-apply **that repo's `code-reviewer` gate
+  discipline** on the delta (its first native pass runs the real reviewer; on fix rounds the main-thread
+  fix agent — a subagent that can't dispatch the reviewer subagent — **replays** that reviewer's
+  criteria inline, as faithfully as a single agent can).
 - **Prose policy with a live gate → subagent mode.** `Boomi/boomi-mcp-server` has no workflow — a
   prose-only `CLAUDE.md` two-stage gate (live `boomi-qa-tester` QA via real tool calls → Codex review,
   "skipping either stage is never acceptable"). `/codex-issue` falls back to subagent mode; the
@@ -111,32 +96,33 @@ The plugin must wrap a repo's lifecycle **whatever shape it has**. Two real repo
 
 ## Notes / limits
 
-- The wrapper's architect **fix loop** is repo-agnostic and **gate-faithful**: it discovers the repo's
+- The main-thread **fix loop** is repo-agnostic and **gate-faithful**: it discovers the repo's
   own dev conventions, applies the fix, and re-runs the repo's **own review/QA gate(s)** plus its tests
   before committing — not just the tests. The fix agent is itself a subagent and **cannot dispatch
   another subagent** (no nested Task), so it runs each gate the honest way: a review/QA **command or
   script** is run natively; a gate that is a repo-defined **subagent** is **replayed inline** from that
   agent's `.md`; a gate that must **execute live** (credentials/network) and can't be run is **BLOCKED**.
 - **Fail-closed.** A required review/QA gate that cannot run (missing credentials/env, no network) is
-  treated as BLOCKED — the change is never landed with a skipped gate. The wrapper also stages only the
-  fix delta (never `git add -A`), so a pre-existing untracked file is not swept into the PR.
-- **Landing is plugin-owned (by design).** Under `noLand` the repo's own `land()` is suppressed and the
-  wrapper does the squash + `git push` + `gh pr create` itself. A repo's **bespoke land side-effects**
-  (deploy, tag/release, changelog, issue-close-with-stats) are therefore **not** replayed — only push +
-  PR with `Closes #N`. If a repo needs those, run its real land step manually after the PR merges.
+  treated as BLOCKED — the change is never landed with a skipped gate. The main thread also stages only
+  the fix delta (never `git add -A`), so a pre-existing untracked file is not swept into the PR.
+- **Landing is main-thread-owned (by design).** Under `noLand` the repo's own `land()` is suppressed
+  and the main thread does the squash + `git push` + `gh pr create` itself. A repo's **bespoke land
+  side-effects** (deploy, tag/release, changelog, issue-close-with-stats) are therefore **not** replayed
+  — only push + PR with `Closes #N`. If a repo needs those, run its real land step manually after the
+  PR merges.
 - **Preflight with `/codex-doctor`** to see which mode a repo will use and whether the `noLand` seam is
   intact, before a real run.
 - The only hard requirement for composition is that the repo's Workflow implements the **`noLand`
   contract** (`noLand` is NOT an Anthropic-standard arg — the repo's script must read `args.noLand`).
   If it doesn't, `/codex-issue` detects nothing and falls back to subagent mode, which needs no contract.
-- Approval is requested **before** launch (workflows can't prompt mid-run). The wrapper runs in the
-  background and reports on completion.
+- Approval is requested **before** launch (workflows can't prompt mid-run). The main-thread loop runs
+  in the background and reports on completion.
 - The architect plan is **inlined** into the review (no shared Codex thread across phases), so each
   architect touchpoint is a self-contained ephemeral session — no daemon-continuity fragility.
 - **Two reviews, two goals (by design — not redundant).** If the repo's own workflow contains a Codex
   code-review of the implementation (reviewing the code and specific fixes in the developer loop, with
-  the developer's context) AND the wrapper adds its architect review (judging the implementation against
-  the **architect session's plan/intent**, with the architect's context), a change is reviewed twice —
+  the developer's context) AND the main-thread architect review judges the implementation against the
+  **architect session's plan/intent** (with the architect's context), a change is reviewed twice —
   intentionally. They have **different goals and different context**, so neither is suppressed. The only
   "double" guarded against is re-installing the plugin's own seam/scaffold: `/codex-compose-setup` is
   **idempotent** — it detects an already-composable workflow (or its own `codex-claude:generic-scaffold`

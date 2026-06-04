@@ -4,8 +4,9 @@ description: >-
   Make THIS repo composition-ready for /codex-issue (workflow-mode). If the repo has a Claude Code
   Workflow, it adds the `noLand` seam to it in place (returns ready_to_land before landing) — shown as
   a diff for your approval. If the repo has no workflow, it scaffolds a minimal, composition-ready
-  starter workflow. Composition is the higher-fidelity path; /codex-issue already works without setup
-  via subagent mode.
+  starter workflow. Composition makes the repo's Workflow the development ENGINE for /codex-issue (run
+  with noLand, bracketed by main-thread architect plan + review); /codex-issue already works without
+  setup via subagent mode.
 argument-hint: ""
 allowed-tools:
   - Read
@@ -17,9 +18,11 @@ allowed-tools:
   - AskUserQuestion
 ---
 
-Make this repo **composition-ready** so `/codex-issue` can wrap its real dev workflow with a Codex
-architect plan + review (workflow-mode). The only thing needed is the **`noLand` contract**: the repo's
-workflow must run its full pipeline but return `{ terminal: "ready_to_land", branch, base_sha, ready: true }`
+Make this repo **composition-ready** so `/codex-issue` can use its real dev workflow as the
+**development engine** (workflow-mode). Composition means the repo's Workflow runs with `noLand:true`
+as the dev engine — all its gates intact — bracketed by main-thread architect plan, Claude plan,
+review, fix, and land steps. The only thing the repo's workflow needs is the **`noLand` contract**:
+it must run its full pipeline but return `{ terminal: "ready_to_land", branch, base_sha, ready: true }`
 before it lands (squash/push/PR/close), when called with `args.noLand: true`.
 
 ## Step 1 — detect
