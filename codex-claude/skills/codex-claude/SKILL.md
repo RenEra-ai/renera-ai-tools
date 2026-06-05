@@ -168,10 +168,11 @@ Codex is driven by thin, `Task`-free helper subagents (they isolate the verbose 
 - **codex-reviewer** (agent) — drives an *ephemeral* Codex review of impl-vs-**design-plan** and
   returns a structured last-line `VERDICT:`.
 
-The main thread does the rest itself: it **develops** (running the repo's own workflow, dispatching its
-QA/review subagents via `Task`), then **addresses** each review round's findings via the
+The main thread does the rest itself: it **develops** (running the repo's own workflow — its real
+QA/review gates, dispatched subagents **and** command gates it names like its own `codex-companion`
+Codex review, which the §6 plan review never substitutes for), then **addresses** each review round's findings via the
 **receiving-code-review** skill (verify, fix genuine issues, push back on false positives — never blind
-compliance), re-running the repo's gates, until the verdict is `VERDICT: NO ISSUES` or the max rounds
+compliance), re-running the repo's gates (its own Codex review gate included) on each fix delta, until the verdict is `VERDICT: NO ISSUES` or the max rounds
 (default 6) is hit. All Codex sessions are **ephemeral**; the saved design-plan **file** is inlined
 **verbatim** into each review (the driver appends it byte-for-byte via `--plan-file`, so the gate always
 judges against the exact approved plan — never a paraphrase), so there is **no persistent daemon** to

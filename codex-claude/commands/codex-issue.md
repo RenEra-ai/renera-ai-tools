@@ -106,7 +106,12 @@ its returned markdown. **You (main thread) persist** `$IMPL` with Write to
 workflow — read `CLAUDE.md`, `AGENTS.md`, `.claude/` process docs / commands / agents — then RUN it
 as-is, however many internal steps it has, **dispatching its real QA / code-reviewer / tester
 subagents via `Task`** (you can — you are the main thread). Run its **review/QA gates**, not just its
-tests. Commit on the branch as the repo's workflow dictates, but **stop before any landing step**
+tests — and a gate counts **whether it's a dispatched subagent OR a command the repo names** (e.g. a
+`CLAUDE.md` step that runs an independent Codex review via `codex-companion … review`): run that one
+too, with the **exact tool the repo specifies**. **The repo's own Codex/AI review gate MUST run here**;
+the §6 architect-vs-plan review is **additive and does NOT "stand in for" it** — different goals (the
+repo's gate judges the code, §6 judges impl-vs-plan), so never drop the repo's own review just because
+§6 also calls Codex. Commit on the branch as the repo's workflow dictates, but **stop before any landing step**
 (no push / PR / close — you own integration in §8). A **required** gate that cannot run (missing
 credentials/live QA/network) is a **fail-closed block** → stop and report; never land a change whose
 required gate was skipped.
@@ -123,6 +128,11 @@ repo landed despite `noLand` — the review was bypassed; manual inspection need
 with its `detail`.
 
 ## 6. Architect review (Codex, against the design plan)
+
+This review is **additive** — it does **not** replace or "stand in for" any Codex/AI review gate the
+repo's own workflow already ran in §5 (two reviews, two goals — by design, not redundant: the repo's
+gate judges the code on its own merits; this one judges the implementation against the **architect's
+design plan**). If the repo defines its own Codex review, **both** run — never collapse them into one.
 
 Compute the changed files: `git diff --name-only <START | base_sha>..HEAD` (use `base_sha` in
 Workflow-engine mode, `$START` in main-thread mode). Dispatch the **codex-reviewer** subagent (Task)
@@ -142,7 +152,10 @@ FOUND` / `VERDICT: UNCLEAR` with findings → §7.
 Invoke the **receiving-code-review** skill on the reviewer's findings: verify each against the code,
 fix only genuinely-wrong things, and **push back (in your report) on false positives** with technical
 reasoning — do not implement blindly. Then **re-run this repo's own review/QA gates on the fix**:
-- main-thread mode → dispatch the repo's gate subagents (Task) / run its gate commands, as in §5;
+- main-thread mode → dispatch the repo's gate subagents (Task) / run its gate commands as in §5,
+  **including re-running the repo's own Codex/AI review gate on the fix delta with the exact tool the
+  repo names — §6 never substitutes for it on any round** (many repos require their own Codex gate on
+  every fix round, scoped to the delta);
 - Workflow-engine mode → re-run the repo's **discoverable** gate commands on the fix delta (you have
   `Task` + `Bash`), since a full re-run of the deterministic Workflow per fix is unnecessary. **State
   in the final report which path each gate took** (native command / dispatched repo subagent) — fixes
