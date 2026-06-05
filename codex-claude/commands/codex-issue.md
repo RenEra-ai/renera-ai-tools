@@ -111,7 +111,12 @@ tests — and a gate counts **whether it's a dispatched subagent OR a command th
 too, with the **exact tool the repo specifies**. **The repo's own Codex/AI review gate MUST run here**;
 the §6 architect-vs-plan review is **additive and does NOT "stand in for" it** — different goals (the
 repo's gate judges the code, §6 judges impl-vs-plan), so never drop the repo's own review just because
-§6 also calls Codex. Commit on the branch as the repo's workflow dictates, but **stop before any landing step**
+§6 also calls Codex. **One exception to batching:** whatever this repo's gates are (a Codex/AI review, a
+custom review subagent, or just tests), do **not** dispatch **any** of them in the same (parallel)
+message as the §6 architect review — that pairing is deliberately sequential (§6 must judge a delta the
+repo's gates have *already* cleared), even though the two look independent; see **§6 *Sequencing*** for
+the hard barrier. (Running the repo's *own* gates in parallel with **each other** is still fine — only
+the §6 review is fenced off.) Commit on the branch as the repo's workflow dictates, but **stop before any landing step**
 (no push / PR / close — you own integration in §8). A **required** gate that cannot run (missing
 credentials/live QA/network) is a **fail-closed block** → stop and report; never land a change whose
 required gate was skipped.
@@ -133,6 +138,23 @@ This review is **additive** — it does **not** replace or "stand in for" any Co
 repo's own workflow already ran in §5 (two reviews, two goals — by design, not redundant: the repo's
 gate judges the code on its own merits; this one judges the implementation against the **architect's
 design plan**). If the repo defines its own Codex review, **both** run — never collapse them into one.
+
+**Sequencing — one Codex review at a time (hard barrier).** Start this review **only after** the
+repo's own gate(s) for this round have **finished and come back clean, and you have read that result** —
+not merely been dispatched or queued. This holds in **every** mode and for **any** gate the repo
+defines: **main-thread mode** → the repo's review/QA subagents/commands from §5 (or the §7 re-run)
+returned clean; **Workflow-engine mode** → the §5 Workflow returned **`status: ready`** (or the §7
+discoverable-gate re-run came back clean). §6 must judge a delta that has *already passed* the repo's
+gates this round. **Never dispatch any of the repo's own gates for this round — tests, a custom
+review/QA subagent, or a Codex/AI review command — in the same (parallel) message as this architect
+review.** Keep **at most one Codex review turn in flight**, too — but the same-message ban holds **even
+when the repo's gate is not a Codex turn** (e.g. a custom `code-reviewer` or plain `pytest`): the
+single-Codex-session reason is *sufficient, not necessary* — §6 must always judge a delta the repo's
+gatekeeper has **already** returned CLEAN, whatever tool that gatekeeper is. The harness's "make all the
+independent calls in the same block" guidance does **not** apply to these staged gates — they look independent but
+are deliberately sequential, and the single global Codex session (one in-flight turn; see the
+**codex-claude** skill) makes concurrent Codex turns unsafe by design. It didn't collide before only
+because the two tools happened to use separate backends — an implementation detail, not a guarantee.
 
 Compute the changed files: `git diff --name-only <START | base_sha>..HEAD` (use `base_sha` in
 Workflow-engine mode, `$START` in main-thread mode). Dispatch the **codex-impl-reviewer** subagent (Task)
@@ -161,9 +183,15 @@ reasoning — do not implement blindly. Then **re-run this repo's own review/QA 
   in the final report which path each gate took** (native command / dispatched repo subagent) — fixes
   trade the Workflow's determinism for gate independence; that's intended for a small fix delta.
 
-Commit the fix delta (no landing). Increment the round counter; return to §6 **scoped to the fix
-delta** (tell the reviewer to review only the newly changed files). Stop when clean, or at the max
-(default 6) → do **not** push; report the outstanding findings and current state.
+Commit the fix delta (no landing). **Hard barrier — the repo's gate must finish CLEAN before §6:** run
+the repo's own gate(s) above to **completion** and confirm **CLEAN** *before* you return to §6. Do
+**not** dispatch the §6 architect review concurrently with — or before — **any** of the repo's own
+gates for this round (tests, a custom review/QA subagent, or a Codex/AI review command); keep **one
+Codex review turn in flight at a time** (per §6). This is the exact spot where "batch the
+independent calls" tempts a parallel dispatch — resist it: these gates only *look* independent. Then
+increment the round counter and return to §6 **scoped to the fix delta** (tell the reviewer to review
+only the newly changed files). Stop when clean, or at the max (default 6) → do **not** push; report the
+outstanding findings and current state.
 
 ## 8. Finish — integrate (skip entirely if `--dry-run`)
 
