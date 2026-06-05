@@ -69,9 +69,10 @@ re-author it.
    them on disk.)
 
 4. **Run the review** from the repo root so Codex sees the project as its cwd. Use EXACTLY this driver
-   and nothing else — do NOT substitute `codex review`, `codex exec`, or `codex-companion`: only
-   `review-round.mjs` has a bounded client-side timeout (it interrupts a wedged turn), so only it
-   cannot hang and wedge the pipeline. **With a plan**, pass `--plan-file <PLAN_PATH>` so the driver
+   and nothing else — do NOT substitute `codex review`, `codex exec`, or `codex-companion` **as YOUR
+   review driver**: only `review-round.mjs` has a bounded client-side timeout (it interrupts a wedged
+   turn), so only it cannot hang and wedge the pipeline. (This bans those tools for *this* review only;
+   the repo's own `/codex-issue` §5 gate may legitimately use `codex-companion` if its workflow names it.) **With a plan**, pass `--plan-file <PLAN_PATH>` so the driver
    inlines the saved plan **verbatim** (you never paste it yourself); **without a plan**, omit it:
    ```bash
    node ${CLAUDE_PLUGIN_ROOT}/scripts/review-round.mjs --prompt-file <that temp file> [--plan-file <PLAN_PATH>]
