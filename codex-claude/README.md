@@ -28,12 +28,12 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs doctor
 |---|---|
 | **skill** `codex-claude` | The brain: daemon lifecycle, the full verb contract, the architect→implement→review loop, and human-supervised question/approval handling. Auto-activates when you ask Claude to use Codex as an architect/reviewer. |
 | **command** `/codex-architect <task>` | Runs a Plan-mode architect turn **in the main thread**, surfacing Codex's clarifying questions to you. You implement the resulting plan. |
-| **command** `/codex-review [scope]` | Dispatches the `codex-reviewer` subagent for an independent review of your changes (defaults to the current diff). |
+| **command** `/codex-review [scope]` | Dispatches the `codex-impl-reviewer` subagent for an independent review of your changes (defaults to the current diff). |
 | **command** `/codex-issue <#\|task>` | **Fully autonomous** end-to-end loop: architect → approve → implement (via the repo's own workflow) → review-until-clean → push + PR (issue closes on merge). Add `--dry-run` to stop before integration. |
 | **command** `/codex-doctor` | Read-only preflight: which mode (`/codex-issue` will use composition vs subagent) and why, `noLand` seam integrity, resolved PR base + auto-close, and Codex daemon health. |
-| **agent** `codex-reviewer` | Autonomous, isolated read-only review on its own **ephemeral** Codex session; returns a clean findings report. |
+| **agent** `codex-impl-reviewer` | Autonomous, isolated read-only review on its own **ephemeral** Codex session; returns a clean findings report. |
 | **runtime** `bin/` + `lib/` | The `codex-drive` CLI + session daemon (JSON-RPC client, turn state machine, question/approval parking). |
-| `scripts/review-round.mjs` | One-shot ephemeral-daemon review used by the `codex-reviewer` agent. |
+| `scripts/review-round.mjs` | One-shot ephemeral-daemon review used by the `codex-impl-reviewer` agent. |
 | **workflow** `workflows/codex-wrap.js` | **Workflow-mode** composition: brackets a repo's own no-land Workflow with a Codex architect plan + review, then lands. Invoked by `/codex-issue` when a composable `.claude/workflows/*.js` or `.mjs` file is detected. |
 | `scripts/plan-round.mjs` | Ephemeral Plan-mode Codex session used by the wrapper's architect-plan phase. |
 | **command** `/codex-compose-setup` | Makes a repo composition-ready: adds the `noLand` seam to its workflow (diff + approval) **in place**, or scaffolds a starter workflow if none exists. |
@@ -46,7 +46,7 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs doctor
 
 ## Full automation (`/codex-issue`)
 
-`/codex-issue` runs the loop in the main thread; Codex is driven by the thin `codex-architect`/`codex-reviewer` subagents (dispatched via Task).
+`/codex-issue` runs the loop in the main thread; Codex is driven by the thin `codex-architect`/`codex-impl-reviewer` subagents (dispatched via Task).
 
 `/codex-issue <issue-number | free-text task> [--dry-run] [--base <branch>]` runs the whole loop
 hands-off in the main thread:

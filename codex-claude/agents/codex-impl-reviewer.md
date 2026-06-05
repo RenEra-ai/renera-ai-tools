@@ -1,5 +1,5 @@
 ---
-name: codex-reviewer
+name: codex-impl-reviewer
 description: >-
   Use this agent to get an independent Codex (GPT-5.x) review of code changes — optionally against a
   plan — a second opinion from a different model on correctness bugs, missing edge cases, and contract

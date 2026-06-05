@@ -135,7 +135,7 @@ gate judges the code on its own merits; this one judges the implementation again
 design plan**). If the repo defines its own Codex review, **both** run — never collapse them into one.
 
 Compute the changed files: `git diff --name-only <START | base_sha>..HEAD` (use `base_sha` in
-Workflow-engine mode, `$START` in main-thread mode). Dispatch the **codex-reviewer** subagent (Task)
+Workflow-engine mode, `$START` in main-thread mode). Dispatch the **codex-impl-reviewer** subagent (Task)
 with the **plan file path `$PLAN_PATH`** (`.codex/plans/issue-<#>.md`) — **NOT** the plan prose — and
 the changed-file list; the reviewer hands `$PLAN_PATH` to its driver, which inlines the plan
 **verbatim**. You **MUST NOT** summarize, compress, drop sections from, reorder, or re-author the plan
@@ -201,5 +201,5 @@ delta** (tell the reviewer to review only the newly changed files). Stop when cl
   findings). Be honest about anything you could not get clean or any gate that could not run.
 
 In both modes the loop never auto-merges and never closes the issue itself. Do not drive `codex-drive`
-yourself for the plan/review turns — the `codex-architect` / `codex-reviewer` subagents do that, and
+yourself for the plan/review turns — the `codex-architect` / `codex-impl-reviewer` subagents do that, and
 isolate their verbose wait-loops from this conversation.
