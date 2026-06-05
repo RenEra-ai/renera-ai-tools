@@ -63,7 +63,7 @@ renera-ai-tools/
 │   │   └── plugin.json
 │   ├── skills/codex-claude/    # Daemon lifecycle + the codex-drive verb contract
 │   ├── commands/               # /codex-architect, /codex-review, /codex-issue
-│   ├── agents/                 # codex-reviewer, codex-orchestrator, codex-developer
+│   ├── agents/                 # codex-architect, codex-planner, codex-impl-reviewer
 │   ├── bin/ + lib/             # codex-drive CLI + session daemon (zero deps)
 │   ├── scripts/ + test/ + docs/
 │   └── README.md

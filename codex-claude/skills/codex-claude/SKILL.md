@@ -46,7 +46,7 @@ Zero install, zero dependencies (pure Node ≥20 stdlib). Every verb prints **on
 stdout. Daemon state is global (a single session) in `~/.codex-drive/state.json`.
 
 > **Two ways in.** For a one-shot autonomous review, prefer the `/codex-review` command or the
-> `codex-reviewer` subagent (they isolate the chatty wait-loop from this context). Use this skill
+> `codex-impl-reviewer` subagent (they isolate the chatty wait-loop from this context). Use this skill
 > directly for the **architect** flow and for any interactive loop where Codex's clarifying
 > questions must be surfaced to the user.
 
@@ -129,7 +129,7 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs read
 
 If the last line isn't `VERDICT: NO ISSUES` → fix the listed issues → `send` another review →
 `wait`/`read`. Repeat until clean. (For a hands-off review that keeps this loop out of your context,
-dispatch the `codex-reviewer` subagent instead — see below.)
+dispatch the `codex-impl-reviewer` subagent instead — see below.)
 
 ### 5. Stop
 
@@ -165,7 +165,7 @@ Codex is driven by thin, `Task`-free helper subagents (they isolate the verbose 
 - **codex-planner** (agent, dispatched `mode:"plan"`, **read-only**) — **Claude** authoring its own
   concrete **implementation plan** from the design plan (Codex is not involved in this step); returns
   the text, which the main thread persists to `.codex/plans/issue-<#>.claude.md`.
-- **codex-reviewer** (agent) — drives an *ephemeral* Codex review of impl-vs-**design-plan** and
+- **codex-impl-reviewer** (agent) — drives an *ephemeral* Codex review of impl-vs-**design-plan** and
   returns a structured last-line `VERDICT:`.
 
 The main thread does the rest itself: it **develops** (running the repo's own workflow — its real
@@ -244,7 +244,7 @@ default` explicitly leaves Plan mode (only needed if you ever want Codex to edit
 ## Notes
 
 - The daemon is a **single global session** (`~/.codex-drive/state.json`); one in-flight turn at a
-  time. Don't run two architect sessions concurrently from the main thread. The `codex-reviewer`
+  time. Don't run two architect sessions concurrently from the main thread. The `codex-impl-reviewer`
   subagent sidesteps this by running its own **ephemeral** daemon on a private socket.
 - This plugin complements the separate `codex` plugin (rescue/setup, one-shot `codex exec`). They
   can coexist; this one adds the native Plan-mode architect + interactive review loop.
