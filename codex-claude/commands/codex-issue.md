@@ -179,9 +179,26 @@ reasoning — do not implement blindly. Then **re-run this repo's own review/QA 
   repo names — §6 never substitutes for it on any round** (many repos require their own Codex gate on
   every fix round, scoped to the delta);
 - Workflow-engine mode → re-run the repo's **discoverable** gate commands on the fix delta (you have
-  `Task` + `Bash`), since a full re-run of the deterministic Workflow per fix is unnecessary. **State
-  in the final report which path each gate took** (native command / dispatched repo subagent) — fixes
-  trade the Workflow's determinism for gate independence; that's intended for a small fix delta.
+  `Task` + `Bash`), since a full re-run of the deterministic Workflow per fix is unnecessary.
+  **Discover the gate set from the matched workflow file §2 detected and §5 ran — the abs
+  `repoWorkflowPath` (`.claude/workflows/*.js` **or** `*.mjs`), NOT `codex-wrap.js`'s opaque single `Repo
+  workflow` phase:** open it and enumerate **every** review/QA/AI-review stage it executes — its
+  `developer⇄reviewer` loop, any **internal Codex/AI review** loop, its
+  tests — plus any `CLAUDE.md`/`AGENTS.md` gate the workflow defers to; those (not just shell `test`
+  commands) are the **required** set. Re-run **each** on the fix delta with its exact tool — a named
+  command natively, a repo subagent via `Task`, the repo's own Codex/AI review with the tool the repo
+  names (**§6 never substitutes for it on any round** — same rule as main-thread, lines above). Run each
+  gate **independently against the fix on the current branch** — its review/QA subagent via `Task`, its
+  Codex/AI review and its tests against the changed files — **not** by re-running the workflow's
+  *implement*/preflight steps: those reject the existing branch / dirty tree and re-implement the issue
+  from the **original** plan instead of validating the just-applied fix, so a full-pipeline re-run is
+  **not** a usable fallback here. **If a required gate is so entangled with the implement step that it
+  cannot be run independently on the current branch, do NOT skip it** — treat it as a **fail-closed
+  block**. A required gate you can neither enumerate from the workflow nor run on the fix delta
+  (entangled-with-implement, or missing credentials/live QA/network) is a **fail-closed block** → stop
+  and report; never advance to §6 with a §5 gate unrun. **State in the final report which path each gate
+  took** (native command / dispatched repo subagent / fail-closed block) — fixes trade the Workflow's
+  determinism for gate independence; that's intended for a small fix delta.
 
 Commit the fix delta (no landing). **Hard barrier — the repo's gate must finish CLEAN before §6:** run
 the repo's own gate(s) above to **completion** and confirm **CLEAN** *before* you return to §6. Do
