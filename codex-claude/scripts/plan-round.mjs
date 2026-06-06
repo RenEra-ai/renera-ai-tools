@@ -88,7 +88,7 @@ try {
   // so it stays read-only). This directly counters Codex giving up after it couldn't run pytest.
   if (res.status === 'completed' && flags.declinedExec && looksLikeNoPlan(res.message)) {
     process.stderr.write('[plan] denied a command + thin plan body — re-asking for a static-only plan\n');
-    await sendCommand(socketPath, { cmd: 'plan', effort, prompt: 'Approvals are unavailable in this read-only planning session — do NOT attempt to run pytest or any command. Output the COMPLETE file-by-file plan now as plain text, based only on reading the source files.' });
+    await sendCommand(socketPath, { cmd: 'plan', effort, prompt: 'Approvals are unavailable in this read-only planning session — do NOT attempt to run pytest or any shell command (read-only MCP queries are fine). Output the COMPLETE file-by-file plan now as plain text, based only on reading the source files and any read-only MCP lookups.' });
     let r2 = await driveWait();
     r2 = await drain(r2, flags);
     if (r2.message && r2.message.trim()) res = r2;
