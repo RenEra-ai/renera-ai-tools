@@ -108,7 +108,7 @@ try {
   // ONCE for a static-only review in the SAME session so a denied test-run doesn't yield UNCLEAR.
   if (res.status === 'completed' && flags.declinedExec && !hasVerdict(res.message)) {
     process.stderr.write('[driver] denied a command + no verdict — re-asking for a static-only review\n');
-    await sendCommand(socketPath, { cmd: 'send', prompt: 'Approvals are unavailable in this read-only review session — do NOT attempt to run pytest or any command. Complete the review now from static reading only and END with the verdict on its own final line: exactly "VERDICT: NO ISSUES" or "VERDICT: ISSUES FOUND".' });
+    await sendCommand(socketPath, { cmd: 'send', prompt: 'Approvals are unavailable in this read-only review session — do NOT attempt to run pytest or any shell command (read-only MCP queries are fine). Complete the review now from reading the changed files (and any read-only MCP lookups) and END with the verdict on its own final line: exactly "VERDICT: NO ISSUES" or "VERDICT: ISSUES FOUND".' });
     let r2 = await driveWait();
     r2 = await drain(r2, flags);
     if (r2.message && r2.message.trim()) res = r2;

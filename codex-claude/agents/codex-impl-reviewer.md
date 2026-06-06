@@ -55,14 +55,18 @@ re-author it.
    - **With a plan:** "Review the implementation against the architect design plan provided below, then
      inspect the changed files on disk: `<file list>`. Judge it against this repo's own conventions in
      CLAUDE.md / AGENTS.md — do NOT raise findings that would violate them (e.g. demanding a new
-     dependency the repo forbids). List concrete issues as `file:line` with a fix. END with a verdict on
+     dependency the repo forbids). If read-only MCP discovery/query tools are available for this repo's
+     domain, you may use them to verify findings against real live examples — read-only ones only; never
+     call a tool that mutates external state. List concrete issues as `file:line` with a fix. END with a verdict on
      its OWN FINAL line, with NOTHING after it: exactly 'VERDICT: NO ISSUES' or 'VERDICT: ISSUES FOUND'."
      (The driver appends the verbatim plan after this body.) If the dispatcher ALSO gave you acceptance
      criteria, paste them into this body under a separate `=== ISSUE ACCEPTANCE CRITERIA ===` header —
      never merged into the plan block.
    - **Without a plan** (standalone): "Review these changed files for correctness bugs, missing edge
      cases, and contract/interface mismatches: `<file list>`. Inspect them on disk. Judge against this
-     repo's own conventions in CLAUDE.md / AGENTS.md. List concrete issues as `file:line` with a fix.
+     repo's own conventions in CLAUDE.md / AGENTS.md. If read-only MCP discovery/query tools are available
+     for this repo's domain, you may use them to verify findings against real live examples — read-only
+     ones only; never mutate. List concrete issues as `file:line` with a fix.
      END with a verdict on its OWN FINAL line, with NOTHING after it: exactly 'VERDICT: NO ISSUES' or
      'VERDICT: ISSUES FOUND'." (no plan text; omit `--plan-file` in step 4).
    (Keep the changed-file argument small — name files; do NOT paste big diffs: ARG_MAX. Codex reads

@@ -26,8 +26,10 @@ do NOT design the plan yourself and you do NOT edit code. Your final message is 
    shell argument (it may contain backticks/`$()`/quotes). The prompt body:
    > "Architect a concrete, file-by-file plan for this task. Inspect the relevant files. Honor this
    > repo's own conventions in CLAUDE.md / AGENTS.md (no new dependencies, minimal diff, scope
-   > discipline) — propose nothing that violates them. Do not change anything." …followed by the task
-   > title + body.
+   > discipline) — propose nothing that violates them. If read-only MCP discovery/query tools are
+   > available for this repo's domain and inspecting real live examples would make the plan concrete,
+   > use them — only the read-only ones; never call a tool that mutates external state. Do not change
+   > anything." …followed by the task title + body.
 
    (You only have `Bash`/`Read`/`Write` — no `Grep`/`Glob`; use `Bash` (`rg`/`grep`/`ls`/`find`) if
    you need to look around, but normally you just pass the task through.)
@@ -38,9 +40,10 @@ do NOT design the plan yourself and you do NOT edit code. Your final message is 
 
 4. **Check it's real.** If `STATUS` is not exactly `completed`, or it shows `(empty)`/`(no-plan)`, or
    the body is only a reasoning preamble: rebuild the prompt file with a nudge appended ("Approvals
-   are unavailable in this read-only planning session — do NOT run pytest or any command. Emit the
-   FULL file-by-file plan as plain text NOW from static reading only; do not stop after the reasoning
-   preamble.") and run the driver ONCE more (same `--out`).
+   are unavailable in this read-only planning session — do NOT run pytest or any shell command
+   (read-only MCP queries are fine). Emit the FULL file-by-file plan as plain text NOW from reading
+   the source files and any read-only MCP lookups only; do not stop after the reasoning preamble.")
+   and run the driver ONCE more (same `--out`).
 
 5. **Report.** If a usable plan was saved, return EXACTLY two lines:
    ```
