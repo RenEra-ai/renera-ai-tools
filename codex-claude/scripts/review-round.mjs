@@ -14,7 +14,9 @@ import { buildReviewPrompt } from '../lib/review-prompt.mjs';
 // Prefer --prompt-file (avoids shell-quoting/injection from review/plan text with backticks, $(), quotes).
 const pf = process.argv.indexOf('--prompt-file');
 let prompt = pf >= 0 ? readFileSync(process.argv[pf + 1], 'utf8') : process.argv[2];
-if (!prompt) { console.error('usage: review-round.mjs ("<prompt>" | --prompt-file <path>) [--plan-file <path>]'); process.exit(1); }
+if (!prompt) { console.error('usage: review-round.mjs ("<prompt>" | --prompt-file <path>) [--plan-file <path>] [--effort <e>]'); process.exit(1); }
+const ei = process.argv.indexOf('--effort');
+const effort = ei >= 0 ? process.argv[ei + 1] : 'ultra';
 
 // --plan-file (optional, additive): the driver — not the model — inlines the architect plan VERBATIM, so
 // the review judges against the exact saved bytes (no paraphrase). '(none)' (and omitting the flag) is the
@@ -101,14 +103,14 @@ const hasVerdict = (m) => {
 let res = { status: 'failed', message: '' };
 const flags = { declinedExec: false };
 try {
-  await sendCommand(socketPath, { cmd: 'send', prompt });
+  await sendCommand(socketPath, { cmd: 'send', prompt, effort });
   res = await driveWait();
   res = await drain(res, flags);
   // Stall recovery: if we DENIED a command approval AND the review ended without a verdict, re-ask
   // ONCE for a static-only review in the SAME session so a denied test-run doesn't yield UNCLEAR.
   if (res.status === 'completed' && flags.declinedExec && !hasVerdict(res.message)) {
     process.stderr.write('[driver] denied a command + no verdict — re-asking for a static-only review\n');
-    await sendCommand(socketPath, { cmd: 'send', prompt: 'Approvals are unavailable in this read-only review session — do NOT attempt to run pytest or any shell command (read-only MCP queries are fine). Complete the review now from reading the changed files (and any read-only MCP lookups) and END with the verdict on its own final line: exactly "VERDICT: NO ISSUES" or "VERDICT: ISSUES FOUND".' });
+    await sendCommand(socketPath, { cmd: 'send', effort, prompt: 'Approvals are unavailable in this read-only review session — do NOT attempt to run pytest or any shell command (read-only MCP queries are fine). Complete the review now from reading the changed files (and any read-only MCP lookups) and END with the verdict on its own final line: exactly "VERDICT: NO ISSUES" or "VERDICT: ISSUES FOUND".' });
     let r2 = await driveWait();
     r2 = await drain(r2, flags);
     if (r2.message && r2.message.trim()) res = r2;

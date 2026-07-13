@@ -87,7 +87,7 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --cwd "$PWD"
 ### 2. Architect turn (Plan mode, read-only)
 
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs plan "Architect a fix for <problem>. Inspect <files>. Produce a concrete, file-by-file plan. Ask if anything is ambiguous." --effort xhigh
+node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs plan "Architect a fix for <problem>. Inspect <files>. Produce a concrete, file-by-file plan. Ask if anything is ambiguous." --effort ultra
 node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait
 ```
 
@@ -216,7 +216,8 @@ repo's workflow must read it), and **`/codex-doctor`** to preflight which mode a
 **Modes & effort.** `plan` = Plan mode (read-only architect). Plain `send` inherits the thread's
 current mode (a `send` after a `plan` reviews read-only — exactly what you want). `send --mode
 default` explicitly leaves Plan mode (only needed if you ever want Codex to edit). `--effort` ∈
-`{minimal, low, medium, high, xhigh, none}`; use `xhigh` for hard architecture problems.
+`{minimal, low, medium, high, xhigh, max, ultra, none}` (max/ultra are GPT-5.6 Sol values; ultra
+adds automatic task delegation); use `ultra` for hard architecture problems.
 
 ## Troubleshooting
 

@@ -13,7 +13,7 @@ test('core client method names are pinned', () => {
 
 test('mode and effort enums match the protocol', () => {
   assert.deepEqual(MODE, { PLAN: 'plan', DEFAULT: 'default' });
-  assert.deepEqual(EFFORTS, ['none', 'minimal', 'low', 'high', 'medium', 'xhigh'].sort());
+  assert.deepEqual(EFFORTS, ['none', 'minimal', 'low', 'high', 'medium', 'xhigh', 'max', 'ultra'].sort());
 });
 
 test('server-request method names are classified', () => {
