@@ -25,7 +25,10 @@ export const NOTIFY = {
 
 export const MODE = { PLAN: 'plan', DEFAULT: 'default' };
 
-export const EFFORTS = ['high', 'low', 'medium', 'minimal', 'none', 'xhigh']; // sorted; valid ReasoningEffort values
+// Sorted; known ReasoningEffort values. The v2 protocol schema types ReasoningEffort as an open
+// non-empty string ("advertised by the model") — this list is the superset of values the installed
+// models advertise (GPT-5.6 Sol adds max/ultra), kept as a client-side guard for early typo errors.
+export const EFFORTS = ['high', 'low', 'max', 'medium', 'minimal', 'none', 'ultra', 'xhigh'];
 
 export const SERVER_REQUEST = {
   QUESTION: ['item/tool/requestUserInput'],

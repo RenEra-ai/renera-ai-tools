@@ -35,7 +35,7 @@ do NOT design the plan yourself and you do NOT edit code. Your final message is 
    you need to look around, but normally you just pass the task through.)
 
 3. **Run the ephemeral Plan-mode driver FROM THE REPO ROOT** so `--out` lands in the repo:
-   `node ${CLAUDE_PLUGIN_ROOT}/scripts/plan-round.mjs --prompt-file <tmp> --out <the --out path> --effort xhigh`
+   `node ${CLAUDE_PLUGIN_ROOT}/scripts/plan-round.mjs --prompt-file <tmp> --out <the --out path> --effort ultra`
    It prints `STATUS: …`, `PLAN_FILE: …`, then `=== PLAN ===` and the body.
 
 4. **Check it's real.** If `STATUS` is not exactly `completed`, or it shows `(empty)`/`(no-plan)`, or

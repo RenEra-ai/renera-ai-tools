@@ -99,7 +99,7 @@ object on stdout.
 |---|---|
 | `doctor` | Report Codex version, auth presence, thread count. |
 | `start [--cwd <p>] [--model <m>] [--resume-latest \| --resume <uuid>]` | Boot the session daemon, open/resume a thread. |
-| `plan "<prompt>" [--effort xhigh] [--approval-policy untrusted]` | Plan-mode (read-only architect) turn. |
+| `plan "<prompt>" [--effort ultra] [--approval-policy untrusted]` | Plan-mode (read-only architect) turn. |
 | `send "<prompt>" [--effort <e>] [--mode default] [--approval-policy untrusted]` | Default/review turn. |
 | `wait [--timeout-ms <N>]` | Block until the turn completes or parks a question/approval. |
 | `answer --id <qid> (--option <n> \| --text "<s>")` | Answer a parked question (`--option` is 1-based). |
