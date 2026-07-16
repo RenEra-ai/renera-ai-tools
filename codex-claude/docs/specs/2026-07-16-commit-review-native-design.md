@@ -1,7 +1,8 @@
 # Native commit review in codex-claude (absorb the openai-codex review gate)
 
-**Date:** 2026-07-16 (rev 3, after two Codex architect review rounds — round 1:
-REWORK/11 findings; round 2: 6 closed, 5 partial, 3 new — all addressed below)
+**Date:** 2026-07-16 (rev 4, after three Codex architect review rounds — R1:
+REWORK/11; R2: 6 closed, 5 partial, 3 new; R3: R2-news closed, 6 partial, 5 new —
+all addressed below)
 **Status:** approved design, pre-implementation
 **Decision owner:** Gleb
 
@@ -131,11 +132,21 @@ Plus `buildNativeReviewTarget(target)` mapping the resolved scope to the wire sh
   companion's exact profile. The daemon RECORDS the profile it started with, and
   `cmd:'review'` REFUSES (`{error:'wrong_thread_profile'}`) on a session lacking
   it. No silent review on a resumed or general-purpose thread.
-- **One coherent cwd (round-2 P1):** the daemon normalizes a single absolute `cwd`
-  (constructor option) and uses it for ALL THREE: git-scope subprocess calls, the
-  app-server child spawn (today the child just inherits process cwd —
-  appserver.mjs:17), and `thread/start`/`thread/resume` params. Tested with caller
-  cwd deliberately different from review cwd.
+- **One coherent cwd (round-2 P1, scoped in round 3):** the daemon normalizes a
+  single absolute `cwd` (constructor option) and uses it for ALL THREE: git-scope
+  subprocess calls, the app-server child spawn (today the child just inherits
+  process cwd — appserver.mjs:17), and `thread/start` params. `thread/resume`
+  params stay `{threadId}`-only, exactly as today — resumed threads keep their
+  original identity, and no review can run on one anyway (the profile rule makes
+  review sessions start-only), so no resume-cwd matching machinery is needed.
+  Tested with caller cwd deliberately different from review cwd.
+- **Profile survives the detached handoff (round-3 new 1):** the parent CLI
+  re-spawns the real daemon as `__daemon` with a serialized payload that today
+  carries only `{socketPath, resume, model}` (codex-drive.mjs:101). The payload
+  gains the validated profile object `{cwd, sandbox, approvalPolicy, ephemeral}`,
+  passed into the `Daemon` constructor by the `__daemon` branch — otherwise the
+  detached fallback daemon would record no profile and every `review` would be
+  refused `wrong_thread_profile`. The detached CLI path is tested end-to-end.
 - daemon: `case 'review'` → `_startReview({base, scope})`, mirroring `_startTurn`'s
   established lifecycle EXACTLY (daemon.mjs:94-120):
   - busy guard first (`running`/`awaiting_input` → `{error:'busy'}`);
@@ -156,6 +167,15 @@ Plus `buildNativeReviewTarget(target)` mapping the resolved scope to the wire sh
     is logged and dropped, never mutates current state. A response whose
     `reviewThreadId` differs from `this.threadId` → the failure path (the
     schema-confirmed invariant above, kept as runtime defense).
+  - **completion barrier (round-3, R1-2):** the token alone cannot order
+    validation before completion — a coalesced stdout chunk processes
+    `turn/completed` synchronously while the `review/start` response callback is
+    a later microtask, so `wait` could otherwise resolve `completed` on a review
+    the daemon never validated. A review turn therefore does NOT finalize (and
+    `wait` does not resolve `completed`) until BOTH `turn/completed` has arrived
+    AND the `review/start` response has been received and validated. If
+    `turn/completed` arrives first, finalization defers until the response lands
+    (bounded by the same wait cap; expiry → `failed`).
 - notification capture: on `item/completed` with `item.type === 'exitedReviewMode'`,
   store `item.review` into `turn.reviewText` (NOT `turn.message` — the
   `turn/completed` handler unconditionally rebuilds `turn.message` from the
@@ -171,10 +191,15 @@ Plus `buildNativeReviewTarget(target)` mapping the resolved scope to the wire sh
     (when present) matches the session thread — today adoption is unconditional
     (daemon.mjs:223);
   - server requests: `_onServerRequest` parks unconditionally today
-    (daemon.mjs:269-274). A request carrying a foreign `threadId` is answered
-    immediately with its decline/deny shape (never parked, never surfaced to the
-    driver); undeclinable foreign shapes are logged and left unanswered rather
-    than corrupting the parked state.
+    (daemon.mjs:269-274). Filtering applies BOTH axes (round-3, R1-4): a request
+    carrying a foreign `threadId` OR a stale `turnId` is never parked. Every such
+    request still gets a response — leaving a JSON-RPC request unanswered
+    violates the request/response contract and can wedge the originating turn
+    (round-3 new 3): supported approval shapes are answered with their deny
+    shape; everything else is answered with a deterministic JSON-RPC error via a
+    new `AppServer.respondError` passthrough (`JsonRpc.respondError` already
+    exists — jsonrpc.mjs:32 — AppServer just doesn't expose it today,
+    appserver.mjs:45).
 
 ### New: `scripts/commit-review-round.mjs` (~140 lines)
 
@@ -212,12 +237,16 @@ shell gate and must be exit-code-honest):
    `failed`, `interrupted`, unexpected terminal status, or blank review text on a
    completed turn (fail-closed, never presentable as a clean review).
 6. `finally`: daemon stop + temp-dir removal, covering every exit path above.
-7. **Offline testability (round-2 partial 9):** the script constructs its Daemon
-   with app-server options overridable via the `CODEX_DRIVE_APPSERVER` env var
-   (command + args to spawn instead of `codex app-server`) — the same injection
-   seam the Daemon constructor already exposes to unit tests. This makes the
-   completed-review happy path and every scripted mock failure mode testable
-   offline; the env var is test-only and undocumented in user-facing help.
+7. **Offline testability (round-2 partial 9; grammar + guard from round-3 new
+   5):** the script constructs its Daemon with app-server options overridable via
+   `CODEX_DRIVE_TEST_APPSERVER` — value is a JSON string array
+   `["command", ...args]` (never whitespace-split, never shell-parsed; parse
+   failure = hard error). It is honored ONLY when `CODEX_DRIVE_TEST_MODE=1` is
+   also set; outside test mode the variable is rejected loudly (guards against
+   an ambient env collision silently substituting the review backend). Same
+   injection seam the Daemon constructor already exposes to unit tests
+   (appserver.mjs takes separate command + args). Test-only, undocumented in
+   user-facing help.
 
 ### Long-review fallback (no detached worker)
 
@@ -236,8 +265,13 @@ now explicit:
   bypassing the single mutable `~/.codex-drive/state.json` (state.mjs:6). The
   recipe captures the socket from `start`'s JSON output and passes it to every
   subsequent call — a concurrent `start` by another process can no longer
-  redirect this session's `wait`/`read`/`stop`. Refuse to proceed if a live
-  foreign session must be disturbed — never force-stop it:
+  redirect this session's `wait`/`read`/`stop`. Because `--socket` bypasses
+  `state.json`, it also bypasses `state.cwd`, which is what a relative
+  `read --out` resolves against today (codex-drive.mjs:61) — so (round-3 new 2)
+  the daemon's `status` and `read` responses now include the daemon's `cwd`, and
+  the CLI resolves a relative `--out` against the SOCKET-selected daemon's
+  reported cwd, never against absent/foreign global state. Refuse to proceed if
+  a live foreign session must be disturbed — never force-stop it:
 
 ```
 S=$(node <cache>/bin/codex-drive.mjs start --cwd <repo> \
@@ -319,8 +353,10 @@ This replaces the companion's `--background` detached worker and its `status` /
 
 ## Decommission (after the gate is proven live)
 
-1. Verify deployment prerequisites: `~/.codex/config.toml` effort=max; plugin
-   update pulled; cache dir for the new version present.
+1. Verify deployment prerequisites: effort=max in the EFFECTIVE CODEX_HOME config
+   for the environment the gate runs in (`$CODEX_HOME/config.toml` if set, else
+   `~/.codex/config.toml` — same rule as the policy section); plugin update
+   pulled; cache dir for the new version present.
 2. Repoint boomi-mcp-server CLAUDE.md (above) and verify one real Stage-2 pass.
 3. Uninstall the openai-codex plugin (removes /codex:rescue, task, transfer,
    adversarial-review — all confirmed unused).
@@ -342,7 +378,7 @@ This replaces the companion's `--background` detached worker and its `status` /
 | Daemon boot/socket failure | Inside try/finally: stderr surfaced, exit 1, temp dir cleaned |
 | `review` on a session without the review thread profile | `{error:'wrong_thread_profile'}`, turn state untouched |
 | Invalid `start` flags (bad sandbox literal, valueless `--sandbox`, `--ephemeral`+resume, profile flags on resume) | Error at start; no daemon left running |
-| Server request with foreign `threadId` | Declined immediately (or logged unanswered if undeclinable); never parked |
+| Server request with foreign `threadId` or stale `turnId` | Never parked; deny shape for supported approvals, JSON-RPC error response for everything else (never left unanswered) |
 | Late response from a superseded turn (generation token mismatch) | Logged and dropped; current turn state untouched |
 
 ## Testing
@@ -366,10 +402,17 @@ This replaces the companion's `--background` detached worker and its `status` /
   `start` profile flags (bad sandbox literal, valueless `--sandbox`,
   `--ephemeral`+resume rejection); `--socket` override on non-start verbs.
 - One-shot script: ALL paths — including the completed-review happy path — are
-  testable offline via the `CODEX_DRIVE_APPSERVER` injection seam pointing at the
-  mock (per-mode); a live smoke run remains as final validation, no longer the
+  testable offline via the `CODEX_DRIVE_TEST_APPSERVER` injection seam (JSON-array
+  grammar, gated on `CODEX_DRIVE_TEST_MODE=1`) pointing at the mock (per-mode);
+  plus rejection tests: the variable set WITHOUT test mode fails loudly, malformed
+  JSON fails loudly. A live smoke run remains as final validation, no longer the
   only happy-path coverage (fixes review-round's documented limitation,
   review-round.test.mjs:10).
+- Detached-CLI path: profile handoff through the `__daemon` payload verified
+  end-to-end (start with profile flags → `review` accepted; start without →
+  `wrong_thread_profile`); `read --out` relative resolution against the
+  socket-selected daemon's reported cwd, tested with absent and with mismatched
+  global state.
 - Live validation (renera-ai-tools repo): one working-tree review, one `--base
   <sha>` review; then one full boomi-mcp-server Stage-2 gate pass before the
   companion is uninstalled.
