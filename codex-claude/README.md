@@ -98,16 +98,24 @@ object on stdout.
 | Verb | Purpose |
 |---|---|
 | `doctor` | Report Codex version, auth presence, thread count. |
-| `start [--cwd <p>] [--model <m>] [--resume-latest \| --resume <uuid>]` | Boot the session daemon, open/resume a thread. |
-| `plan "<prompt>" [--effort ultra] [--approval-policy untrusted]` | Plan-mode (read-only architect) turn. |
-| `send "<prompt>" [--effort <e>] [--mode default] [--approval-policy untrusted]` | Default/review turn. |
+| `start [--cwd <p>] [--model <m>] [--resume-latest \| --resume <uuid>] [--private] [--sandbox <s>] [--approval-policy <p>] [--ephemeral]` | Boot the session daemon, open/resume a thread. `--private` keeps it out of the global state file. |
+| `plan "<prompt>" [--effort max] [--approval-policy untrusted]` | Plan-mode (read-only architect) turn. |
+| `send "<prompt>" [--effort <e>] [--mode default] [--approval-policy untrusted]` | Default/review turn (prompt-based). |
+| `review [--base <ref\|sha> \| --scope <auto\|working-tree\|branch>]` | **Native git-scoped commit review** (`review/start`) — the built-in reviewer, no prompt. Needs a `--sandbox read-only --approval-policy never --ephemeral` session. |
 | `wait [--timeout-ms <N>]` | Block until the turn completes or parks a question/approval. |
 | `answer --id <qid> (--option <n> \| --text "<s>")` | Answer a parked question (`--option` is 1-based). |
 | `approve --decision allow\|deny` | Answer a parked exec/file approval. |
-| `read` | Return the last assistant message (plan or review). |
+| `read [--out <path>]` | Return the last assistant message (plan or review); `--out` also writes it (relative paths resolve against the daemon's cwd). |
 | `interrupt` | Cancel the in-flight turn. |
-| `status` | Daemon / thread / turn state. |
-| `stop` | Graceful shutdown (kill app-server, remove socket + state). |
+| `status` | Daemon / thread / turn state (incl. `cwd`). |
+| `stop` | Graceful shutdown (kill app-server, remove socket). |
+
+Every verb except `start`/`doctor` accepts `--socket <path>` to address a specific daemon instead of
+the global `~/.codex-drive/state.json`. `--flag=value` is not supported (hard error).
+
+For a one-shot review that a shell gate can branch on, use
+`scripts/commit-review-round.mjs [--base <sha>]`: it prints the review verbatim, then `STATUS:` and
+`SCOPE:` trailer lines, and exits 0 only for a real, non-empty review.
 
 ## Development
 

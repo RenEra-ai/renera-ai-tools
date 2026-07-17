@@ -87,7 +87,7 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --cwd "$PWD"
 ### 2. Architect turn (Plan mode, read-only)
 
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs plan "Architect a fix for <problem>. Inspect <files>. Produce a concrete, file-by-file plan. Ask if anything is ambiguous." --effort ultra
+node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs plan "Architect a fix for <problem>. Inspect <files>. Produce a concrete, file-by-file plan. Ask if anything is ambiguous." --effort max
 node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait
 ```
 
@@ -202,22 +202,34 @@ repo's workflow must read it), and **`/codex-doctor`** to preflight which mode a
 | Verb | Args | Returns |
 |---|---|---|
 | `doctor` | — | `{ codexVersion, authPresent, threads }` |
-| `start` | `[--cwd <path>] [--model <m>] [--resume <uuid> \| --resume-latest] [--force]` | `{ ok, threadId, socket, pid }` — **idempotent**: refuses if a live session already exists (avoids orphaning its daemon); `--force` stops the existing one first |
+| `start` | `[--cwd <path>] [--model <m>] [--resume <uuid> \| --resume-latest] [--force] [--private] [--sandbox <s>] [--approval-policy <p>] [--ephemeral]` | `{ ok, threadId, socket, pid, cwd, private }` — **idempotent**: refuses if a live session already exists (avoids orphaning its daemon); `--force` stops the existing one first. `--private` neither reads nor writes the global state (use with `--socket` below). Profile flags are validated **before** any existing session is probed or stopped, and are rejected on a `--resume` |
 | `plan` | `"<prompt>" [--effort <e>] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"no_model_for_mode"}` |
 | `send` | `"<prompt>" [--effort <e>] [--mode default] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"no_model_for_mode"}` (only with `--mode`) |
+| `review` | `[--base <ref\|sha> \| --scope <auto\|working-tree\|branch>]` | `{ ok, status:"running", scope }` · `{error:"busy"}` · `{error:"wrong_thread_profile"}` · `{error:"<validation>"}`. **Native git-scoped commit review** (`review/start`) — distinct from a prompt-based `send` review: it takes no prompt, inherits the config's effort, and returns the built-in reviewer's findings. Requires a session started with `--sandbox read-only --approval-policy never --ephemeral`. Scope is validated synchronously: an unresolvable/non-ancestor/empty-delta base is an error, never a silent fallback |
 | `wait` | `[--timeout-ms <N>]` | `{status:"completed",message[,empty:true]}` · `{status:"question",question}` · `{status:"approval",request}` · `{status:"interrupted"\|"failed",message}` · `{status:"unsupported",request}` · `{status:"timeout"}` (exit 2) |
 | `answer` | `--id <qid> (--option <n> \| --text "<s>")` | `{ ok }` · `{error:"no_pending_question"}` (`--option` is 1-based; one selection per call — answering resumes the turn) |
 | `approve` | `--decision allow\|deny` | `{ ok }` · `{error:"no_pending_approval"}` |
-| `read` | — | `{ status, message[, empty:true] }` (last assistant message; `empty:true` flags a completed turn that produced no content) |
+| `read` | `[--out <path>]` | `{ status, message[, empty:true], cwd }` (last assistant message; `empty:true` flags a completed turn that produced no content). `--out` writes a non-empty message to a file; a RELATIVE path resolves against the daemon's reported `cwd`, not the caller's |
 | `interrupt` | — | `{ ok }` · `{error:"no_active_turn"}` |
-| `status` | — | `{ threadId, turnStatus, parked }` |
-| `stop` | — | `{ ok }` (tears down daemon, socket, state) |
+| `status` | — | `{ threadId, turnStatus, parked, cwd }` |
+| `stop` | — | `{ ok }` (tears down the daemon, kills the app-server, removes the socket; the `~/.codex-drive/state.json` record is left behind as a stale entry — `start`'s liveness probe replaces it) |
+
+Every verb except `start` and `doctor` also accepts **`--socket <path>`**, which talks to that daemon
+directly instead of consulting `~/.codex-drive/state.json`. That file is global and single: a
+concurrent `start` anywhere on the machine rewrites it and would otherwise redirect this session's
+`wait`/`read`/`stop`. `--socket` is what makes `start --private` usable.
+
+`--flag=value` is **not** supported anywhere and is a hard error — `--base=<sha>` would otherwise
+parse as an unrelated key and silently downgrade a scoped review to `auto`.
 
 **Modes & effort.** `plan` = Plan mode (read-only architect). Plain `send` inherits the thread's
 current mode (a `send` after a `plan` reviews read-only — exactly what you want). `send --mode
 default` explicitly leaves Plan mode (only needed if you ever want Codex to edit). `--effort` ∈
-`{minimal, low, medium, high, xhigh, max, ultra, none}` (max/ultra are GPT-5.6 Sol values; ultra
-adds automatic task delegation); use `ultra` for hard architecture problems.
+`{minimal, low, medium, high, xhigh, max, ultra, none}` (max/ultra are GPT-5.6 Sol values). **Use
+`max` for hard architecture problems** — it is the maximum reasoning depth. `ultra` is `max` PLUS
+automatic task delegation, which makes it markedly slower and is the documented cause of drivers
+blowing their 540 s wait cap; opt into it deliberately, never as a default. Effort dominates
+wall-clock: the same review measured **36 s at `low`** vs **>560 s (never completed) at `max`**.
 
 ## Troubleshooting
 
