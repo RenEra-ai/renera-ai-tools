@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { METHODS, MODE, EFFORTS, SERVER_REQUEST } from '../lib/protocol.mjs';
-import { buildTurnStart, classifyServerRequest, buildQuestionAnswer, buildApprovalResponse } from '../lib/protocol.mjs';
+import { METHODS, MODE, EFFORTS, SERVER_REQUEST, REVIEW_ITEM } from '../lib/protocol.mjs';
+import { buildTurnStart, classifyServerRequest, buildQuestionAnswer, buildApprovalResponse, buildReviewStart } from '../lib/protocol.mjs';
 
 test('core client method names are pinned', () => {
   assert.equal(METHODS.INITIALIZE, 'initialize');
@@ -9,6 +9,36 @@ test('core client method names are pinned', () => {
   assert.equal(METHODS.THREAD_RESUME, 'thread/resume');
   assert.equal(METHODS.TURN_START, 'turn/start');
   assert.equal(METHODS.TURN_INTERRUPT, 'turn/interrupt');
+  assert.equal(METHODS.REVIEW_START, 'review/start');
+});
+
+test('review item type names are pinned', () => {
+  assert.deepEqual(REVIEW_ITEM, { ENTERED: 'enteredReviewMode', EXITED: 'exitedReviewMode' });
+});
+
+test('buildReviewStart emits the live wire shape for both implemented targets', () => {
+  assert.deepEqual(buildReviewStart({ threadId: 'T', target: { type: 'uncommittedChanges' } }),
+    { threadId: 'T', delivery: 'inline', target: { type: 'uncommittedChanges' } });
+  // branch accepts a raw SHA (live-qualified on 0.144.5), not just a branch name.
+  assert.deepEqual(buildReviewStart({ threadId: 'T', target: { type: 'baseBranch', branch: '5a04a9c' } }),
+    { threadId: 'T', delivery: 'inline', target: { type: 'baseBranch', branch: '5a04a9c' } });
+});
+
+test('buildReviewStart rejects malformed input instead of shipping it to the wire', () => {
+  assert.throws(() => buildReviewStart({ target: { type: 'uncommittedChanges' } }), /requires a threadId/);
+  assert.throws(() => buildReviewStart({ threadId: 'T' }), /requires a target/);
+  // boolean true is what a valueless CLI flag produces — truthiness must not be enough
+  assert.throws(() => buildReviewStart({ threadId: 'T', target: { type: 'baseBranch', branch: true } }), /non-empty string branch/);
+  assert.throws(() => buildReviewStart({ threadId: 'T', target: { type: 'baseBranch', branch: '  ' } }), /non-empty string branch/);
+  assert.throws(() => buildReviewStart({ threadId: 'T', target: { type: 'baseBranch' } }), /non-empty string branch/);
+});
+
+test('buildReviewStart refuses the two deliberately unimplemented ReviewTarget variants', () => {
+  // These exist in the protocol (commit{sha,title}, custom{instructions}) but are out of scope by
+  // design — they must fail here, not arrive at the server as a malformed request.
+  assert.throws(() => buildReviewStart({ threadId: 'T', target: { type: 'commit', sha: 'abc' } }), /unsupported review target/);
+  assert.throws(() => buildReviewStart({ threadId: 'T', target: { type: 'custom', instructions: 'x' } }), /unsupported review target/);
+  assert.throws(() => buildReviewStart({ threadId: 'T', target: { type: 'bogus' } }), /unsupported review target/);
 });
 
 test('mode and effort enums match the protocol', () => {

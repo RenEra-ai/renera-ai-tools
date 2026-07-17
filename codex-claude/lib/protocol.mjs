@@ -10,8 +10,13 @@ export const METHODS = {
   THREAD_UNSUBSCRIBE: 'thread/unsubscribe',
   TURN_START: 'turn/start',
   TURN_INTERRUPT: 'turn/interrupt',
+  REVIEW_START: 'review/start',
   COLLAB_MODE_LIST: 'collaborationMode/list',
 };
+
+// The review's final text arrives as an item/completed whose item.type is this. A paired
+// 'enteredReviewMode' item fires early in the same turn (live-observed) and is ignored.
+export const REVIEW_ITEM = { ENTERED: 'enteredReviewMode', EXITED: 'exitedReviewMode' };
 
 export const NOTIFY = {
   THREAD_STARTED: 'thread/started',
@@ -64,6 +69,35 @@ export function buildTurnStart({ threadId, text, mode, effort, model, approvalPo
     params.effort = effort;
   }
   return params;
+}
+
+// review/start params. Verified live against codex-cli 0.144.5 (probe, 2026-07-16):
+//   request  -> {threadId, delivery:'inline', target}
+//   response -> {turn:{id,…}, reviewThreadId}   (reviewThreadId === threadId when delivery is inline)
+//
+// The full ReviewTarget enum has FOUR variants — uncommittedChanges | baseBranch | commit | custom.
+// We implement the first two by design (see the spec's Out of scope): `commit` reviews ONE commit's
+// diff rather than the delta since it, and `custom` (which DOES take free-form instructions —
+// review/start is not promptless) is deliberately declined in favour of the prompt-based
+// review-round.mjs. Anything else is a programming error, so this throws rather than passing it on.
+//
+// No effort/model fields exist on review/start: a review inherits the effective CODEX_HOME config.
+export function buildReviewStart({ threadId, target }) {
+  if (!threadId || typeof threadId !== 'string') throw new Error('review/start requires a threadId');
+  if (!target || typeof target !== 'object') throw new Error('review/start requires a target');
+  if (target.type === 'uncommittedChanges') {
+    return { threadId, delivery: 'inline', target: { type: 'uncommittedChanges' } };
+  }
+  if (target.type === 'baseBranch') {
+    // `branch` accepts a branch NAME or a commit SHA (SHA support live-qualified on 0.144.5: the
+    // reviewer resolves it and runs `git diff <full-sha>`). Truthiness is not enough — the CLI
+    // parser can hand us boolean true.
+    if (typeof target.branch !== 'string' || !target.branch.trim()) {
+      throw new Error('review/start baseBranch target requires a non-empty string branch');
+    }
+    return { threadId, delivery: 'inline', target: { type: 'baseBranch', branch: target.branch } };
+  }
+  throw new Error(`unsupported review target '${String(target.type)}'; expected uncommittedChanges|baseBranch`);
 }
 
 export function classifyServerRequest(method, params) {
