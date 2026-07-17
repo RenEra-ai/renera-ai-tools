@@ -12,7 +12,32 @@
 // turn/start validation mirrors the real app-server: if collaborationMode is present, its
 // settings.model MUST be a non-empty string, else the request is rejected with -32600
 // (this reproduces the live "invalid type: null, expected a string" Plan-mode rejection).
+//
+// REVIEW MODES (`--review-mode <m>`, review/start only). A review carries no user text, so unlike
+// turn/start its behaviour cannot key off the prompt. The value is ALLOWLISTED: an unknown mode is a
+// loud exit, never a silent fall back to the happy path (which would let a typo'd test pass green).
+//   ok            -> enteredReviewMode, exitedReviewMode(text), turn/completed
+//   burst         -> the SAME as ok, but response + every notification in ONE stdout write, so the
+//                    daemon's JsonRpc.feed() drains them synchronously before the response promise's
+//                    microtask runs. This is the race that made `wait` report a completed review on a
+//                    turn whose true status was failed.
+//   reject        -> review/start rejected with a JSON-RPC error
+//   wrongthread   -> response carries a foreign reviewThreadId
+//   blank         -> exitedReviewMode with empty review text
+//   statusinbody  -> review text that itself contains a line reading "STATUS: failed"
+//   noresponse    -> notifications + turn/completed but NO response, ever (arms the daemon backstop)
+//   ask/approve   -> parks a question / an approval mid-review
 import readline from 'node:readline';
+
+const REVIEW_MODES = new Set(['ok', 'burst', 'reject', 'wrongthread', 'blank', 'statusinbody', 'noresponse', 'ask', 'approve']);
+const rmIdx = process.argv.indexOf('--review-mode');
+// Guard the indexOf: argv[-1 + 1] is argv[0], so an unguarded read silently turns the first
+// unrelated argument into the mode.
+const REVIEW_MODE = rmIdx >= 0 ? process.argv[rmIdx + 1] : 'ok';
+if (!REVIEW_MODES.has(REVIEW_MODE)) {
+  process.stderr.write(`mock-appserver: unknown --review-mode '${REVIEW_MODE}'\n`);
+  process.exit(2);
+}
 
 let threadSeq = 0;
 let turnSeq = 0;
@@ -22,12 +47,18 @@ const pendingServerReq = new Map(); // id -> resolve
 function write(obj) { process.stdout.write(JSON.stringify(obj) + '\n'); }
 function notify(method, params) { write({ jsonrpc: '2.0', method, params }); }
 function result(id, res) { write({ jsonrpc: '2.0', id, result: res }); }
+// One syscall for several messages, so the client receives them in a single coalesced chunk.
+function writeBurst(objs) { process.stdout.write(objs.map((o) => JSON.stringify(o)).join('\n') + '\n'); }
 
-async function runTurn(threadId, text) {
-  // Small delay so the turn/start response reaches the daemon before notifications.
+async function runTurn(threadId, text, turnId) {
+  // Small delay so the turn/start response reaches the daemon before notifications. NOTE this delay
+  // is a convenience, not a contract: the daemon must not depend on it (that is what the `burst`
+  // review mode proves), because a real server can coalesce the response and notifications into one
+  // stdout chunk.
   await new Promise((r) => setTimeout(r, 20));
-  const turnId = `turn-${++turnSeq}`;
-  notify('turn/started', { threadId, turnId });
+  // Live shape is {threadId, turn:{id}} — NOT {threadId, turnId}. The daemon reads both, but the
+  // fixture should send what the server actually sends.
+  notify('turn/started', { threadId, turn: { id: turnId } });
   if (text.includes('ASK')) {
     const reqId = ++serverReqSeq;
     const answered = new Promise((res) => pendingServerReq.set(reqId, res));
@@ -70,6 +101,62 @@ async function runTurn(threadId, text) {
   notify('turn/completed', { threadId, turn: { id: turnId, status: 'completed', items: [] } });
 }
 
+const REVIEW_TEXT = 'Reviewed 1 file.\n- [P2] something to fix — a.txt:1';
+
+// Live-faithful review turn (probed against codex-cli 0.144.5).
+//
+// THE CRITICAL FIDELITY POINT: turn/started announces an id that DIFFERS from the review/start
+// response's turn.id, while turn/completed and every item/completed carry the RESPONSE's id. A mock
+// that reuses one id everywhere would hide the bug this fixture exists to pin — a daemon that adopts
+// turn/started's id drops the review's own completion and hangs `wait` forever.
+async function runReview(threadId, reqId) {
+  const turnId = `turn-${++turnSeq}`;          // the response's id: what completion/items carry
+  const startedId = `started-${turnSeq}`;      // turn/started's DIFFERENT id — live reality
+  const reviewThreadId = REVIEW_MODE === 'wrongthread' ? 'thread-SOMEONE-ELSE' : threadId;
+  const response = { jsonrpc: '2.0', id: reqId, result: { turn: { id: turnId, status: 'inProgress' }, reviewThreadId } };
+  const text = REVIEW_MODE === 'blank' ? ''
+    : REVIEW_MODE === 'statusinbody' ? `Findings:\nSTATUS: failed\n- [P1] a trap for naive trailer parsing`
+      : REVIEW_TEXT;
+  const enter = { jsonrpc: '2.0', method: 'item/completed', params: { threadId, turnId, item: { type: 'enteredReviewMode', id: 'r0' } } };
+  const started = { jsonrpc: '2.0', method: 'turn/started', params: { threadId, turn: { id: startedId } } };
+  const exit = { jsonrpc: '2.0', method: 'item/completed', params: { threadId, turnId, item: { type: 'exitedReviewMode', id: 'r1', review: text } } };
+  const done = { jsonrpc: '2.0', method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed', items: [] } } };
+
+  if (REVIEW_MODE === 'reject') {
+    write({ jsonrpc: '2.0', id: reqId, error: { code: -32603, message: 'simulated review failure' } });
+    return;
+  }
+  if (REVIEW_MODE === 'burst') {
+    // Response AND every notification in ONE write: feed() drains the whole chunk synchronously,
+    // so turn/completed is processed before the response promise's continuation runs.
+    writeBurst([response, enter, started, exit, done]);
+    return;
+  }
+  if (REVIEW_MODE === 'noresponse') {
+    // Turn completes, response never comes. Only the daemon's own backstop can end this.
+    writeBurst([enter, started, exit, done]);
+    return;
+  }
+  write(response);
+  await new Promise((r) => setTimeout(r, 10));
+  write(enter); write(started);
+  if (REVIEW_MODE === 'ask' || REVIEW_MODE === 'approve') {
+    const rid = ++serverReqSeq;
+    const answered = new Promise((res) => pendingServerReq.set(rid, res));
+    if (REVIEW_MODE === 'ask') {
+      write({ jsonrpc: '2.0', id: rid, method: 'item/tool/requestUserInput',
+        params: { threadId, turnId, itemId: 'i1',
+          questions: [{ id: 'q1', header: 'Pick', question: 'Which?', isOther: false, isSecret: false,
+            options: [{ label: 'A', description: 'A' }, { label: 'B', description: 'B' }] }] } });
+    } else {
+      write({ jsonrpc: '2.0', id: rid, method: 'item/commandExecution/requestApproval',
+        params: { threadId, turnId, itemId: 'i1', command: '/bin/zsh -lc "git diff"', availableDecisions: ['accept', 'decline'] } });
+    }
+    await answered;
+  }
+  write(exit); write(done);
+}
+
 const rl = readline.createInterface({ input: process.stdin });
 rl.on('line', (line) => {
   if (!line.trim()) return;
@@ -100,8 +187,14 @@ rl.on('line', (line) => {
       write({ jsonrpc: '2.0', id: msg.id, error: { code: -32603, message: 'simulated turn failure' } });
       return;
     }
-    result(msg.id, { turn: { id: `turn-pending` } });
-    runTurn(msg.params.threadId, text);
+    // The response's turn.id is authoritative and MUST be the id the notifications then carry — the
+    // old 'turn-pending' placeholder was a shape the server never sends. (Live turn/start responses
+    // are {turn:{id,…}}: the response id, turn/started, turn/completed and items all agree.)
+    const turnId = `turn-${++turnSeq}`;
+    result(msg.id, { turn: { id: turnId, status: 'inProgress' } });
+    runTurn(msg.params.threadId, text, turnId);
+  } else if (msg.method === 'review/start') {
+    runReview(msg.params.threadId, msg.id);
   } else if (msg.method === 'turn/interrupt') {
     result(msg.id, {});
     notify('turn/completed', { threadId: msg.params.threadId, turn: { id: msg.params.turnId, status: 'interrupted', items: [] } });
