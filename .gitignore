@@ -11,6 +11,10 @@ Thumbs.db
 # Claude Code local settings
 .claude/settings.local.json
 .claude/worktrees/
+.claude/scheduled_tasks.lock
 
 # Node
 node_modules/
+
+# Local Codex scratch (plans/reviews stay local)
+.codex/

@@ -16,7 +16,7 @@ const pf = process.argv.indexOf('--prompt-file');
 let prompt = pf >= 0 ? readFileSync(process.argv[pf + 1], 'utf8') : process.argv[2];
 if (!prompt) { console.error('usage: review-round.mjs ("<prompt>" | --prompt-file <path>) [--plan-file <path>] [--effort <e>]'); process.exit(1); }
 const ei = process.argv.indexOf('--effort');
-const effort = ei >= 0 ? process.argv[ei + 1] : 'ultra';
+const effort = ei >= 0 ? process.argv[ei + 1] : 'max';
 
 // --plan-file (optional, additive): the driver — not the model — inlines the architect plan VERBATIM, so
 // the review judges against the exact saved bytes (no paraphrase). '(none)' (and omitting the flag) is the

@@ -11,7 +11,7 @@ description: >-
   Reviews only — it does not edit code. Examples:
     - "Have Codex review the changes I just made to the parser against the plan."
     - "Get a second-opinion review on this diff before I commit."
-model: claude-sonnet-4-6
+model: inherit
 color: green
 tools: Bash, Read, Write
 skills: codex-claude
