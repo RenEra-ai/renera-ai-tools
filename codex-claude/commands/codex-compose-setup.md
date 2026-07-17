@@ -89,7 +89,7 @@ and it's already composition-ready.
 
 **Fidelity tripwire (do not skip).** The scaffold carries a `codex-claude:generic-scaffold` marker and
 only does implement → run-tests → land. Read the repo's `CLAUDE.md` / `AGENTS.md`: **if they document a
-real completion process** (a QA gate, a code-review/`codex-companion` review loop, lint, etc.), say
+real completion process** (a QA gate, a code-review loop, lint, etc.), say
 **plainly** that the scaffold does **NOT** implement those gates and is therefore **not "ready"** for a
 faithful run yet — `/codex-issue` will run the scaffold's phases, not the documented prose. List the
 specific documented gates it is missing, and tell the user to encode them (replacing the marker line)
