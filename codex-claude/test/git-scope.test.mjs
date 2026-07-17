@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -80,9 +80,43 @@ test('--base that does not resolve errors (before any daemon boot)', () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('--base === HEAD errors: an empty delta would return a CLEAN review having read nothing', () => {
+test('--base === HEAD errors: there is nothing committed to review', () => {
+  // Caught explicitly rather than via the delta check: HEAD is its own ancestor, and on a DIRTY tree
+  // `git diff HEAD` even reports a delta — so it would sail through as a "branch diff against HEAD"
+  // that is really just a working-tree review wearing the wrong label.
   const { dir, head } = repo();
-  assert.throws(() => resolveReviewTarget(dir, { base: head }), /empty delta/);
+  assert.throws(() => resolveReviewTarget(dir, { base: head }), /is HEAD itself/);
+  const dirty = repo({ dirty: true });
+  assert.throws(() => resolveReviewTarget(dirty.dir, { base: dirty.head }), /is HEAD itself/);
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(dirty.dir, { recursive: true, force: true });
+});
+
+test('an ancestor base whose changes were reverted errors: an empty delta is never a clean review', () => {
+  // Resolves, is a strict ancestor, and still yields nothing — the case the delta check exists for.
+  const { dir } = repo();
+  writeFileSync(join(dir, 'a.txt'), 'three\n');
+  git(dir, 'commit', '-aqm', 'third');
+  const base = git(dir, 'rev-parse', 'HEAD');
+  writeFileSync(join(dir, 'a.txt'), 'four\n');
+  git(dir, 'commit', '-aqm', 'fourth');
+  writeFileSync(join(dir, 'a.txt'), 'three\n');          // revert it back
+  git(dir, 'commit', '-aqm', 'revert to third');
+  assert.notEqual(git(dir, 'rev-parse', 'HEAD'), base);  // genuinely a different commit...
+  assert.throws(() => resolveReviewTarget(dir, { base }), /empty delta/);  // ...with an identical tree
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a git failure (status > 1) is an error, never read as "there are changes"', () => {
+  // `git diff --quiet` answers 0 (same) or 1 (differs). Anything else is git FAILING, and a bare
+  // `status !== 0` test silently reports that as a delta — admitting the vacuous review outright.
+  const { dir, first } = repo();
+  // Corrupt the base commit's object so git errors (128) rather than answering. Loose objects are
+  // written read-only, hence the chmod.
+  const objPath = join(dir, '.git', 'objects', first.slice(0, 2), first.slice(2));
+  chmodSync(objPath, 0o644);
+  writeFileSync(objPath, 'not a git object');
+  assert.throws(() => resolveReviewTarget(dir, { base: first }), /does not resolve|git diff failed|could not resolve/);
   rmSync(dir, { recursive: true, force: true });
 });
 

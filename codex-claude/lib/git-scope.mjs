@@ -84,8 +84,16 @@ function mergeBase(cwd, ref) {
 // `git diff --quiet <ref>` is exactly what the native reviewer runs (live-observed:
 // `git diff 874bad72...`), so this asks the real question: will the reviewer see anything?
 // It is WORKTREE-INCLUSIVE — commits plus uncommitted changes — which is the intended semantics.
-// Exit 1 = differences exist, 0 = none.
-const hasDelta = (cwd, ref) => git(cwd, ['diff', '--quiet', ref]).status !== 0;
+//
+// ONLY 0 and 1 are answers: 0 = identical, 1 = differs. Anything else (128 on a corrupt object or a
+// bad ref, 129 on a usage error) is git FAILING, and a `status !== 0` test silently reads that as
+// "there are changes" — admitting exactly the vacuous review this check exists to prevent.
+function hasDelta(cwd, ref) {
+  const r = git(cwd, ['diff', '--quiet', ref]);
+  if (r.status === 0) return false;
+  if (r.status === 1) return true;
+  throw new Error(`git diff failed against ${ref} (status ${r.status})${r.stderr ? `: ${r.stderr}` : ''}`);
+}
 
 // Explicit --untracked-files=normal: a repo-local `status.showUntrackedFiles=no` otherwise makes a
 // tree with new files report CLEAN, which would route `auto` to a branch review and silently miss
@@ -147,18 +155,29 @@ export function resolveReviewTarget(cwd, options = {}) {
     // Fail here, not after a daemon boot and a full Codex turn: a typo'd --base is the single most
     // likely gate mistake, and its late failure surfaces as an unexplained blank review.
     if (!refExists(cwd, ref)) throw new Error(`--base ref does not resolve: ${ref}`);
+    // Resolve to an immutable full SHA BEFORE any other git question is asked. Two reasons: every
+    // later call then gets an unambiguous object (a ref named like `-base` can't be re-parsed as an
+    // option by a command lacking --end-of-options), and the answers can't drift if the ref moves.
+    const sha = fullSha(cwd, ref);
+    const head = fullSha(cwd, 'HEAD');
+    // base === HEAD is an ancestor of itself and, on a dirty tree, even has a delta — so neither
+    // check below catches it. But "review everything since HEAD" is never what the gate means: that
+    // is a working-tree review wearing a branch-diff label. Say so explicitly.
+    if (sha === head) {
+      throw new Error(`--base ${ref} is HEAD itself (nothing committed to review); use --scope working-tree for uncommitted work`);
+    }
     // Strict ancestry: the gate's baseline is a commit on this branch by construction, so a
     // non-ancestor means the caller GUESSED wrong (e.g. picked a SHA off another branch) and the
     // reviewer would silently widen scope through the merge base. Diverged-branch semantics are a
     // legitimate want — they are what `--scope branch` is for.
-    if (!isAncestor(cwd, ref)) {
+    if (!isAncestor(cwd, sha)) {
       throw new Error(`--base ${ref} is not an ancestor of HEAD; use --scope branch for a diverged base`);
     }
-    const sha = fullSha(cwd, ref);   // pin to an immutable full SHA before it goes on the wire
-    // The whole point of the ancestry+delta pair: base === HEAD resolves, is an ancestor, and yields
-    // NOTHING — a review that comes back clean having read no changes. Never let that reach the gate.
+    // The point of the delta check: a base can resolve, be a strict ancestor, and STILL yield
+    // nothing (e.g. a commit whose changes were reverted) — a review that comes back clean having
+    // read no changes. Never let that reach the gate.
     if (!hasDelta(cwd, sha)) {
-      throw new Error(`--base ${ref} yields an empty delta (nothing to review); is it already HEAD?`);
+      throw new Error(`--base ${ref} yields an empty delta (nothing to review)`);
     }
     return { mode: 'branch', label: `branch diff against ${ref} (${sha.slice(0, 7)})`, baseRef: sha, explicit: true };
   }

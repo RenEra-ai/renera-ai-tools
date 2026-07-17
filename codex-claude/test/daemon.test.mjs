@@ -37,6 +37,20 @@ async function startDaemon(extra = {}) {
   return { daemon, socketPath, dir };
 }
 
+test('REGRESSION: a same-burst response+completion on a PLAIN send is still honest', async () => {
+  // The race was never review-only: plan/send share _startTurn, which reset turn.id to null, ignored
+  // the response, and accepted any notification while the id was unknown. The fixture's old 20ms
+  // delay let the response always win and hid it. BURSTTURN emits response+notifications in ONE
+  // write, so feed() drains them synchronously before the response promise's continuation runs.
+  const { daemon, socketPath } = await startDaemon();
+  await rpcCall(socketPath, { cmd: 'send', prompt: 'BURSTTURN now' });
+  const res = await rpcCall(socketPath, { cmd: 'wait' });
+  assert.equal(res.status, 'completed');
+  assert.equal(res.message, 'BURSTOK');
+  assert.equal(daemon.turn.status, 'completed', 'reported status must match daemon truth');
+  await daemon.stop();
+});
+
 test('send → wait returns the completed message', async () => {
   const { daemon, socketPath } = await startDaemon();
   await rpcCall(socketPath, { cmd: 'send', prompt: 'say OK' });
@@ -59,11 +73,24 @@ test('a question parks the turn; wait surfaces it; answer lets it complete', asy
   await daemon.stop();
 });
 
-test('status reports idle after completion and rejects a second concurrent turn', async () => {
+test('a second concurrent turn is rejected while one is in flight', async () => {
+  // Uses ASK, which PARKS the turn, so it is deterministically still in flight when the second send
+  // arrives. The old version sent a fast-completing prompt and relied on the fixture's 20ms sleep to
+  // still be running — i.e. it tested the sleep, not the busy guard, and went flaky the moment the
+  // sleep went away.
   const { daemon, socketPath } = await startDaemon();
-  await rpcCall(socketPath, { cmd: 'send', prompt: 'say OK' });
+  await rpcCall(socketPath, { cmd: 'send', prompt: 'ASK please' });
+  await rpcCall(socketPath, { cmd: 'wait' });                       // parked on the question
   const busy = await rpcCall(socketPath, { cmd: 'send', prompt: 'again' });
   assert.equal(busy.error, 'busy');
+  await rpcCall(socketPath, { cmd: 'answer', id: 'q1', answers: ['A'] });
+  await rpcCall(socketPath, { cmd: 'wait' });
+  await daemon.stop();
+});
+
+test('status reports the completed turn after it finishes', async () => {
+  const { daemon, socketPath } = await startDaemon();
+  await rpcCall(socketPath, { cmd: 'send', prompt: 'say OK' });
   await rpcCall(socketPath, { cmd: 'wait' });
   const st = await rpcCall(socketPath, { cmd: 'status' });
   assert.equal(st.turnStatus, 'completed');

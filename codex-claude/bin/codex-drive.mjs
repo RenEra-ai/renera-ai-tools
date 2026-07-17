@@ -66,9 +66,16 @@ async function main() {
   // doesn't respond in time, report {status:"timeout"} so an unattended orchestrator can interrupt.
   // A valueless --timeout-ms would otherwise be Number(true) === 1, i.e. a 1ms cap that reports an
   // instant bogus timeout — and the long-review fallback recipe leans on this flag.
-  if ('timeout-ms' in parsed.flags && typeof parsed.flags['timeout-ms'] !== 'string') fail('--timeout-ms requires a value');
-  const timeoutMs = parsed.flags['timeout-ms'] ? Number(parsed.flags['timeout-ms']) : 0;
-  if (timeoutMs && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) fail('--timeout-ms must be a positive number');
+  // Validate on PRESENCE, never on truthiness: `--timeout-ms abc` -> Number('abc') === NaN, and NaN
+  // is falsy, so a truthiness-gated check skips itself and the cap silently becomes "none" — the
+  // opposite of what was asked for, on the flag the long-review fallback depends on.
+  let timeoutMs = 0;
+  if ('timeout-ms' in parsed.flags) {
+    const raw = parsed.flags['timeout-ms'];
+    if (typeof raw !== 'string') fail('--timeout-ms requires a value');
+    timeoutMs = Number(raw);
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) fail(`--timeout-ms must be a positive number (got '${raw}')`);
+  }
   let res;
   try {
     res = await sendCommand(socket, cmd, { timeoutMs });
@@ -150,12 +157,22 @@ async function startDaemon(parsed, store) {
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '__daemon', payload], {
     detached: true, stdio: 'ignore', cwd,
   });
-  child.unref();
+  // Keep OWNERSHIP through the handshake. unref'ing here and then bailing on a failed startup would
+  // leave a detached daemon (and its codex app-server) running with nobody holding its socket —
+  // exactly the orphan this file's idempotency guard exists to prevent.
+  const abort = (msg) => { try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch { /* gone */ } } fail(msg); };
 
   for (let i = 0; i < 50 && !existsSync(socketPath); i++) await delay(100);
-  if (!existsSync(socketPath)) fail('daemon did not come up');
+  if (!existsSync(socketPath)) abort('daemon did not come up');
 
-  const status = await sendCommand(socketPath, { cmd: 'status' });
+  let status;
+  try {
+    status = await sendCommand(socketPath, { cmd: 'status' });
+  } catch (e) {
+    abort(`daemon came up but did not answer status: ${e.message}`);
+  }
+  if (!status || !status.threadId) abort('daemon did not report a threadId');
+  child.unref();   // only now is it a healthy session someone can address
   const threadId = status.threadId;
   // A --private session stays out of the global record entirely: nothing to clobber, nothing to
   // leave behind pointing at a daemon its owner will stop.

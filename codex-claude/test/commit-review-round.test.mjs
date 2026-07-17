@@ -178,13 +178,24 @@ test('outside a git repo -> exit 1', async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('a --base with no delta is refused (exit 1) rather than reviewed as clean', async () => {
+test('a --base pointing at HEAD is refused (exit 1) rather than reviewed as clean', async () => {
   const { dir } = repo({ dirty: false });
   const head = git(dir, 'rev-parse', 'HEAD');
   const r = await script(['--cwd', dir, '--base', head], { env: env('ok') });
   assert.equal(r.code, 1);
-  assert.match(r.stderr, /empty delta/);
+  assert.match(r.stderr, /is HEAD itself/);
   rmSync(dir, { recursive: true, force: true });
+});
+
+test('a blank --cwd is refused, never silently swapped for the process cwd', async () => {
+  // `--cwd ""` passed the old guard, then lost to `flag('cwd') || process.cwd()` — reviewing
+  // whatever directory the gate happened to run from, and still exiting 0.
+  const r = await script(['--cwd', ''], { env: env('ok') });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /--cwd requires a non-blank value/);
+  const b = await script(['--base', '   '], { env: env('ok') });
+  assert.equal(b.code, 1);
+  assert.match(b.stderr, /--base requires a non-blank value/);
 });
 
 test('the test seam is refused outside test mode (exit 1), never silently ignored', async () => {

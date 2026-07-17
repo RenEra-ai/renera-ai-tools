@@ -31,6 +31,8 @@ function git(cwd, ...args) {
 }
 
 // A real repo: git-scope shells out for real, so the daemon needs a genuine dirty tree to resolve.
+// TWO commits, deliberately: with only one, `first` IS HEAD, and a --base test would exercise the
+// base-is-HEAD rejection rather than a real branch diff.
 function repo() {
   const dir = mkdtempSync(join(tmpdir(), 'cdx-dr-'));
   git(dir, 'init', '-q', '-b', 'main');
@@ -40,7 +42,9 @@ function repo() {
   git(dir, 'add', '.');
   git(dir, 'commit', '-qm', 'first');
   const first = git(dir, 'rev-parse', 'HEAD');
-  writeFileSync(join(dir, 'a.txt'), 'one\ntwo\n');   // dirty -> auto resolves to working-tree
+  writeFileSync(join(dir, 'a.txt'), 'one\ntwo\n');
+  git(dir, 'commit', '-aqm', 'second');              // so `first` is a real ancestor, not HEAD
+  writeFileSync(join(dir, 'a.txt'), 'one\ntwo\nDIRTY\n');   // dirty -> auto resolves to working-tree
   return { dir, first };
 }
 
@@ -115,7 +119,7 @@ test('a foreign reviewThreadId fails the turn instead of attributing someone els
   await rpcCall(socketPath, { cmd: 'review' });
   const res = await rpcCall(socketPath, { cmd: 'wait' });
   assert.equal(res.status, 'failed');
-  assert.match(res.message, /foreign reviewThreadId/);
+  assert.match(res.message, /unusable reviewThreadId/);
   await daemon.stop(); rmSync(dir, { recursive: true, force: true });
 });
 
@@ -228,6 +232,68 @@ test('a parked approval during a review can be denied and the review still finis
   const done = await rpcCall(socketPath, { cmd: 'wait' });
   assert.equal(done.status, 'completed');
   await daemon.stop(); rmSync(dir, { recursive: true, force: true });
+});
+
+test('REGRESSION: a FAILED turn can never be resurrected by the server\'s later notifications', () => {
+  // Found by review, reproduced by probe: _failTurn left turn.id null, so _isStaleTurn (which needs a
+  // truthy turn.id) filtered nothing — the server keeps streaming after we reject a turn, and the
+  // failed turn walked back to `completed` carrying the very review text we refused.
+  const d = new Daemon({ socketPath: '/tmp/cdx-unit-none.sock', clientInfo: {}, cwd: process.cwd() });
+  d.threadId = 'T-mine';
+  d.app = { respond() {}, respondError() {} };
+  d._gen = 2;
+  d.turn = d._freshTurn({ status: 'running', awaitingResponse: true, isReview: true, gen: 2 });
+  d._onStartResponse(2, { turn: { id: 'turn-2' }, reviewThreadId: 'T-SOMEONE-ELSE' }, 'review/start', { mode: 'working-tree' });
+  assert.equal(d.turn.status, 'failed');
+  d._onNotification('item/completed', { threadId: 'T-mine', turnId: 'turn-2', item: { type: 'exitedReviewMode', review: 'LEAKED REVIEW TEXT' } });
+  d._onNotification('turn/completed', { threadId: 'T-mine', turn: { id: 'turn-2', status: 'completed' } });
+  assert.equal(d.turn.status, 'failed', 'a failed turn must STAY failed');
+  assert.ok(!/LEAKED/.test(d.turn.message || ''), 'the rejected review text must never surface');
+});
+
+test('REGRESSION: a missing/blank reviewThreadId fails the turn (truthiness is not validation)', () => {
+  const d = new Daemon({ socketPath: '/tmp/cdx-unit-none.sock', clientInfo: {}, cwd: process.cwd() });
+  d.threadId = 'T-mine';
+  d.app = { respond() {}, respondError() {} };
+  for (const bad of [undefined, '', null]) {
+    d._gen += 1;
+    const gen = d._gen;
+    d.turn = d._freshTurn({ status: 'running', awaitingResponse: true, isReview: true, gen });
+    d._onStartResponse(gen, { turn: { id: 't' }, reviewThreadId: bad }, 'review/start', { mode: 'working-tree' });
+    assert.equal(d.turn.status, 'failed', `reviewThreadId ${JSON.stringify(bad)} must fail, not be waved through`);
+  }
+});
+
+test('REGRESSION: a foreign thread\'s completion cannot arm the backstop and kill our turn', () => {
+  const d = new Daemon({ socketPath: '/tmp/cdx-unit-none.sock', clientInfo: {}, cwd: process.cwd() });
+  d.threadId = 'T-mine';
+  d._gen = 1;
+  d.turn = d._freshTurn({ status: 'running', awaitingResponse: true, gen: 1 });
+  d._onNotification('turn/completed', { threadId: 'T-OTHER', turn: { id: 'x', status: 'completed' } });
+  assert.equal(d.turn.backstop, null, 'a foreign completion must not arm our backstop');
+  assert.equal(d.turn.buffered.length, 0, 'a foreign notification must not even be buffered');
+  // ...nor may a non-successful completion: interrupted/failed are already fail-closed.
+  d._onNotification('turn/completed', { threadId: 'T-mine', turn: { id: 'x', status: 'interrupted' } });
+  assert.equal(d.turn.backstop, null, 'only a SUCCESSFUL completion needs the response');
+  d._clearBackstop();
+});
+
+test('REGRESSION: a stale same-thread server request cannot park a turn whose id is not yet known', () => {
+  // While awaitingResponse, turn.id is null, so _isStaleTurn cannot judge — the request must be
+  // buffered with the notifications, not parked. Reproduced by review with a request for turn-OLD.
+  const responded = [];
+  const d = new Daemon({ socketPath: '/tmp/cdx-unit-none.sock', clientInfo: {}, cwd: process.cwd() });
+  d.threadId = 'T-mine';
+  d.app = { respond: (id, r) => responded.push({ id, r }), respondError: (id, c, m) => responded.push({ id, c, m }) };
+  d._gen = 1;
+  d.turn = d._freshTurn({ status: 'running', awaitingResponse: true, gen: 1 });
+  d._onServerRequest({ id: 9, method: 'item/tool/requestUserInput', params: { threadId: 'T-mine', turnId: 'turn-OLD' } });
+  assert.equal(d.turn.parked, null, 'must not park before the response makes turn.id authoritative');
+  assert.equal(d.turn.status, 'running');
+  // Once the response lands, the replay judges it: stale -> declined AND answered, still not parked.
+  d._onStartResponse(1, { turn: { id: 'turn-NEW' } }, 'turn/start', null);
+  assert.equal(d.turn.parked, null, 'the stale request must be declined on replay, never parked');
+  assert.equal(responded.length, 1, 'and it must still get a response — an unanswered request wedges the server turn');
 });
 
 test('a server request from a foreign thread is never parked, and is still answered', () => {
