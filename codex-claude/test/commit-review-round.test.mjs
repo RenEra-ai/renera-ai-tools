@@ -148,6 +148,28 @@ test('preflight rejects bad usage with exit 1', async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('--help prints usage and exits 0 — it must NOT run a live review', async () => {
+  // Found the hard way: with no --help handling and unknown flags ignored, `--help` fell through to
+  // a full unscoped review of the cwd and hung for minutes against real Codex.
+  const r = await script(['--help'], { env: env('ok') });
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /^usage: commit-review-round/);
+  assert.ok(!/STATUS:/.test(r.stdout), 'must not have run a review');
+});
+
+test('an UNKNOWN flag is a hard error, never silently ignored into a full unscoped review', async () => {
+  const { dir } = repo();
+  const r = await script(['--cwd', dir, '--bogus', 'x'], { env: env('ok') });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /unknown flag --bogus/);
+  assert.ok(!/STATUS:/.test(r.stdout), 'must not have run a review');
+  // A bare positional is equally suspicious (a forgotten flag name).
+  const p = await script(['--cwd', dir, 'stray'], { env: env('ok') });
+  assert.equal(p.code, 1);
+  assert.match(p.stderr, /unexpected argument 'stray'/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test('outside a git repo -> exit 1', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'cdx-nogit-'));
   const r = await script(['--cwd', dir], { env: env('ok') });

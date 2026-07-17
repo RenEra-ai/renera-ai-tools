@@ -40,6 +40,8 @@ function die(msg, code) {
 
 // --- preflight: fail fast, BEFORE booting a daemon. The daemon re-validates authoritatively; this
 // is purely so a typo costs a millisecond instead of a Codex turn. ---
+const KNOWN_FLAGS = new Set(['base', 'scope', 'cwd']);
+
 function flag(name) {
   const i = process.argv.indexOf(`--${name}`);
   if (i < 0) return undefined;
@@ -47,11 +49,24 @@ function flag(name) {
   if (v === undefined || v.startsWith('--')) die(`--${name} requires a value\n${USAGE}`, 1);
   return v;
 }
-for (const a of process.argv.slice(2)) {
+
+// Every argument must be recognised. An UNKNOWN flag is a hard error, never ignored: silently
+// ignoring one means the caller asked for something specific, got a full unscoped review of the cwd
+// instead, and pays for a live Codex turn to find out. (`--help` hitting that path is how this was
+// found.) Values are skipped by the same walk, so `--base <sha>` is not mistaken for a flag.
+const argv = process.argv.slice(2);
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  if (a === '--help' || a === '-h') { process.stdout.write(`${USAGE}\n`); process.exit(0); }
+  if (!a.startsWith('--')) die(`unexpected argument '${a}'\n${USAGE}`, 1);
+  const key = a.slice(2);
   // Mirror the CLI parser's refusal: `--base=<sha>` must never be silently read as "no base given",
   // which would review auto scope instead of the requested range.
-  if (a.startsWith('--') && a.includes('=')) die(`${a.split('=')[0]}=value is not supported; use \`${a.split('=')[0]} <value>\`\n${USAGE}`, 1);
+  if (key.includes('=')) die(`--${key.split('=')[0]}=value is not supported; use \`--${key.split('=')[0]} <value>\`\n${USAGE}`, 1);
+  if (!KNOWN_FLAGS.has(key)) die(`unknown flag --${key}\n${USAGE}`, 1);
+  i++;   // skip this flag's value; flag() re-reads and validates it below
 }
+
 const base = flag('base');
 const scope = flag('scope');
 const cwd = flag('cwd') || process.cwd();
