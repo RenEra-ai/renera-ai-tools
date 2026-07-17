@@ -124,7 +124,7 @@ The plugin must wrap a repo's lifecycle **whatever shape it has**. Two real repo
   ephemeral session — no daemon-continuity fragility.
 - **Two reviews, two goals (by design — not redundant).** If the repo's own workflow contains a Codex
   code-review of the implementation — whether a Workflow phase or a `CLAUDE.md` step run in main-thread
-  mode (e.g. its own `codex-companion … review` gate), reviewing the code and specific fixes in the
+  mode (e.g. its own `commit-review-round.mjs` review gate), reviewing the code and specific fixes in the
   developer loop, with the developer's context — AND the main-thread architect review judges the
   implementation against the **architect session's plan/intent** (with the architect's context), a
   change is reviewed twice — intentionally. They have **different goals and different context**, so

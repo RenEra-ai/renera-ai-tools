@@ -466,11 +466,21 @@ recipe: `verbs.mjs:37` maps the flag but nothing in `lib/` ever reads `cmd.full`
 `_completedResult` returns the whole message unconditionally — so the recipe must not depend
 on a no-op.
 
-**[rev 5] Known gap, stated rather than inherited silently:** this fallback has **zero**
-Stage-2 step-7 enforcement. It ends in `read --out`, which prints a single JSON line (no
-`^SCOPE: ` line), and the subsequent `Read` of the file is excluded by the enforcement hook's
-`tool_name == "Bash"` guard. Fix the fallback's final output to conform to the same terminal
-contract as the one-shot rather than documenting the hole.
+**[rev 5 — FIXED, was a gap]** As drafted, this fallback had **zero** Stage-2 step-7 enforcement:
+it ended in `read --out`, which prints a single JSON line (no `^SCOPE: ` line), and the subsequent
+`Read` of the file is excluded by the enforcement hook's `tool_name == "Bash"` guard. Rather than
+document the hole, the recipe now **emits the same terminal contract as the one-shot** from its final
+Bash call:
+
+```
+node <cache>/bin/codex-drive.mjs read --out .codex/review.md --socket "$S" >/dev/null \
+  && cat .codex/review.md \
+  && printf 'STATUS: completed\nSCOPE: fallback branch diff against %s head=%s\n' "$BASELINE" "$(git rev-parse HEAD)"
+```
+
+Verified against the real hook: the JSON-line form → exit 0 (unenforced); this form → exit 2 (fires).
+This matters more than it first appeared, because at the chosen `max` effort the one-shot is expected
+to time out on larger deltas, making the fallback a routine path rather than an exceptional one.
 
 This replaces the companion's `--background` detached worker and its `status` /
 `result` / `cancel` job-control layer entirely.

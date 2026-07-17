@@ -41,7 +41,7 @@ git ls-files --error-unmatch <matched-file> 2>/dev/null && echo tracked || echo 
   report two fidelity/reproducibility signals:
   - **Unmodified scaffold:** if the matched file still contains `codex-claude:generic-scaffold`, flag it
     outright — "this workflow is the untouched generic starter; in workflow-mode it will **NOT** run the
-    QA/`codex-companion` review gates documented in CLAUDE.md. Encode your gates (and remove the marker),
+    QA/Codex review gates documented in CLAUDE.md. Encode your gates (and remove the marker),
     or use main-thread mode." This is a CONCERN, not a clean pass.
   - **Tracked-ness:** report whether the matched file is git-tracked. **UNTRACKED** is a CONCERN — the
     mode depends on an ephemeral file, so a `git clean`/fresh clone silently flips the repo to subagent

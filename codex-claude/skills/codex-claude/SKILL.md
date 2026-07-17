@@ -169,7 +169,7 @@ Codex is driven by thin, `Task`-free helper subagents (they isolate the verbose 
   returns a structured last-line `VERDICT:`.
 
 The main thread does the rest itself: it **develops** (running the repo's own workflow — its real
-QA/review gates, dispatched subagents **and** command gates it names like its own `codex-companion`
+QA/review gates, dispatched subagents **and** command gates it names like its own
 Codex review, which the §6 plan review never substitutes for), then **addresses** each review round's findings via the
 **receiving-code-review** skill (verify, fix genuine issues, push back on false positives — never blind
 compliance), re-running the repo's gates (its own Codex review gate included) on each fix delta, until the verdict is `VERDICT: NO ISSUES` or the max rounds

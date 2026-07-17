@@ -107,7 +107,7 @@ workflow — read `CLAUDE.md`, `AGENTS.md`, `.claude/` process docs / commands /
 as-is, however many internal steps it has, **dispatching its real QA / code-reviewer / tester
 subagents via `Task`** (you can — you are the main thread). Run its **review/QA gates**, not just its
 tests — and a gate counts **whether it's a dispatched subagent OR a command the repo names** (e.g. a
-`CLAUDE.md` step that runs an independent Codex review via `codex-companion … review`): run that one
+`CLAUDE.md` step that runs an independent Codex review via its own gate script): run that one
 too, with the **exact tool the repo specifies**. **The repo's own Codex/AI review gate MUST run here**;
 the §6 architect-vs-plan review is **additive and does NOT "stand in for" it** — different goals (the
 repo's gate judges the code, §6 judges impl-vs-plan), so never drop the repo's own review just because
