@@ -51,11 +51,12 @@ function result(id, res) { write({ jsonrpc: '2.0', id, result: res }); }
 function writeBurst(objs) { process.stdout.write(objs.map((o) => JSON.stringify(o)).join('\n') + '\n'); }
 
 async function runTurn(threadId, text, turnId) {
-  // Small delay so the turn/start response reaches the daemon before notifications. NOTE this delay
-  // is a convenience, not a contract: the daemon must not depend on it (that is what the `burst`
-  // review mode proves), because a real server can coalesce the response and notifications into one
-  // stdout chunk.
-  await new Promise((r) => setTimeout(r, 20));
+  // NO artificial delay. The old 20ms sleep here let the turn/start response win every race and so
+  // MASKED the plan/send ordering bug entirely: a real server can coalesce the response and its
+  // notifications into one stdout chunk, which JsonRpc.feed() drains synchronously while the
+  // response promise resolves on a later microtask. Yielding a single macrotask keeps the mock
+  // realistic (the write is still a separate chunk) without papering over the race.
+  await new Promise((r) => setImmediate(r));
   // Live shape is {threadId, turn:{id}} — NOT {threadId, turnId}. The daemon reads both, but the
   // fixture should send what the server actually sends.
   notify('turn/started', { threadId, turn: { id: turnId } });
@@ -191,6 +192,19 @@ rl.on('line', (line) => {
     // old 'turn-pending' placeholder was a shape the server never sends. (Live turn/start responses
     // are {turn:{id,…}}: the response id, turn/started, turn/completed and items all agree.)
     const turnId = `turn-${++turnSeq}`;
+    // BURSTTURN: response + every notification in ONE stdout write, so the daemon's feed() drains
+    // them synchronously BEFORE the response promise's continuation runs. This is the plan/send
+    // counterpart of the `burst` review mode — rev 5 requires the ordering hold for every turn kind,
+    // not just reviews, and the shared _startTurn path is where the race actually lived.
+    if (text.includes('BURSTTURN')) {
+      writeBurst([
+        { jsonrpc: '2.0', id: msg.id, result: { turn: { id: turnId, status: 'inProgress' } } },
+        { jsonrpc: '2.0', method: 'turn/started', params: { threadId: msg.params.threadId, turn: { id: turnId } } },
+        { jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: msg.params.threadId, turnId, itemId: 'i2', delta: 'BURSTOK' } },
+        { jsonrpc: '2.0', method: 'turn/completed', params: { threadId: msg.params.threadId, turn: { id: turnId, status: 'completed', items: [] } } },
+      ]);
+      return;
+    }
     result(msg.id, { turn: { id: turnId, status: 'inProgress' } });
     runTurn(msg.params.threadId, text, turnId);
   } else if (msg.method === 'review/start') {

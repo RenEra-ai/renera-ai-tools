@@ -46,7 +46,10 @@ function flag(name) {
   const i = process.argv.indexOf(`--${name}`);
   if (i < 0) return undefined;
   const v = process.argv[i + 1];
-  if (v === undefined || v.startsWith('--')) die(`--${name} requires a value\n${USAGE}`, 1);
+  // Blank counts as missing. `--cwd ""` would otherwise pass this guard, then lose to
+  // `flag('cwd') || process.cwd()` and review whatever directory we happen to be in — a review of
+  // the wrong repository that still exits 0.
+  if (v === undefined || v.startsWith('--') || !v.trim()) die(`--${name} requires a non-blank value\n${USAGE}`, 1);
   return v;
 }
 

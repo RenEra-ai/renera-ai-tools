@@ -44,13 +44,15 @@ export class Daemon {
     return {
       id: null, status: 'idle', buffer: '', planBuffer: '', planText: null, parked: null,
       message: null, isPlan: false, isReview: false, reviewText: null,
-      gen: this._gen, awaitingResponse: false, buffered: [], backstop: null,
+      gen: this._gen, awaitingResponse: false, buffered: [], backstop: null, finalized: false,
       ...extra,
     };
   }
 
   async start() {
-    this.app = new AppServer({ ...this.appServerOpts, cwd: this.appServerOpts.cwd || this.cwd });
+    // cwd LAST and unconditional: the daemon's normalized cwd is the single anchor, and an injected
+    // appServerOpts.cwd (the test seam) must not be able to split it away from git-scope/thread-start.
+    this.app = new AppServer({ ...this.appServerOpts, cwd: this.cwd });
     await this.app.start();
     this.app.on('notification', (m, p) => this._onNotification(m, p));
     this.app.on('serverRequest', (req) => this._onServerRequest(req));
@@ -59,9 +61,10 @@ export class Daemon {
     // thread/resume stays {threadId}-only: a resumed thread keeps the identity and profile it was
     // created with, and re-profiling it is not a thing the protocol offers. Review sessions are
     // start-only by the profile rule, so no resume-side cwd matching is needed.
+    // Same rule on the wire: profile flags may set sandbox/approvalPolicy/ephemeral, never cwd.
     const params = this.resume
       ? { threadId: this.resume }
-      : { cwd: this.cwd, ...(this.profile || {}) };
+      : { ...(this.profile || {}), cwd: this.cwd };
     const started = await this.app.request(this.resume ? METHODS.THREAD_RESUME : METHODS.THREAD_START, params);
     this.threadId = started.thread.id;
     await this._listen();
@@ -70,9 +73,13 @@ export class Daemon {
 
   _listen() {
     if (existsSync(this.socketPath)) { try { unlinkSync(this.socketPath); } catch {} }
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       this.server = createServer((sock) => this._onClient(sock));
-      this.server.listen(this.socketPath, resolve);
+      // A bind failure (EADDRINUSE, EACCES, EPERM in a sandbox) would otherwise surface as an
+      // unhandled 'error' event while start() stayed pending forever — so the one-shot's try/finally
+      // never runs and its app-server is orphaned.
+      this.server.once('error', (err) => reject(new Error(`socket listen failed (${this.socketPath}): ${err.message}`)));
+      this.server.listen(this.socketPath, () => resolve());
     });
   }
 
@@ -227,25 +234,36 @@ export class Daemon {
     if (!id) return this._failTurn(`${label} response carried no turn id`);
     // delivery:'inline' means the review runs on the requesting thread. Live-confirmed, but validated
     // at runtime anyway: a foreign reviewThreadId would mean we are about to attribute someone else's
-    // review to this session.
-    if (resolved && res.reviewThreadId && res.reviewThreadId !== this.threadId) {
-      return this._failTurn(`${label} returned a foreign reviewThreadId (${res.reviewThreadId})`);
+    // review to this session. STRICT equality — a missing/blank value must fail too, not sail through
+    // a truthiness guard: "we couldn't tell whose review this is" is not a reason to accept it.
+    if (resolved && res.reviewThreadId !== this.threadId) {
+      return this._failTurn(`${label} returned an unusable reviewThreadId (${JSON.stringify(res.reviewThreadId)})`);
     }
     this.turn.id = id;
     this.turn.awaitingResponse = false;
     this._clearBackstop();
     // Replay in arrival order, now that the id is known and the stale filter can do its job.
+    // Server requests replay through the same path they'd have taken live, so a stale one is
+    // declined-and-answered rather than parked.
     const pending = this.turn.buffered;
     this.turn.buffered = [];
-    for (const [m, p] of pending) this._dispatchNotification(m, p);
+    for (const [m, p] of pending) {
+      if (m === '__serverRequest') this._onServerRequest(p);
+      else this._dispatchNotification(m, p);
+    }
   }
 
+  // A turn that ends is OVER. Without `finalized`, failing a turn left turn.id null, so _isStaleTurn
+  // (which needs a truthy turn.id) filtered nothing and the server's still-streaming notifications
+  // walked the turn from `failed` back to `completed` — handing back the very review text we rejected.
+  // Probed: mismatched reviewThreadId -> failed -> late exitedReviewMode + turn/completed -> completed.
   _failTurn(message) {
     this.turn.awaitingResponse = false;
     this.turn.buffered = [];
     this._clearBackstop();
     this.turn.status = 'failed';
     this.turn.message = message;
+    this.turn.finalized = true;
     this._resolveWaiters();
   }
 
@@ -370,17 +388,27 @@ export class Daemon {
   // ordering sound; it also subsumes the "completion barrier" idea, because a turn/completed that
   // arrives early is simply buffered and cannot finalise anything.
   _onNotification(method, params) {
+    // Drop foreign traffic at the door, before it can be buffered or arm anything. The AppServer
+    // forwards every notification unfiltered, including delegated/subagent threads.
+    if (params && this._isForeignThread(params.threadId)) return;
     if (this.turn.awaitingResponse) {
       this.turn.buffered.push([method, params]);
       // The turn is already over but the response that authorises reading it hasn't arrived. We can
       // no longer assume it ever will, so bound the wait rather than hanging `wait` forever.
-      if (method === NOTIFY.TURN_COMPLETED) this._armResponseBackstop();
+      // Only a SUCCESSFUL completion needs the response: interrupted/failed are already fail-closed
+      // and carry nothing we would have had to validate.
+      if (method === NOTIFY.TURN_COMPLETED && params && params.turn && params.turn.status === 'completed') {
+        this._armResponseBackstop();
+      }
       return;
     }
     this._dispatchNotification(method, params);
   }
 
   _dispatchNotification(method, params) {
+    // A finalized turn is OVER. The server keeps streaming after we reject a turn, and without this
+    // a failed turn walks back to `completed` carrying the text we just refused.
+    if (this.turn.finalized) return;
     // Foreign-thread filter, applied to every kind: delegated/subagent threads emit their own
     // lifecycle, and adopting any of it would attribute another thread's work to this turn.
     if (params && this._isForeignThread(params.threadId)) return;
@@ -431,6 +459,8 @@ export class Daemon {
       } else {
         this.turn.message = plan || this.turn.buffer;
       }
+      this.turn.finalized = true;   // terminal: later notifications for this turn are noise
+      this._clearBackstop();
       this._resolveWaiters();
     }
   }
@@ -446,6 +476,7 @@ export class Daemon {
       this.turn.status = 'failed';
       this.turn.message = `codex app-server exited${info && info.code != null ? ` (code=${info.code})` : ''}`;
       this.turn.parked = null;
+      this.turn.finalized = true;
       this._resolveWaiters();
     }
   }
@@ -455,6 +486,13 @@ export class Daemon {
   // turn that issued it — but it must never park ours (which would strand `wait` on a foreign prompt).
   _onServerRequest(req) {
     const p = req.params || {};
+    // Server requests must respect the SAME response barrier as notifications. While turn.id is
+    // unknown, _isStaleTurn cannot judge them (it needs a truthy turn.id), so a stale same-thread
+    // request would park our fresh turn on someone else's prompt. Buffer and replay instead.
+    if (this.turn.awaitingResponse && !this._isForeignThread(p.threadId)) {
+      this.turn.buffered.push(['__serverRequest', req]);
+      return;
+    }
     const foreign = this._isForeignThread(p.threadId) || this._isStaleTurn(p.turnId);
     const c = classifyServerRequest(req.method, req.params);
     if (foreign) {

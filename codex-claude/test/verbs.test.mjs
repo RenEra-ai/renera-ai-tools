@@ -86,6 +86,34 @@ test('toCommand maps answer --option to answers array and --text to answers arra
 });
 
 test('toCommand maps approve', () => {
-  assert.deepEqual(toCommand({ verb: 'approve', flags: { id: 'r1', decision: 'allow' } }),
+  assert.deepEqual(toCommand({ verb: 'approve', flags: { decision: 'allow' } }),
     { cmd: 'approve', decision: 'allow' });
+});
+
+test('approve rejects the vestigial --id instead of silently ignoring it', () => {
+  // This used to be tolerated-and-dropped. `--id` only ever existed in the superseded 2026-05-31
+  // design doc; the shipped contract (README/SKILL: `approve --decision allow|deny`) has no id — the
+  // daemon answers whichever request is parked. Accepting it told a confused caller they were being
+  // heard when they weren't, which is the same silent-discard class as `review --bsae`.
+  assert.throws(() => toCommand({ verb: 'approve', flags: { id: 'r1', decision: 'allow' } }),
+    /unknown flag --id for verb 'approve'/);
+});
+
+test('an unknown flag is a loud error, never silently dropped into a different request', () => {
+  // The dangerous case: `review --bsae abc` would otherwise become a bare {cmd:'review'} — a full
+  // UNSCOPED review of the cwd, when the caller asked for a specific commit range.
+  assert.throws(() => toCommand({ verb: 'review', flags: { bsae: 'abc' } }), /unknown flag --bsae/);
+  assert.throws(() => toCommand({ verb: 'review', flags: { help: true } }), /unknown flag --help/);
+  assert.throws(() => toCommand({ verb: 'wait', flags: { bogus: 'x' } }), /unknown flag --bogus/);
+  // Transport flags that bin consumes must still pass through every verb, or real calls break.
+  assert.deepEqual(toCommand({ verb: 'wait', flags: { 'timeout-ms': '5000', socket: '/tmp/s' } }), { cmd: 'wait' });
+  assert.deepEqual(toCommand({ verb: 'read', flags: { out: '/tmp/x', socket: '/tmp/s' } }), { cmd: 'read', full: false });
+  assert.deepEqual(toCommand({ verb: 'review', flags: { base: 'abc', socket: '/tmp/s' } }), { cmd: 'review', base: 'abc' });
+});
+
+test('a positional on a verb that takes none is an error (a forgotten flag name)', () => {
+  assert.throws(() => toCommand({ verb: 'review', positional: 'abc123', flags: {} }), /takes no positional/);
+  assert.throws(() => toCommand({ verb: 'stop', positional: 'now', flags: {} }), /takes no positional/);
+  // plan/send legitimately take one.
+  assert.equal(toCommand({ verb: 'send', positional: 'hello', flags: {} }).prompt, 'hello');
 });

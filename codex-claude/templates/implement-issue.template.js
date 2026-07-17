@@ -1,6 +1,6 @@
 // codex-claude:generic-scaffold — GENERIC STARTER, NOT YOUR REAL PROCESS.
 // This file does implement → discover-and-run-tests → commit/land. It does NOT run any QA/review gates
-// your CLAUDE.md / AGENTS.md document (e.g. a QA subagent, a code-review or codex-companion review loop).
+// your CLAUDE.md / AGENTS.md document (e.g. a QA subagent, or a Codex code-review gate loop).
 // While this marker line is present, /codex-issue and /codex-doctor treat this as an UNMODIFIED scaffold
 // and warn that workflow-mode will NOT run your documented gates.
 // TODO(codex-claude): replace/extend the Implement→Land steps below with this repo's real gates

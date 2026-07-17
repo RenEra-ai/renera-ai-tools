@@ -87,7 +87,45 @@ function compact(obj) {
   return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
 }
 
+// Flags each verb understands, PLUS the transport flags bin consumes before/around toCommand
+// (`--socket` on every non-start verb, `--timeout-ms` on wait, `--out` on read). The allowlist must
+// include them: bin hands toCommand the FULL flags object, so omitting them would break real calls.
+//
+// Why an allowlist at all: an unrecognised flag was silently DISCARDED, so `review --bsae abc` and
+// `review --help` both degraded into a bare auto-scope review — the caller asked for one thing and
+// got a full unscoped review of the cwd, at the cost of a live Codex turn to notice. Same class as
+// the `--flag=value` hazard below.
+const TRANSPORT_FLAGS = ['socket', 'timeout-ms'];
+const VERB_FLAGS = {
+  plan: ['effort', 'approval-policy'],
+  send: ['effort', 'approval-policy', 'mode'],
+  review: ['base', 'scope'],
+  wait: [],
+  answer: ['id', 'option', 'text'],
+  approve: ['decision'],
+  read: ['full', 'out'],
+  interrupt: [],
+  status: [],
+  stop: [],
+};
+
+function assertKnownFlags(verb, flags) {
+  const allowed = VERB_FLAGS[verb];
+  if (!allowed) return;   // unknown verb: toCommand's default throws with a better message
+  for (const k of Object.keys(flags)) {
+    if (!allowed.includes(k) && !TRANSPORT_FLAGS.includes(k)) {
+      throw new Error(`unknown flag --${k} for verb '${verb}'`);
+    }
+  }
+}
+
 export function toCommand({ verb, positional, flags = {} }) {
+  assertKnownFlags(verb, flags);
+  // A positional on a verb that takes none is a forgotten flag name, not a prompt — and for `review`
+  // it would be silently ignored while the review ran unscoped.
+  if (positional !== undefined && !['plan', 'send'].includes(verb)) {
+    throw new Error(`verb '${verb}' takes no positional argument (got '${positional}')`);
+  }
   switch (verb) {
     case 'plan': return compact({ cmd: 'plan', prompt: positional, effort: flags.effort, approvalPolicy: flags['approval-policy'] });
     case 'send': return compact({ cmd: 'send', prompt: positional, effort: flags.effort, approvalPolicy: flags['approval-policy'], mode: flags.mode });
