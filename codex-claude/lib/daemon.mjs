@@ -13,7 +13,7 @@ const RESPONSE_BACKSTOP_MS = 5000;
 
 // A review session must be exactly the profile the companion uses. `review` refuses on anything else
 // rather than quietly reviewing under a writable sandbox or on a resumed general-purpose thread.
-const REVIEW_PROFILE = { sandbox: 'read-only', approvalPolicy: 'never', ephemeral: true };
+export const REVIEW_PROFILE = { sandbox: 'read-only', approvalPolicy: 'never', ephemeral: true };
 
 export class Daemon {
   constructor({ socketPath, appServerOpts = {}, clientInfo, resume = null, model = null, codexHome = null, cwd = null, profile = null }) {

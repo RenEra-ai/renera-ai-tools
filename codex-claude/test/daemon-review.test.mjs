@@ -5,11 +5,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { connect } from 'node:net';
 import { fileURLToPath } from 'node:url';
-import { Daemon } from '../lib/daemon.mjs';
+import { Daemon, REVIEW_PROFILE } from '../lib/daemon.mjs';
 import { git, makeRepo, rmDir } from './fixtures/helpers.mjs';
+import { CLIENT_INFO } from '../lib/protocol.mjs';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/mock-appserver.mjs', import.meta.url));
-const REVIEW_PROFILE = { sandbox: 'read-only', approvalPolicy: 'never', ephemeral: true };
 
 // Every daemon and temp dir this suite creates, cleaned up at the end no matter how tests exit.
 // The per-test teardown below runs only on the happy path: one failed assertion used to leave a
@@ -54,7 +54,7 @@ async function startDaemon({ mode = 'ok', profile = REVIEW_PROFILE, cwd, appServ
   const daemon = new Daemon({
     socketPath,
     appServerOpts: { command: process.execPath, args: [FIXTURE, '--review-mode', mode, ...appServerArgs] },
-    clientInfo: { name: 'codex-drive', version: '0.1.0' },
+    clientInfo: CLIENT_INFO,
     cwd, profile,
     ...extra,
   });

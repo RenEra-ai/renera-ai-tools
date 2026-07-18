@@ -10,6 +10,9 @@ import { Daemon } from '../lib/daemon.mjs';
 import { sendCommand } from '../lib/client.mjs';
 import { isSafeCommand } from '../lib/safe-command.mjs';
 import { buildReviewPrompt } from '../lib/review-prompt.mjs';
+import { CLIENT_INFO } from '../lib/protocol.mjs';
+import { driveTurn } from '../lib/drive-loop.mjs';
+import { testAppServerOpts } from '../lib/test-appserver.mjs';
 
 // Prefer --prompt-file (avoids shell-quoting/injection from review/plan text with backticks, $(), quotes).
 const pf = process.argv.indexOf('--prompt-file');
@@ -44,54 +47,45 @@ if (planPath && planPath !== '(none)') {
 
 const dir = mkdtempSync(join(tmpdir(), 'cdx-review-'));
 const socketPath = join(dir, 'r.sock');
-const daemon = new Daemon({ socketPath, clientInfo: { name: 'codex-drive', version: '0.1.0' } });
+const daemon = new Daemon({ socketPath, clientInfo: CLIENT_INFO, appServerOpts: testAppServerOpts() });
+// Installed BEFORE the boot: a SIGTERM/SIGINT (an outer runner's cap expiring, a user aborting)
+// kills this process outright, and the `finally` below never runs — orphaning the codex app-server
+// mid-turn. Idempotent so a second signal cannot re-enter teardown.
+let signalled = false;
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => {
+    if (signalled) return;
+    signalled = true;
+    process.stderr.write(`[driver] ${sig} — cleaning up\n`);
+    daemon.stop().catch(() => {}).finally(() => process.exit(sig === 'SIGINT' ? 130 : 143));
+  });
+}
 await daemon.start();
 
 // Bounded wait: a client-side cap (under the ~10-min Bash cap) so a wedged Codex turn can't hang the
 // driver forever; on timeout, interrupt the turn and surface status:'timeout'.
 const WAIT_TIMEOUT_MS = 540000;
-async function driveWait() {
-  try {
-    return await sendCommand(socketPath, { cmd: 'wait' }, { timeoutMs: WAIT_TIMEOUT_MS });
-  } catch (e) {
-    if (!/timeout/i.test(e.message)) throw e;
-    process.stderr.write('[driver] wait timed out — interrupting the turn\n');
-    try { await sendCommand(socketPath, { cmd: 'interrupt' }, { timeoutMs: 10000 }); } catch {}
-    return { status: 'timeout', message: '' };
-  }
-}
 
-// Drain clarifying questions / command-approval prompts, declining commands (a review only needs to
-// read). Records `flags.declinedExec` when a command-exec approval was denied — the same stall the
-// plan driver hits (Codex wants to run the tests, can't, then stops before emitting its verdict).
-async function drain(res, flags) {
-  let guard = 0;
-  while ((res.status === 'question' || res.status === 'approval') && guard++ < 20) {
-    if (res.status === 'approval') {
-      const method = (res.request && res.request.method) || '';
-      const params = (res.request && res.request.params) || {};
-      const isExec = /commandExecution|execCommand/i.test(method);
-      if (isExec && isSafeCommand(params.command)) {
-        process.stderr.write(`[driver] approving safe command: ${String(params.command).slice(0, 140)}\n`);
-        await sendCommand(socketPath, { cmd: 'approve', decision: 'allow' });
-      } else {
-        if (isExec) flags.declinedExec = true;   // a DENIED exec is what triggers the static re-ask
-        process.stderr.write(`[driver] declining approval: ${method}\n`);
-        await sendCommand(socketPath, { cmd: 'approve', decision: 'deny' });
-      }
-    } else {
-      const qs = res.question && res.question.questions;
-      if (!Array.isArray(qs) || qs.length === 0) { process.stderr.write('[driver] malformed question payload — stopping\n'); break; }
-      const q = qs[0];
-      const first = q.options && q.options[0];
-      const answer = first == null ? 'proceed' : (typeof first === 'string' ? first : first.label);
-      process.stderr.write(`[driver] answering question ${q.id} -> ${answer}\n`);
-      await sendCommand(socketPath, { cmd: 'answer', id: q.id, answers: [answer] });
-    }
-    res = await driveWait();
-  }
-  return res;
-}
+// Drain clarifying questions / command-approval prompts via the SHARED engine, declining commands
+// (a review only needs to read). Records `flags.declinedExec` when a command-exec approval was
+// denied — the same stall the plan driver hits (Codex wants to run the tests, can't, then stops
+// before emitting its verdict). Only this policy is driver-specific; the loop mechanics are shared.
+const drive = (flags) => driveTurn(socketPath, {
+  waitTimeoutMs: WAIT_TIMEOUT_MS,
+  log: (m) => process.stderr.write(`[driver] ${m}\n`),
+  decideApproval: (request) => {
+    const method = request.method || '';
+    const params = request.params || {};
+    const isExec = /commandExecution|execCommand/i.test(method);
+    if (isExec && isSafeCommand(params.command)) return 'allow';
+    if (isExec) flags.declinedExec = true;   // a DENIED exec is what triggers the static re-ask
+    return 'deny';
+  },
+  // Unchanged from this driver's own behaviour: a malformed question stops the loop and an
+  // unanswerable shape is handed back, rather than failing the whole round.
+  onMalformedQuestion: 'return',
+  onUnsupported: 'return',
+});
 
 // Mirror the deterministic parser below exactly: ONLY the FINAL non-empty line may be the verdict
 // (trailing text after an earlier VERDICT line → no verdict → the static re-ask must still fire).
@@ -104,15 +98,13 @@ let res = { status: 'failed', message: '' };
 const flags = { declinedExec: false };
 try {
   await sendCommand(socketPath, { cmd: 'send', prompt, effort });
-  res = await driveWait();
-  res = await drain(res, flags);
+  res = await drive(flags);
   // Stall recovery: if we DENIED a command approval AND the review ended without a verdict, re-ask
   // ONCE for a static-only review in the SAME session so a denied test-run doesn't yield UNCLEAR.
   if (res.status === 'completed' && flags.declinedExec && !hasVerdict(res.message)) {
     process.stderr.write('[driver] denied a command + no verdict — re-asking for a static-only review\n');
     await sendCommand(socketPath, { cmd: 'send', effort, prompt: 'Approvals are unavailable in this read-only review session — do NOT attempt to run pytest or any shell command (read-only MCP queries are fine). Complete the review now from reading the changed files (and any read-only MCP lookups) and END with the verdict on its own final line: exactly "VERDICT: NO ISSUES" or "VERDICT: ISSUES FOUND".' });
-    let r2 = await driveWait();
-    r2 = await drain(r2, flags);
+    const r2 = await drive(flags);
     if (r2.message && r2.message.trim()) res = r2;
   }
 } finally {

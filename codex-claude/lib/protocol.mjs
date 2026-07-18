@@ -1,6 +1,14 @@
 // Method/enum constants pinned to the installed Codex app-server protocol.
 // Verified via `codex app-server generate-json-schema` (see plan Task 1, Step 3).
 
+// What this client reports to the app-server on `initialize`. ONE definition: it was inlined in bin
+// and in all three driver scripts, so changing it meant four coordinated edits and a partial update
+// would have different drivers identifying as different clients in Codex-side logs.
+//
+// Deliberately NOT the plugin version: the spec decouples the two, so this does not move on a
+// release bump.
+export const CLIENT_INFO = { name: 'codex-drive', version: '0.1.0' };
+
 export const METHODS = {
   INITIALIZE: 'initialize',
   INITIALIZED: 'initialized',
