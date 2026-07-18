@@ -19,7 +19,13 @@ export function sendCommand(socketPath, cmdObj, { timeoutMs = 0 } = {}) {
     });
     sock.on('error', (e) => {
       if (timer) clearTimeout(timer);
-      reject(new Error(e.code === 'ENOENT' || e.code === 'ECONNREFUSED' ? `no daemon at ${socketPath}` : e.message));
+      const err = new Error(e.code === 'ENOENT' || e.code === 'ECONNREFUSED' ? `no daemon at ${socketPath}` : e.message);
+      // Keep the original code: callers must be able to tell "nothing is listening there" (the
+      // session really is gone) from every other failure. `start` decides whether it may replace
+      // the recorded session on exactly that distinction, and a message-sniffing test would be a
+      // far more fragile place to make it.
+      if (e && e.code) err.code = e.code;
+      reject(err);
     });
   });
 }

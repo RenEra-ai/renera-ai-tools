@@ -9,8 +9,8 @@ import { sendCommand } from '../lib/client.mjs';
 import { StateStore } from '../lib/state.mjs';
 import { Daemon } from '../lib/daemon.mjs';
 import { testAppServerOpts } from '../lib/test-appserver.mjs';
+import { CLIENT_INFO } from '../lib/protocol.mjs';
 
-const CLIENT_INFO = { name: 'codex-drive', version: '0.1.0' };
 
 async function main() {
   const argv = process.argv.slice(2);
@@ -155,7 +155,23 @@ async function startDaemon(parsed, store) {
   const existing = isPrivate ? null : store.readState();
   if (existing && existing.socket) {
     let live = false;
-    try { await sendCommand(existing.socket, { cmd: 'status' }, { timeoutMs: 2000 }); live = true; } catch { /* stale/dead socket → safe to replace */ }
+    try {
+      // 10s, not 2s: scope resolution runs a chain of synchronous git calls in the daemon, and on a
+      // large or cold-cache repo that can block the event loop for several seconds. A busy daemon is
+      // still a LIVE daemon.
+      await sendCommand(existing.socket, { cmd: 'status' }, { timeoutMs: 10000 });
+      live = true;
+    } catch (e) {
+      // A raised cap only moves the threshold; what matters is HOW the probe failed. Only definite
+      // absence — nothing listening on that path — proves the session is gone and its state may be
+      // replaced. A timeout means "busy, or wedged, but something is there", so fail CLOSED rather
+      // than overwrite state.json and orphan a live daemon plus its codex app-server.
+      const gone = e && (e.code === 'ENOENT' || e.code === 'ECONNREFUSED');
+      if (!gone) {
+        fail(`a codex-drive session may still be live at ${existing.socket} (probe: ${e.message}). `
+          + 'Run `codex-drive stop` to end it, or `start --force` to stop it and start fresh.');
+      }
+    }
     if (live && !parsed.flags.force) {
       fail(`a codex-drive session is already live (pid ${existing.pid}, thread ${existing.threadId}). Run \`codex-drive stop\` first, or \`start --force\` to stop it and start fresh.`);
     }

@@ -3,10 +3,11 @@
 // the gated test seam (which the __daemon branch honours precisely so this file can exist).
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
+import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { git, makeRepo, seamEnv, rmDir } from './fixtures/helpers.mjs';
@@ -202,4 +203,37 @@ test('a non-start verb with neither --socket nor an active session fails cleanly
   const r = await cli(['status', '--socket', '/nonexistent/nope.sock'], { env: env() });
   assert.notEqual(r.code, 0);
   assert.match(r.stderr + r.stdout, /no daemon at/);
+});
+
+// 25s: the probe deliberately waits its full 10s cap before deciding, since a busy daemon is a live
+// daemon — so this test costs that cap plus process startup.
+test('start FAILS CLOSED when the recorded session probes as busy rather than absent', { timeout: 25000 }, async () => {
+  // A probe TIMEOUT is not proof of death: the daemon resolves review scope with a chain of
+  // synchronous git calls, so a big repo can block it for seconds. Treating that as "stale" let
+  // `start` overwrite state.json and orphan a live daemon plus its codex app-server. Only definite
+  // absence (nothing listening) may replace the record.
+  const dir = repo();
+  const home = mkdtempSync(join(tmpdir(), 'cdx-home-'));
+  DIRS.push(home);
+  // A socket that accepts connections but never answers — indistinguishable from a busy daemon.
+  const sockPath = join(home, 'busy.sock');
+  const conns = [];
+  const server = createServer((c) => { conns.push(c); /* accept, then deliberately never answer */ });
+  await new Promise((r) => server.listen(sockPath, r));
+  try {
+    mkdirSync(join(home, '.codex-drive'), { recursive: true });
+    writeFileSync(join(home, '.codex-drive', 'state.json'),
+      JSON.stringify({ threadId: 'T-old', pid: 1, socket: sockPath, cwd: dir, model: null }));
+    const r = await cli(['start', '--cwd', dir], { env: { ...env('ok'), HOME: home } });
+    assert.equal(r.code, 1, 'must refuse rather than clobber a possibly-live session');
+    assert.match(r.stderr, /may still be live/);
+    // The record must survive untouched — clobbering it is what orphans the daemon.
+    const state = JSON.parse(readFileSync(join(home, '.codex-drive', 'state.json'), 'utf8'));
+    assert.equal(state.threadId, 'T-old', 'state.json must not be overwritten');
+  } finally {
+    // Destroy the accepted sockets first: server.close() waits on open connections, and the probe's
+    // connection is still there — closing without this hangs the test forever.
+    for (const c of conns) { try { c.destroy(); } catch { /* already gone */ } }
+    await new Promise((r) => server.close(r));
+  }
 });

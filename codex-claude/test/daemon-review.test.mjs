@@ -1,6 +1,6 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { connect } from 'node:net';
@@ -247,7 +247,7 @@ test('REGRESSION: a FAILED turn can never be resurrected by the server\'s later 
   d.app = { respond() {}, respondError() {} };
   d._gen = 2;
   d.turn = d._freshTurn({ status: 'running', awaitingResponse: true, isReview: true, gen: 2 });
-  d._onStartResponse(2, { turn: { id: 'turn-2' }, reviewThreadId: 'T-SOMEONE-ELSE' }, 'review/start', { mode: 'working-tree' });
+  d._onStartResponse(2, { turn: { id: 'turn-2' }, reviewThreadId: 'T-SOMEONE-ELSE' }, 'review/start');
   assert.equal(d.turn.status, 'failed');
   d._onNotification('item/completed', { threadId: 'T-mine', turnId: 'turn-2', item: { type: 'exitedReviewMode', review: 'LEAKED REVIEW TEXT' } });
   d._onNotification('turn/completed', { threadId: 'T-mine', turn: { id: 'turn-2', status: 'completed' } });
@@ -263,7 +263,7 @@ test('REGRESSION: a missing/blank reviewThreadId fails the turn (truthiness is n
     d._gen += 1;
     const gen = d._gen;
     d.turn = d._freshTurn({ status: 'running', awaitingResponse: true, isReview: true, gen });
-    d._onStartResponse(gen, { turn: { id: 't' }, reviewThreadId: bad }, 'review/start', { mode: 'working-tree' });
+    d._onStartResponse(gen, { turn: { id: 't' }, reviewThreadId: bad }, 'review/start');
     assert.equal(d.turn.status, 'failed', `reviewThreadId ${JSON.stringify(bad)} must fail, not be waved through`);
   }
 });
@@ -295,7 +295,7 @@ test('REGRESSION: a stale same-thread server request cannot park a turn whose id
   assert.equal(d.turn.parked, null, 'must not park before the response makes turn.id authoritative');
   assert.equal(d.turn.status, 'running');
   // Once the response lands, the replay judges it: stale -> declined AND answered, still not parked.
-  d._onStartResponse(1, { turn: { id: 'turn-NEW' } }, 'turn/start', null);
+  d._onStartResponse(1, { turn: { id: 'turn-NEW' } }, 'turn/start');
   assert.equal(d.turn.parked, null, 'the stale request must be declined on replay, never parked');
   assert.equal(responded.length, 1, 'and it must still get a response — an unanswered request wedges the server turn');
 });
@@ -338,4 +338,230 @@ test('foreign-thread notifications never touch the active turn', () => {
   // A foreign thread's completion must not finish our turn.
   d._onNotification('turn/completed', { threadId: 'T-other', turn: { id: 'turn-1', status: 'completed' } });
   assert.equal(d.turn.status, 'running');
+});
+
+// --- Phase 2: turn finalization, request settlement, cancellation ---
+
+// A stub app that RECORDS every response, so tests can assert not just that a server request was
+// settled but in what ORDER relative to the interrupt.
+function stubApp(log = []) {
+  return {
+    log,
+    respond(id) { log.push(`respond:${id}`); },
+    respondError(id) { log.push(`respondError:${id}`); },
+    request(method) { log.push(method); return Promise.resolve({}); },
+  };
+}
+
+function unitDaemon({ log = [], threadId = 'T-mine' } = {}) {
+  const d = new Daemon({ socketPath: '/tmp/cdx-unit-none.sock', clientInfo: {}, cwd: process.cwd() });
+  d.threadId = threadId;
+  d.app = stubApp(log);
+  return d;
+}
+
+test('a REJECTED turn/start is finalized (no resurrection) and does NOT quarantine the session', () => {
+  // The rejection arm used to set status='failed' without `finalized`, so the server's later
+  // notifications walked it back to completed. And the quarantine must NOT fire here: an error
+  // RESPONSE means no server turn was ever created, so a routine bad parameter must stay recoverable.
+  const d = unitDaemon();
+  d._gen = 1;
+  d.turn = d._freshTurn({ status: 'running', awaitingResponse: true, isReview: true, gen: 1 });
+  d._finalizeTurn('review/start failed: simulated');       // what the rejection arm now calls
+  assert.equal(d.turn.status, 'failed');
+  assert.equal(d.turn.finalized, true);
+  d._onNotification('item/completed', { threadId: 'T-mine', turnId: 'x', item: { type: 'exitedReviewMode', review: 'LEAKED' } });
+  d._onNotification('turn/completed', { threadId: 'T-mine', turn: { id: 'x', status: 'completed' } });
+  assert.equal(d.turn.status, 'failed', 'a finalized turn must stay finalized');
+  assert.ok(!/LEAKED/.test(d.turn.message || ''));
+  assert.equal(d.restartRequired, false, 'a rejected start must not demand a restart');
+});
+
+test('a foreign reviewThreadId fails the turn WITHOUT quarantining (the id was known)', () => {
+  // The response carried an authoritative turn id, so _isStaleTurn can keep the session honest.
+  // Quarantining here would brick a session that has everything it needs.
+  const d = unitDaemon();
+  d._gen = 1;
+  d.turn = d._freshTurn({ status: 'running', awaitingResponse: true, isReview: true, gen: 1 });
+  d._onStartResponse(1, { turn: { id: 'turn-9' }, reviewThreadId: 'T-SOMEONE-ELSE' }, 'review/start');
+  assert.equal(d.turn.status, 'failed');
+  assert.equal(d.turn.id, 'turn-9', 'the id must be adopted before the validation that rejects it');
+  assert.equal(d.restartRequired, false, 'a known id means no quarantine is needed');
+});
+
+test('failing a turn ANSWERS every server request the server is still blocked on', () => {
+  const log = [];
+  const d = unitDaemon({ log });
+  d._gen = 1;
+  d.turn = d._freshTurn({ status: 'running', awaitingResponse: true, gen: 1 });
+  // One parked, one buffered behind the outstanding start response.
+  d.turn.parked = { id: 5, kind: 'approval', method: 'item/commandExecution/requestApproval', params: {} };
+  d.turn.buffered.push(['__serverRequest', { id: 6, method: 'item/tool/requestUserInput', params: {} }]);
+  d._finalizeTurn('boom');
+  assert.deepEqual(log, ['respond:5', 'respondError:6'], 'both must be answered exactly once');
+  assert.equal(d.turn.parked, null);
+  // Idempotent: settling again must not double-answer a JSON-RPC id.
+  d._settleOutstandingRequests();
+  assert.deepEqual(log, ['respond:5', 'respondError:6']);
+});
+
+test('interrupt answers the parked request BEFORE it awaits turn/interrupt', async () => {
+  // Ordering, not eventual settlement: the server can withhold turn/completed while its own request
+  // is unanswered, so interrupting with one parked could block on a turn blocked on us.
+  const log = [];
+  const d = unitDaemon({ log });
+  d._gen = 1;
+  d.turn = d._freshTurn({ status: 'awaiting_input', gen: 1, id: 'turn-1' });
+  d.turn.parked = { id: 5, kind: 'approval', method: 'item/commandExecution/requestApproval', params: {} };
+  const res = await d._interrupt();
+  assert.deepEqual(res, { ok: true });
+  assert.deepEqual(log, ['respond:5', 'turn/interrupt'], 'the response must precede the interrupt RPC');
+});
+
+test('interrupt works on a turn whose start response never arrived, then quarantines the session', async () => {
+  // It used to answer {error:'no_active_turn'} for exactly the case the documented recovery exists
+  // for, leaving the turn running forever and every later command answering `busy`.
+  const d = unitDaemon();
+  d._gen = 1;
+  d.turn = d._freshTurn({ status: 'running', awaitingResponse: true, gen: 1 });   // id still null
+  assert.deepEqual(await d._interrupt(), { ok: true });
+  assert.equal(d.turn.status, 'interrupted');
+  assert.equal(d.turn.finalized, true);
+  assert.equal(d.restartRequired, true, 'an unidentifiable orphan turn must quarantine the session');
+  // The session refuses new turns honestly rather than risking the orphan's traffic being adopted.
+  assert.equal((d._startTurn('hi', undefined)).error, 'restart_required');
+  // ...and an idle session reports no active turn, as before.
+  d.turn = d._freshTurn();
+  assert.deepEqual(await d._interrupt(), { error: 'no_active_turn' });
+});
+
+test('a late start response cancels server-side ONLY when a cancel was requested', () => {
+  for (const cancelRequested of [true, false]) {
+    const log = [];
+    const d = unitDaemon({ log });
+    d._gen = 1;
+    d.turn = d._freshTurn({ status: 'interrupted', gen: 1, finalized: true, cancelRequested });
+    d._onStartResponse(1, { turn: { id: 'turn-LATE' } }, 'review/start');
+    assert.equal(d._lastTurnId, 'turn-LATE', 'the late id is always recorded for stale filtering');
+    assert.deepEqual(log, cancelRequested ? ['turn/interrupt'] : [],
+      `cancelRequested=${cancelRequested} must ${cancelRequested ? '' : 'NOT '}interrupt`);
+    assert.equal(d.turn.status, 'interrupted', 'a late response must not mutate a finalized turn');
+  }
+});
+
+test('a failed/interrupted completion arriving pre-response finalizes AT ONCE (no wedge)', () => {
+  for (const st of ['failed', 'interrupted']) {
+    const d = unitDaemon();
+    d._gen = 1;
+    d.turn = d._freshTurn({ status: 'running', awaitingResponse: true, gen: 1 });
+    d._onNotification('turn/completed', { threadId: 'T-mine', turn: { id: 'turn-1', status: st } });
+    assert.equal(d.turn.status, st, `${st} must finalize immediately, not sit buffered forever`);
+    assert.equal(d.turn.finalized, true);
+    assert.equal(d.turn.backstop, null);
+  }
+});
+
+test('a STALE completion for the PREVIOUS turn cannot finalize the new one', () => {
+  // The pre-response window has no _isStaleTurn to lean on (it needs a truthy turn.id), and one
+  // review legitimately spans several ids — so without the last-known-id filter a straggler from
+  // turn 1 would kill a healthy turn 2 AND quarantine the session.
+  const d = unitDaemon();
+  d._gen = 1;
+  d.turn = d._freshTurn({ status: 'running', awaitingResponse: true, gen: 1 });
+  d._onStartResponse(1, { turn: { id: 'turn-1' } }, 'turn/start');
+  d._beginTurn({});                                   // turn 2 opens; turn-1 becomes the last known id
+  assert.equal(d._lastTurnId, 'turn-1');
+  d._onNotification('turn/completed', { threadId: 'T-mine', turn: { id: 'turn-1', status: 'interrupted' } });
+  assert.equal(d.turn.status, 'running', 'turn 2 must survive turn 1\'s straggler');
+  assert.equal(d.restartRequired, false, 'and it must not quarantine the session');
+});
+
+test('a late server request cannot re-open a finalized turn', () => {
+  for (const status of ['completed', 'failed']) {
+    const log = [];
+    const d = unitDaemon({ log });
+    d._gen = 1;
+    d.turn = d._freshTurn({ status, gen: 1, finalized: true, message: 'the real result', id: status === 'completed' ? 'turn-1' : null });
+    d._onServerRequest({ id: 7, method: 'item/commandExecution/requestApproval', params: { threadId: 'T-mine', turnId: 'turn-1' } });
+    assert.equal(d.turn.parked, null, 'a terminal turn must never park');
+    assert.equal(d.turn.status, status, 'and must not walk back to awaiting_input');
+    assert.equal(d.turn.message, 'the real result', 'the finished result must survive');
+    assert.equal(log.length, 1, 'the request must still be answered exactly once');
+  }
+});
+
+test('a notification with no params is dropped instead of killing the daemon', () => {
+  const d = unitDaemon();
+  d._gen = 1;
+  d.turn = d._freshTurn({ status: 'running', gen: 1, id: 'turn-1' });
+  // Reached _dispatchNotification and threw a TypeError inside the child's stdout data handler,
+  // taking the whole daemon down mid-turn.
+  assert.doesNotThrow(() => d._onNotification('item/agentMessage/delta'));
+  assert.doesNotThrow(() => d._onNotification('turn/completed', undefined));
+  assert.doesNotThrow(() => d._onNotification('item/agentMessage/delta', null));
+  assert.equal(d.turn.status, 'running', 'state must be untouched');
+});
+
+test('replayed buffer entries go through the SAME guards as live traffic, in arrival order', () => {
+  const d = unitDaemon();
+  d._gen = 1;
+  d.turn = d._freshTurn({ status: 'running', awaitingResponse: true, gen: 1 });
+  // Buffered while the id was unknown: a foreign-thread delta, a params-less entry, and two real ones.
+  d._onNotification('item/agentMessage/delta', { threadId: 'T-OTHER', turnId: 'x', delta: 'FOREIGN' });
+  d._onNotification('item/agentMessage/delta', undefined);
+  d._onNotification('item/agentMessage/delta', { threadId: 'T-mine', turnId: 'turn-1', delta: 'one ' });
+  d._onNotification('item/agentMessage/delta', { threadId: 'T-mine', turnId: 'turn-1', delta: 'two' });
+  d._onStartResponse(1, { turn: { id: 'turn-1' } }, 'turn/start');   // triggers the replay
+  assert.equal(d.turn.buffer, 'one two', 'order preserved, foreign + malformed dropped');
+});
+
+test('the generation token drops a superseded response on BOTH arms', () => {
+  // Without it a late response from a turn that has been superseded overwrites the live turn's id
+  // and state — cross-turn corruption the whole buffering scheme exists to prevent.
+  const d = unitDaemon();
+  d._gen = 1;
+  d.turn = d._freshTurn({ status: 'running', awaitingResponse: true, gen: 1 });
+  d._beginTurn({});                                   // now gen 2; gen-1's response is superseded
+  d._onStartResponse(1, { turn: { id: 'turn-OLD' } }, 'turn/start');
+  assert.equal(d.turn.id, null, 'a superseded response must not set the live turn\'s id');
+  assert.equal(d.turn.status, 'running');
+  // The rejection arm carries the same guard: superseded rejections must not finalize a live turn.
+  const gen = d._gen;
+  d._beginTurn({});
+  d.turn.gen = gen + 1;
+  assert.equal(d.turn.status, 'running');
+});
+
+test('END-TO-END: a turn that fails before its response no longer wedges the daemon', { timeout: 15000 }, async () => {
+  // The wedge: only a SUCCESSFUL completion armed the backstop, so a failed one whose response never
+  // arrived was buffered forever — `wait` hung, every later command answered `busy`, and `interrupt`
+  // said there was no active turn. This must resolve promptly and WITHOUT the 5s backstop.
+  const { dir } = repo();
+  const { socketPath } = await startDaemon({ cwd: dir, mode: 'failbeforeresponse' });
+  await rpcCall(socketPath, { cmd: 'review' });
+  const t0 = Date.now();
+  const res = await rpcCall(socketPath, { cmd: 'wait' });
+  assert.equal(res.status, 'failed');
+  assert.ok(Date.now() - t0 < 4000, 'must finalize at once, not wait out the backstop');
+  const st = await rpcCall(socketPath, { cmd: 'status' });
+  assert.equal(st.turnStatus, 'failed');
+  // The session is quarantined (that turn's id never reached us), and it says so honestly rather
+  // than silently risking the orphan's traffic being adopted by a later turn.
+  assert.equal(st.restartRequired, true);
+  assert.match((await rpcCall(socketPath, { cmd: 'review' })).error, /restart_required/);
+});
+
+test('END-TO-END: git scope, app-server spawn cwd and thread/start cwd are ONE cwd', { timeout: 15000 }, async () => {
+  // The spec's P1 rule. Only the git-scope leg was covered before: the mock discarded thread/start's
+  // params and nothing observed the child's cwd, so dropping either would have shipped undetected —
+  // live Codex resolving the review against the caller's directory while git-scope read another.
+  const { dir } = repo();
+  const record = join(mkdtempSync(join(tmpdir(), 'cdx-rec-')), 'thread-start.json');
+  const { socketPath } = await startDaemon({ cwd: dir, appServerArgs: ['--record', record] });
+  const started = await rpcCall(socketPath, { cmd: 'review' });
+  assert.equal(started.ok, true, 'the git-scope leg resolved against the review repo');
+  const rec = JSON.parse(readFileSync(record, 'utf8'));
+  // realpath: macOS resolves /var -> /private/var, so the raw strings differ while the dirs match.
+  assert.equal(realpathSync(rec.params.cwd), realpathSync(dir), 'thread/start cwd must be the review cwd');
+  assert.equal(realpathSync(rec.cwd), realpathSync(dir), 'the app-server child must be spawned there too');
 });

@@ -38,6 +38,16 @@ export class Daemon {
     this._sockets = new Set(); // open client connections (so stop() can tear them down)
     this._stopped = false;
     this._appExited = false;
+    // SESSION state (not per-turn). When a turn ends locally while its authoritative id is still
+    // unknown, the server may keep streaming for a turn we can never identify — and _isStaleTurn
+    // needs a truthy turn.id to judge anything. Rather than let that orphan's traffic be attributed
+    // to a later turn, the session refuses new turns until it is restarted. Fail-closed and honest.
+    this.restartRequired = false;
+    this.restartReason = null;
+    // The last id we ever learned authoritatively. A completion carrying THIS id belongs to the
+    // previous turn, so it can be dropped even while the current turn's id is still unknown — the
+    // pre-response stale filter that _isStaleTurn cannot provide.
+    this._lastTurnId = null;
   }
 
   _freshTurn(extra = {}) {
@@ -45,6 +55,7 @@ export class Daemon {
       id: null, status: 'idle', buffer: '', planBuffer: '', planText: null, parked: null,
       message: null, isPlan: false, isReview: false, reviewText: null,
       gen: this._gen, awaitingResponse: false, buffered: [], backstop: null, finalized: false,
+      cancelRequested: false,
       ...extra,
     };
   }
@@ -122,7 +133,12 @@ export class Daemon {
       // against the repo this daemon actually runs in.
       case 'read': return { ...this._completedResult(), cwd: this.cwd };
       case 'interrupt': return this._interrupt();
-      case 'status': return { threadId: this.threadId, turnStatus: this.turn.status, parked: this.turn.parked ? this.turn.parked.kind : null, cwd: this.cwd };
+      case 'status': return {
+        threadId: this.threadId, turnStatus: this.turn.status,
+        parked: this.turn.parked ? this.turn.parked.kind : null, cwd: this.cwd,
+        restartRequired: this.restartRequired,
+        ...(this.restartRequired ? { restartReason: this.restartReason } : {}),
+      };
       case 'stop': return { ok: true }; // actual teardown happens in _onClient after this response
       default: return { error: 'unknown_cmd' };
     }
@@ -135,6 +151,7 @@ export class Daemon {
   }
 
   _startTurn(prompt, mode, effort, approvalPolicy) {
+    if (this.restartRequired) return { error: 'restart_required', reason: this.restartReason };
     if (this.turn.status === 'running' || this.turn.status === 'awaiting_input') return { error: 'busy' };
     // mode: 'plan' | 'default' | undefined. plan & default set collaborationMode (model required);
     // undefined = plain send (no collaborationMode; inherits the thread's current mode).
@@ -165,7 +182,10 @@ export class Daemon {
   // a daemon boot plus a full Codex turn that ends in an unexplained blank review.
   _startReview(base, scope) {
     if (this.turn.status === 'running' || this.turn.status === 'awaiting_input') return { error: 'busy' };
+    // Profile first: it is STRUCTURAL — a thread cannot be re-profiled, so restarting would not help.
+    // Reporting restart_required here would send the caller off to do something that cannot work.
     if (!this._hasReviewProfile()) return { error: 'wrong_thread_profile' };
+    if (this.restartRequired) return { error: 'restart_required', reason: this.restartReason };
     let resolved, params;
     try {
       resolved = resolveReviewTarget(this.cwd, { base, scope });
@@ -174,7 +194,7 @@ export class Daemon {
       return { error: e.message };
     }
     this._beginTurn({ isReview: true });
-    this._sendStart(METHODS.REVIEW_START, params, 'review/start', resolved);
+    this._sendStart(METHODS.REVIEW_START, params, 'review/start');
     return { ok: true, status: 'running', scope: resolved.label };
   }
 
@@ -188,6 +208,13 @@ export class Daemon {
   }
 
   _beginTurn(extra) {
+    // Defensive: the busy guard should make this unreachable, but the turn object is replaced on the
+    // next line and with it the only reference to anything still parked — which is exactly how a
+    // server request came to be dropped unanswered.
+    this._settleOutstandingRequests();
+    // Remember the outgoing turn's id so a straggling completion for it can be recognised as stale
+    // during the next turn's pre-response window, when _isStaleTurn has no id to work with.
+    if (this.turn.id) this._lastTurnId = this.turn.id;
     this._clearBackstop();
     this._gen += 1;
     // awaitingResponse gates the notification path: everything that arrives before the response is
@@ -201,21 +228,24 @@ export class Daemon {
   // while a resolved response only schedules a microtask, so later notifications in that same chunk
   // still run first — awaiting fixes no ordering. It would also withhold this command's reply while
   // sendCommand has no default timeout. Buffering (not awaiting) is what actually orders things.
-  _sendStart(method, params, label, resolved = null) {
+  _sendStart(method, params, label) {
     const gen = this._gen;
     this.app.request(method, params).then(
-      (res) => this._onStartResponse(gen, res, label, resolved),
+      (res) => this._onStartResponse(gen, res, label),
       (err) => {
         // Generation check: a late rejection from a superseded turn must never touch live state.
         if (this.turn.gen !== gen) return;
         // Status guard mirrors _onAppExit's: if the app already died, that failure message wins.
         if (this.turn.status === 'running' || this.turn.status === 'awaiting_input') {
-          this.turn.awaitingResponse = false;
-          this.turn.buffered = [];
-          this._clearBackstop();
-          this.turn.status = 'failed';
-          this.turn.message = `${label} failed: ${err.message}`;
-          this._resolveWaiters();
+          // Through the finalizer, so `finalized` is set: the server keeps streaming after it
+          // rejects a turn, and without that flag a late exitedReviewMode + turn/completed walked
+          // this very turn back to `completed`, carrying the text we just refused.
+          //
+          // NOT quarantined: an error RESPONSE means the server never created a turn at all, so
+          // there is no orphan to be confused by later. Quarantining here would turn an ordinary
+          // recoverable rejection (a bad --base, a rejected approvalPolicy) into a session that
+          // demands a restart.
+          this._finalizeTurn(`${label} failed: ${err.message}`);
         }
       },
     );
@@ -227,44 +257,121 @@ export class Daemon {
   // turn/completed and item/completed carry the RESPONSE's id. Adopting turn/started's id (as this
   // daemon used to) therefore makes _isStaleTurn drop the review's own completion and hang `wait`
   // forever. There is deliberately NO "ids disagree -> fail" rule: for reviews they legitimately do.
-  _onStartResponse(gen, res, label, resolved) {
+  _onStartResponse(gen, res, label) {
+    const lateId = res && res.turn && res.turn.id;
     if (this.turn.gen !== gen) return;                 // superseded turn: log-and-drop
-    if (!this.turn.awaitingResponse) return;           // already resolved by the backstop or an exit
-    const id = res && res.turn && res.turn.id;
-    if (!id) return this._failTurn(`${label} response carried no turn id`);
+    if (!this.turn.awaitingResponse) {
+      // The turn already ended (backstop, app exit, an immediate failed completion, or an explicit
+      // interrupt) and only now do we learn its id. Record it so the orphan's later traffic can be
+      // recognised as stale, and cancel it server-side ONLY if a cancel was actually requested —
+      // spec: a late superseded response is otherwise simply dropped, not acted on.
+      if (lateId) this._lastTurnId = lateId;
+      if (lateId && this.turn.cancelRequested && !this._appExited) {
+        // Synchronous try AS WELL as .catch: JsonRpc.request throws synchronously once the child's
+        // stdin is gone, and this runs in exactly the teardown window where that happens.
+        try { this.app.request(METHODS.TURN_INTERRUPT, { threadId: this.threadId, turnId: lateId }).catch(() => {}); }
+        catch { /* transport already gone — the turn dies with the app */ }
+      }
+      return;
+    }
+    if (!lateId) {
+      // No id at all: a server turn may well be running that we can never name again.
+      return this._finalizeTurn(`${label} response carried no turn id`, { quarantine: true });
+    }
+    // Adopt the id BEFORE any validation that can fail. The reviewThreadId gate below used to run
+    // first, so a foreign-thread failure finalized with turn.id still null — throwing away the very
+    // id that makes _isStaleTurn work, and (once quarantine existed) bricking a session that had
+    // everything it needed to stay honest.
+    this.turn.id = lateId;
+    this._lastTurnId = lateId;
     // delivery:'inline' means the review runs on the requesting thread. Live-confirmed, but validated
     // at runtime anyway: a foreign reviewThreadId would mean we are about to attribute someone else's
     // review to this session. STRICT equality — a missing/blank value must fail too, not sail through
     // a truthiness guard: "we couldn't tell whose review this is" is not a reason to accept it.
-    if (resolved && res.reviewThreadId !== this.threadId) {
-      return this._failTurn(`${label} returned an unusable reviewThreadId (${JSON.stringify(res.reviewThreadId)})`);
+    // Gated on the turn's OWN recorded kind, not on an optional side-channel argument that a future
+    // call path could forget to thread through.
+    if (this.turn.isReview && res.reviewThreadId !== this.threadId) {
+      return this._finalizeTurn(`${label} returned an unusable reviewThreadId (${JSON.stringify(res.reviewThreadId)})`);
     }
-    this.turn.id = id;
     this.turn.awaitingResponse = false;
     this._clearBackstop();
     // Replay in arrival order, now that the id is known and the stale filter can do its job.
-    // Server requests replay through the same path they'd have taken live, so a stale one is
+    // Notifications go back through _onNotification — NOT straight to _dispatchNotification — so the
+    // params and foreign-thread guards there really are the single authoritative filter rather than
+    // one that replayed traffic quietly bypasses. awaitingResponse is already false, so nothing
+    // re-buffers. Server requests replay through the path they'd have taken live, so a stale one is
     // declined-and-answered rather than parked.
     const pending = this.turn.buffered;
     this.turn.buffered = [];
     for (const [m, p] of pending) {
       if (m === '__serverRequest') this._onServerRequest(p);
-      else this._dispatchNotification(m, p);
+      else this._onNotification(m, p);
     }
   }
 
-  // A turn that ends is OVER. Without `finalized`, failing a turn left turn.id null, so _isStaleTurn
-  // (which needs a truthy turn.id) filtered nothing and the server's still-streaming notifications
-  // walked the turn from `failed` back to `completed` — handing back the very review text we rejected.
-  // Probed: mismatched reviewThreadId -> failed -> late exitedReviewMode + turn/completed -> completed.
-  _failTurn(message) {
+  // THE single terminal writer. Every non-`completed` ending goes through here, so "a new failure
+  // path forgot to set finalized" is not expressible — which is the bug class that let a rejected
+  // turn walk back to `completed`: _isStaleTurn needs a truthy turn.id, so with none it filtered
+  // nothing and the server's still-streaming notifications resurrected the turn, handing back the
+  // very review text we had just refused.
+  //
+  // Two policies, because the call sites genuinely differ:
+  //  - settleRequests: answer everything the server is still waiting on. FALSE only when the
+  //    transport is dead (app exit) — see _onAppExit.
+  //  - quarantine: this ending leaves an orphan turn we can never identify. TRUE only where a
+  //    server-side turn really exists but its id never reached us. Inferring it from `!turn.id`
+  //    would be wrong in both directions: a rejected start has no server turn at all (nothing to
+  //    confuse us later), while the reviewThreadId gate runs before turn.id is assigned even though
+  //    the response carried a perfectly good id.
+  _finalizeTurn(message, { status = 'failed', settleRequests = true, quarantine = false, reason = null } = {}) {
+    if (settleRequests) this._settleOutstandingRequests();
+    this.turn.parked = null;
     this.turn.awaitingResponse = false;
     this.turn.buffered = [];
     this._clearBackstop();
-    this.turn.status = 'failed';
+    this.turn.status = status;
     this.turn.message = message;
     this.turn.finalized = true;
+    if (quarantine && !this.restartRequired) {
+      this.restartRequired = true;
+      this.restartReason = reason || message;
+    }
     this._resolveWaiters();
+  }
+
+  // Answer ONE server request we are abandoning. Deny approvals in their own shape; anything whose
+  // shape we cannot fake (permissions-shaped approvals throw in buildApprovalResponse) gets a
+  // deterministic JSON-RPC error. The inner try/fall-through matters: a respond() that throws must
+  // still leave a respondError attempt behind, or the request stays unanswered — the exact wedge
+  // this helper exists to prevent.
+  _answerServerRequest(req) {
+    const c = classifyServerRequest(req.method, req.params);
+    if (c.kind === 'approval') {
+      try { return this.app.respond(req.id, buildApprovalResponse('deny', req.method)); }
+      catch { /* unfakeable shape (or a write failure) — fall through to a plain error */ }
+    }
+    try { this.app.respondError(req.id, -32600, 'request abandoned: the turn ended'); }
+    catch { /* transport gone: nothing left to answer with */ }
+  }
+
+  // Answer everything the server is still blocked on: the parked request and any that were buffered
+  // behind an outstanding start response. IDEMPOTENT by construction — whatever it answers it also
+  // removes — so _interrupt settling and a later _finalizeTurn settling again can never emit two
+  // responses for one JSON-RPC id.
+  //
+  // Buffered NOTIFICATIONS are deliberately left in place: only __serverRequest entries are removed,
+  // so an interrupt that races an in-flight start response does not discard replayable traffic.
+  _settleOutstandingRequests() {
+    if (this.turn.parked) {
+      const p = this.turn.parked;
+      this.turn.parked = null;
+      this._answerServerRequest(p);
+    }
+    if (this.turn.buffered && this.turn.buffered.length) {
+      const pending = this.turn.buffered.filter(([m]) => m === '__serverRequest');
+      this.turn.buffered = this.turn.buffered.filter(([m]) => m !== '__serverRequest');
+      for (const [, req] of pending) this._answerServerRequest(req);
+    }
   }
 
   // Armed ONLY when a turn/completed is buffered — i.e. the turn finished but the response that
@@ -276,7 +383,7 @@ export class Daemon {
     const t = setTimeout(() => {
       if (this.turn.gen !== gen || !this.turn.awaitingResponse) return;
       // Drop the buffer: a completed-but-never-validated review must NEVER be released as clean.
-      this._failTurn('turn completed but the start response never arrived (unvalidated)');
+      this._finalizeTurn('turn completed but the start response never arrived (unvalidated)', { quarantine: true });
     }, RESPONSE_BACKSTOP_MS);
     t.unref?.();   // never hold the process open on a backstop
     this.turn.backstop = t;
@@ -357,7 +464,32 @@ export class Daemon {
   }
 
   async _interrupt() {
-    if (!this.turn.id) return { error: 'no_active_turn' };
+    // Judged on whether a turn is RUNNING, not on whether we happen to know its id. The old
+    // `!this.turn.id` test refused exactly the case the documented recovery exists for: a turn whose
+    // start response never arrived, which is precisely when the caller needs to cancel.
+    if (this.turn.status !== 'running' && this.turn.status !== 'awaiting_input') {
+      return { error: 'no_active_turn' };
+    }
+    this.turn.cancelRequested = true;
+    // Answer any parked request FIRST, before awaiting anything. The server can withhold
+    // turn/completed while its own request sits unanswered, so interrupting with one parked could
+    // block on a turn that is itself blocked on us.
+    this._settleOutstandingRequests();
+    // awaiting_input always implies a parked request; settling cleared it, so the status must move
+    // too or _parkedResult would dereference a null parked.
+    if (this.turn.status === 'awaiting_input') this.turn.status = 'running';
+    if (!this.turn.id) {
+      // Nothing addressable server-side yet. End it locally so `wait` resolves and the busy guard
+      // lifts; if the response lands later, _onStartResponse cancels it for real (cancelRequested).
+      // Quarantined: a server turn probably IS running under an id we will never be able to match,
+      // and while turn.id is null _isStaleTurn cannot tell its traffic from a new turn's.
+      this._finalizeTurn('interrupted before the turn id was known', {
+        status: 'interrupted',
+        quarantine: true,
+        reason: 'a turn was interrupted before its id was known; this session can no longer tell that turn\'s traffic apart from a new one\'s',
+      });
+      return { ok: true };
+    }
     await this.app.request(METHODS.TURN_INTERRUPT, { threadId: this.threadId, turnId: this.turn.id });
     return { ok: true };
   }
@@ -388,18 +520,38 @@ export class Daemon {
   // ordering sound; it also subsumes the "completion barrier" idea, because a turn/completed that
   // arrives early is simply buffered and cannot finalise anything.
   _onNotification(method, params) {
-    // Drop foreign traffic at the door, before it can be buffered or arm anything. The AppServer
-    // forwards every notification unfiltered, including delegated/subagent threads.
-    if (params && this._isForeignThread(params.threadId)) return;
+    // A notification with no params carries nothing attributable. Dropped HERE, above the buffer, so
+    // it can never be replayed either — reaching _dispatchNotification threw a TypeError inside the
+    // child's stdout data handler, which kills the whole daemon mid-turn.
+    if (!params || typeof params !== 'object') return;
+    // Drop foreign traffic at the door, before it can be buffered or arm anything. THE single
+    // authoritative filter: replay routes back through here rather than round it.
+    if (this._isForeignThread(params.threadId)) return;
     if (this.turn.awaitingResponse) {
-      this.turn.buffered.push([method, params]);
-      // The turn is already over but the response that authorises reading it hasn't arrived. We can
-      // no longer assume it ever will, so bound the wait rather than hanging `wait` forever.
-      // Only a SUCCESSFUL completion needs the response: interrupted/failed are already fail-closed
-      // and carry nothing we would have had to validate.
-      if (method === NOTIFY.TURN_COMPLETED && params && params.turn && params.turn.status === 'completed') {
-        this._armResponseBackstop();
+      if (method === NOTIFY.TURN_COMPLETED && params.turn) {
+        // A completion carrying the PREVIOUS turn's id belongs to that turn. While our own id is
+        // unknown _isStaleTurn cannot say so, and one review legitimately spans several ids (see
+        // _onStartResponse), so without this a straggler could finalise the turn that follows it.
+        if (params.turn.id && params.turn.id === this._lastTurnId) return;
+        const endStatus = params.turn.status;
+        // Only a SUCCESSFUL completion needs the response before it can be read, so it is buffered
+        // and bounded by the backstop. failed/interrupted carry nothing to validate and must finalise
+        // AT ONCE: buffering them meant a turn that ended badly before its response arrived sat
+        // forever — `wait` hung, every later command answered `busy`, and interrupt refused to help.
+        if (endStatus === 'failed' || endStatus === 'interrupted') {
+          return this._finalizeTurn(`turn ${endStatus} before its start response arrived`, {
+            status: endStatus,
+            quarantine: true,
+            reason: `a turn ended (${endStatus}) before its id was known; this session can no longer tell that turn's traffic apart from a new one's`,
+          });
+        }
+        if (endStatus === 'completed') {
+          this.turn.buffered.push([method, params]);
+          this._armResponseBackstop();
+          return;
+        }
       }
+      this.turn.buffered.push([method, params]);
       return;
     }
     this._dispatchNotification(method, params);
@@ -409,9 +561,9 @@ export class Daemon {
     // A finalized turn is OVER. The server keeps streaming after we reject a turn, and without this
     // a failed turn walks back to `completed` carrying the text we just refused.
     if (this.turn.finalized) return;
-    // Foreign-thread filter, applied to every kind: delegated/subagent threads emit their own
-    // lifecycle, and adopting any of it would attribute another thread's work to this turn.
-    if (params && this._isForeignThread(params.threadId)) return;
+    // No foreign-thread re-check here: _onNotification is the ONE place that filter lives, and every
+    // path into this method — live traffic and replayed buffer entries alike — comes through it.
+    // Maintaining a second copy invited a future edit to delete whichever one looked redundant.
 
     if (method === NOTIFY.TURN_STARTED) {
       // Deliberately NOT a source of turn.id — see _onStartResponse. For a review, turn/started's id
@@ -466,18 +618,19 @@ export class Daemon {
   }
 
   _onAppExit(info) {
-    // The codex app-server died. Pending RPCs were already rejected by AppServer; here we make
-    // sure an in-flight turn (and anyone blocked on `wait`) resolves instead of hanging forever.
+    // The codex app-server died. Make sure an in-flight turn (and anyone blocked on `wait`) resolves
+    // instead of hanging forever.
+    //
+    // settleRequests:false is the ONE declared exception to "every server request gets exactly one
+    // response": that rule holds only WHILE THE TRANSPORT IS WRITABLE, and the child's stdin is now
+    // gone — a respond() here writes into a dead pipe, it does not answer anyone. (AppServer's
+    // rejectAll settles our OUTBOUND requests only; inbound ones are simply abandoned with the
+    // transport.) Not quarantined either: with no server left there is no orphan turn that could
+    // confuse a later one, and the session is finished regardless.
     this._appExited = true;
     if (this.turn.status === 'running' || this.turn.status === 'awaiting_input') {
-      this.turn.awaitingResponse = false;   // nothing more is coming; stop buffering
-      this.turn.buffered = [];
-      this._clearBackstop();
-      this.turn.status = 'failed';
-      this.turn.message = `codex app-server exited${info && info.code != null ? ` (code=${info.code})` : ''}`;
-      this.turn.parked = null;
-      this.turn.finalized = true;
-      this._resolveWaiters();
+      this._finalizeTurn(`codex app-server exited${info && info.code != null ? ` (code=${info.code})` : ''}`,
+        { settleRequests: false });
     }
   }
 
@@ -493,9 +646,13 @@ export class Daemon {
       this.turn.buffered.push(['__serverRequest', req]);
       return;
     }
-    const foreign = this._isForeignThread(p.threadId) || this._isStaleTurn(p.turnId);
+    // `finalized` belongs in this test: a turn that has ended must never be re-opened by a late
+    // request. Without it, parking one walked a completed turn back to `awaiting_input` — the read
+    // reported no message and the finished review was lost — and on a failed id-less turn it left
+    // the busy guard refusing every new turn while interrupt said there was none.
+    const notOurs = this._isForeignThread(p.threadId) || this._isStaleTurn(p.turnId) || this.turn.finalized;
     const c = classifyServerRequest(req.method, req.params);
-    if (foreign) {
+    if (notOurs) {
       // Decline in the request's own shape when we know it; otherwise a deterministic JSON-RPC error.
       if (c.kind === 'approval') {
         try { return this.app.respond(req.id, buildApprovalResponse('deny', req.method)); } catch { /* fall through */ }
