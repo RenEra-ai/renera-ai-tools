@@ -38,14 +38,28 @@ do NOT design the plan yourself and you do NOT edit code. Your final message is 
    `node ${CLAUDE_PLUGIN_ROOT}/scripts/plan-round.mjs --prompt-file <tmp> --out <the --out path> --effort max`
    It prints `STATUS: …`, `PLAN_FILE: …`, then `=== PLAN ===` and the body.
 
-4. **Check it's real.** If `STATUS` is not exactly `completed`, or it shows `(empty)`/`(no-plan)`, or
+4. **If the driver is KILLED rather than finishing** — exit 143/130, or any exit with no `STATUS:`
+   line — the outer Bash cap (~10 min) ended it, not Codex; the turn was alive. Retry ONCE via the
+   owned-session fallback, the ONE sanctioned alternative to this driver (the turn survives ACROSS
+   Bash calls, which is the whole point):
+   ```bash
+   S=$(node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --private --cwd "$PWD" | jq -r .socket)
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs plan "$(cat <the prompt file>)" --effort max --socket "$S"
+   # then in SEPARATE Bash calls until terminal — {"status":"timeout"} means STILL RUNNING, wait again:
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait --timeout-ms 300000 --socket "$S"
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs read --out <the --out path> --socket "$S"
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs stop --socket "$S"
+   ```
+   ALWAYS `stop`, even on failure, or the detached daemon and its app-server are orphaned.
+
+5. **Check it's real.** If `STATUS` is not exactly `completed`, or it shows `(empty)`/`(no-plan)`, or
    the body is only a reasoning preamble: rebuild the prompt file with a nudge appended ("Approvals
    are unavailable in this read-only planning session — do NOT run pytest or any shell command
    (read-only MCP queries are fine). Emit the FULL file-by-file plan as plain text NOW from reading
    the source files and any read-only MCP lookups only; do not stop after the reasoning preamble.")
    and run the driver ONCE more (same `--out`).
 
-5. **Report.** If a usable plan was saved, return EXACTLY two lines:
+6. **Report.** If a usable plan was saved, return EXACTLY two lines:
    ```
    STATUS: DONE
    PLAN_PATH: <the absolute path from PLAN_FILE>

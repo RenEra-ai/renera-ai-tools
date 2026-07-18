@@ -250,8 +250,14 @@ wall-clock: the same review measured **36 s at `low`** vs **>560 s (never comple
 - **Permissions approval** — `item/permissions/requestApproval` comes back from `wait` as
   `{status:"approval"}`, but `approve` then fails with `{error:"permissions approval not supported…"}`
   (its response shape differs from exec/file approvals). `interrupt` the turn rather than approving it.
-- **Stuck `wait`** — pass `--timeout-ms <N>`; on timeout you get `{status:"timeout"}` (exit 2),
-  then `interrupt`.
+- **Stuck `wait`** — pass `--timeout-ms <N>`; on timeout you get `{status:"timeout"}` (exit 2).
+  A timeout does **not** stop the turn — it is a poll result, so waiting again is usually right.
+  `interrupt` only when you actually want the turn cancelled.
+- **A long turn killed by the Bash cap** — `review-round`/`plan-round` now treat their own wait cap
+  as a poll interval (they re-wait instead of interrupting), but a single Bash call still cannot
+  outlive its ~10-minute cap. For a genuinely long review/plan, drive an owned session instead:
+  `start --private` → `send`/`plan` → repeated `wait --timeout-ms 300000 --socket S` in SEPARATE
+  Bash calls → `read --out` → `stop`. The turn survives across calls; each call stays bounded.
 - **After upgrading Codex** — the Plan-mode / question surfaces are experimental and may drift
   across Codex versions; re-run `doctor` and sanity-check a `plan` turn.
 
