@@ -18,73 +18,71 @@
 // only guarantees that a clean exit means a REAL review of a NON-EMPTY diff actually happened.
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
-import { Daemon } from '../lib/daemon.mjs';
+import { join, resolve } from 'node:path';
+import { Daemon, REVIEW_PROFILE } from '../lib/daemon.mjs';
 import { sendCommand } from '../lib/client.mjs';
+import { CLIENT_INFO } from '../lib/protocol.mjs';
+import { parseArgs, assertOnlyFlags } from '../lib/verbs.mjs';
+import { resolveReviewTarget, fullSha, SCOPES } from '../lib/git-scope.mjs';
+import { driveTurn } from '../lib/drive-loop.mjs';
 import { testAppServerOpts, testWaitMs } from '../lib/test-appserver.mjs';
 
-const USAGE = 'usage: commit-review-round.mjs [--base <ref> | --scope <auto|working-tree|branch>] [--cwd <repo>]';
+const USAGE = `usage: commit-review-round.mjs [--base <ref> | --scope <${SCOPES.join('|')}>] [--cwd <repo>]`;
 
-// Client-side cap, under the ~10-min Bash cap so a wedged turn can't hang the gate forever. NOTE
-// this is a WAIT cap, unrelated to the daemon's own short response backstop.
+// TOTAL wall-clock budget for the whole drive, under the ~10-min Bash cap so a wedged turn can't
+// hang the gate. It used to be applied PER wait, so each parked round reset it and the real bound
+// was 20 rounds × 9 minutes ≈ 3 hours — the opposite of the guarantee the comment claimed.
 const WAIT_TIMEOUT_MS = testWaitMs() ?? 540000;
 
-// The review thread profile the daemon requires for `review` (the companion's exact profile).
-const REVIEW_PROFILE = { sandbox: 'read-only', approvalPolicy: 'never', ephemeral: true };
+const ALLOWED_FLAGS = ['base', 'scope', 'cwd'];
 
 function die(msg, code) {
   process.stderr.write(`[commit-review] ${msg}\n`);
+  if (code === 1) process.stderr.write(`${USAGE}\n`);   // spec: usage errors print usage
   process.exit(code);
 }
 
-// --- preflight: fail fast, BEFORE booting a daemon. The daemon re-validates authoritatively; this
-// is purely so a typo costs a millisecond instead of a Codex turn. ---
-const KNOWN_FLAGS = new Set(['base', 'scope', 'cwd']);
-
-function flag(name) {
-  const i = process.argv.indexOf(`--${name}`);
-  if (i < 0) return undefined;
-  const v = process.argv[i + 1];
-  // Blank counts as missing. `--cwd ""` would otherwise pass this guard, then lose to
-  // `flag('cwd') || process.cwd()` and review whatever directory we happen to be in — a review of
-  // the wrong repository that still exits 0.
-  if (v === undefined || v.startsWith('--') || !v.trim()) die(`--${name} requires a non-blank value\n${USAGE}`, 1);
-  return v;
-}
-
-// Every argument must be recognised. An UNKNOWN flag is a hard error, never ignored: silently
-// ignoring one means the caller asked for something specific, got a full unscoped review of the cwd
-// instead, and pays for a live Codex turn to find out. (`--help` hitting that path is how this was
-// found.) Values are skipped by the same walk, so `--base <sha>` is not mistaken for a flag.
+// --- argv ---
+// `--help` BEFORE anything else: this script once ran a full live review for `--help`, which is the
+// bug that started the whole flag-validation cleanup.
 const argv = process.argv.slice(2);
-for (let i = 0; i < argv.length; i++) {
-  const a = argv[i];
-  if (a === '--help' || a === '-h') { process.stdout.write(`${USAGE}\n`); process.exit(0); }
-  if (!a.startsWith('--')) die(`unexpected argument '${a}'\n${USAGE}`, 1);
-  const key = a.slice(2);
-  // Mirror the CLI parser's refusal: `--base=<sha>` must never be silently read as "no base given",
-  // which would review auto scope instead of the requested range.
-  if (key.includes('=')) die(`--${key.split('=')[0]}=value is not supported; use \`--${key.split('=')[0]} <value>\`\n${USAGE}`, 1);
-  if (!KNOWN_FLAGS.has(key)) die(`unknown flag --${key}\n${USAGE}`, 1);
-  i++;   // skip this flag's value; flag() re-reads and validates it below
-}
+if (argv.includes('--help') || argv.includes('-h')) { process.stdout.write(`${USAGE}\n`); process.exit(0); }
 
-const base = flag('base');
-const scope = flag('scope');
-const cwd = flag('cwd') || process.cwd();
-if (base !== undefined && scope !== undefined) die(`--base and --scope are mutually exclusive\n${USAGE}`, 1);
-if (scope !== undefined && !['auto', 'working-tree', 'branch'].includes(scope)) die(`invalid --scope '${scope}'\n${USAGE}`, 1);
+// The SHARED parser, not a hand-rolled one. The local copy had already drifted: it was first-wins on
+// a repeated flag while the CLI is last-wins, so `--base A --base B` reviewed a different range
+// depending on which entry point you used. It also brings the `--flag=value` rejection for free.
+let parsed;
 try {
-  execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd, stdio: 'ignore' });
-} catch {
-  die(`not a git repository: ${cwd}\n${USAGE}`, 1);
+  parsed = parseArgs(['commit-review-round', ...argv]);
+  assertOnlyFlags(parsed.flags, ALLOWED_FLAGS);
+} catch (e) {
+  die(e.message, 1);
 }
+if (parsed.positional !== undefined) die(`unexpected argument '${parsed.positional}'`, 1);
 
-// Identify what was ACTUALLY reviewed, not merely what was asked for: a SCOPE line that only echoes
-// the request cannot distinguish a real review from one anchored at the wrong commit.
-function headSha() {
-  try { return execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim(); } catch { return null; }
+const flagValue = (name) => {
+  if (!(name in parsed.flags)) return undefined;
+  const v = parsed.flags[name];
+  // Blank counts as missing. `--cwd ""` would otherwise pass, then lose to `|| process.cwd()` and
+  // review whatever directory we happen to be in — a review of the wrong repository that exits 0.
+  if (typeof v !== 'string' || !v.trim()) die(`--${name} requires a non-blank value`, 1);
+  return v;
+};
+
+const base = flagValue('base');
+const scope = flagValue('scope');
+const cwd = resolve(flagValue('cwd') || process.cwd());
+
+// --- preflight: the FULL authoritative validation, before a daemon exists ---
+// Not a hand-rolled subset: this is the same resolveReviewTarget the daemon runs, so the repo check,
+// the scope enum, --base/--scope exclusivity, ref resolution, ancestry and the empty-delta rule all
+// come from one place and cannot drift. It costs milliseconds and it runs with a SCRUBBED git env,
+// unlike the raw execFileSync calls it replaces — which answered from whatever GIT_DIR the caller
+// happened to export. The daemon still re-validates authoritatively.
+try {
+  resolveReviewTarget(cwd, { base, scope });
+} catch (e) {
+  die(e.message, 1);
 }
 
 let daemon = null;
@@ -95,6 +93,26 @@ let scopeLabel = '(unresolved)';
 let fatal = null;   // set instead of exiting: process.exit() inside the try would SKIP the finally,
                     // leaking the temp dir and orphaning a codex app-server.
 
+async function teardown() {
+  try { if (daemon) await daemon.stop(); } catch { /* best effort */ }
+  try { if (dir) rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  daemon = null; dir = null;
+}
+
+// Installed BEFORE any resource exists, so a signal that lands mid-boot still cleans up. Without
+// these, a SIGTERM (the gate's own runner capping out, a user aborting) killed the process outright:
+// the `finally` never ran, the temp dir leaked and the codex app-server was orphaned mid-review,
+// still burning a turn. Idempotent — a second signal must not re-enter teardown.
+let signalled = false;
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => {
+    if (signalled) return;
+    signalled = true;
+    process.stderr.write(`[commit-review] ${sig} — cleaning up\n`);
+    teardown().finally(() => process.exit(sig === 'SIGINT' ? 130 : 143));
+  });
+}
+
 try {
   // Boot INSIDE the try: review-round.mjs boots before its try, so a boot failure there skips
   // cleanup and leaks a temp dir (and possibly an app-server).
@@ -102,7 +120,7 @@ try {
   const socketPath = join(dir, 'r.sock');
   daemon = new Daemon({
     socketPath,
-    clientInfo: { name: 'codex-drive', version: '0.1.0' },
+    clientInfo: CLIENT_INFO,
     cwd,
     profile: REVIEW_PROFILE,
     appServerOpts: testAppServerOpts(),
@@ -116,7 +134,21 @@ try {
     fatal = { msg: started.error, code: started.error === 'busy' ? 2 : 1 };
   } else {
     scopeLabel = started.scope || scopeLabel;
-    const res = await drive(socketPath);
+    const res = await driveTurn(socketPath, {
+      waitTimeoutMs: WAIT_TIMEOUT_MS,
+      deadlineMs: WAIT_TIMEOUT_MS,        // TOTAL, not per-wait
+      log: (m) => process.stderr.write(`[commit-review] ${m}\n`),
+      // Deny approvals. NOT because a review never runs commands — it runs many (git diff, ls, …) —
+      // but because under approvalPolicy:'never' + sandbox:'read-only' they never PROMPT. An approval
+      // arriving here means the thread profile is wrong, so granting it would be the actual mistake.
+      //
+      // A permissions-shaped one is different again: protocol.mjs deliberately refuses to fake its
+      // response shape, so denying it just errors. The spec maps it straight to interrupt + failed,
+      // which is what 'fail' does — instead of 20 futile deny/wait rounds ending in the drain guard.
+      decideApproval: (req) => (req.method === 'item/permissions/requestApproval' ? 'fail' : 'deny'),
+      onMalformedQuestion: 'fail',
+      onUnsupported: 'fail',
+    });
     status = res.status;
     reviewText = res.message || '';
   }
@@ -126,64 +158,7 @@ try {
   await teardown();
 }
 
-if (fatal) {
-  process.stderr.write(`[commit-review] ${fatal.msg}\n`);
-  if (fatal.code === 1) process.stderr.write(`${USAGE}\n`);
-  process.exit(fatal.code);
-}
-
-async function teardown() {
-  try { if (daemon) await daemon.stop(); } catch { /* best effort */ }
-  try { if (dir) rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
-  daemon = null; dir = null;
-}
-
-async function drive(socketPath) {
-  let res = await waitOnce(socketPath);
-  let guard = 0;
-  while ((res.status === 'question' || res.status === 'approval') && guard++ < 20) {
-    if (res.status === 'approval') {
-      // Deny. NOT because a review never runs commands — it runs many (git diff, ls, …) — but
-      // because under approvalPolicy:'never' + sandbox:'read-only' they never PROMPT. An approval
-      // arriving here means the thread profile is wrong, so granting it would be the actual mistake.
-      process.stderr.write(`[commit-review] denying approval: ${(res.request && res.request.method) || '?'}\n`);
-      await sendCommand(socketPath, { cmd: 'approve', decision: 'deny' });
-    } else {
-      const qs = res.question && res.question.questions;
-      if (!Array.isArray(qs) || !qs.length) return interruptAndFail(socketPath, 'malformed question payload');
-      const q = qs[0];
-      const first = q.options && q.options[0];
-      const answer = first == null ? 'proceed' : (typeof first === 'string' ? first : first.label);
-      await sendCommand(socketPath, { cmd: 'answer', id: q.id, answers: [answer] });
-    }
-    res = await waitOnce(socketPath);
-  }
-  if (res.status === 'question' || res.status === 'approval') {
-    return interruptAndFail(socketPath, 'drain guard exhausted');
-  }
-  // 'unsupported' = a parked shape this client cannot answer (an elicitation, or a permissions-shaped
-  // approval whose response shape protocol.mjs deliberately refuses to fake). Do not pretend the
-  // review continues.
-  if (res.status === 'unsupported') return interruptAndFail(socketPath, `unsupported request: ${(res.request && res.request.method) || '?'}`);
-  return res;
-}
-
-async function waitOnce(socketPath) {
-  try {
-    return await sendCommand(socketPath, { cmd: 'wait' }, { timeoutMs: WAIT_TIMEOUT_MS });
-  } catch (e) {
-    if (!/timeout/i.test(e.message)) throw e;
-    process.stderr.write('[commit-review] wait cap expired — interrupting\n');
-    try { await sendCommand(socketPath, { cmd: 'interrupt' }, { timeoutMs: 10000 }); } catch { /* best effort */ }
-    return { status: 'timeout', message: '' };
-  }
-}
-
-async function interruptAndFail(socketPath, why) {
-  process.stderr.write(`[commit-review] ${why} — interrupting\n`);
-  try { await sendCommand(socketPath, { cmd: 'interrupt' }, { timeoutMs: 10000 }); } catch { /* best effort */ }
-  return { status: 'failed', message: '' };
-}
+if (fatal) die(fatal.msg, fatal.code);
 
 // --- output ---
 const clean = status === 'completed' && reviewText.trim().length > 0;
@@ -191,6 +166,11 @@ if (reviewText) process.stdout.write(reviewText.endsWith('\n') ? reviewText : re
 // Blank text on a 'completed' turn is NOT a clean review — the daemon already fails such a turn, and
 // this is the second line of defence, because the gate reads "no findings" as "ship it".
 process.stdout.write(`STATUS: ${clean ? 'completed' : (status === 'timeout' ? 'timeout' : 'failed')}\n`);
-const head = headSha();
+// Identify what was ACTUALLY reviewed, not merely what was asked for: a SCOPE line that only echoes
+// the request cannot distinguish a real review from one anchored at the wrong commit. Scrubbed env
+// (via git-scope), so an exported GIT_DIR cannot make this name a different repo's HEAD than the one
+// the daemon reviewed.
+const head = fullSha(cwd, 'HEAD');
 process.stdout.write(`SCOPE: ${scopeLabel}${head ? ` head=${head}` : ''}\n`);
-process.exit(clean ? 0 : (status === 'timeout' ? 2 : 2));
+// timeout and failed are deliberately the SAME exit code: both mean "no trustworthy review".
+process.exit(clean ? 0 : 2);

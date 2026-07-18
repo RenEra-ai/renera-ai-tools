@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync, readdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -98,7 +98,8 @@ test('a parked approval is denied and the review still completes', async () => {
   const { dir } = repo();
   const r = await script(['--cwd', dir], { env: env('approve') });
   assert.equal(r.code, 0);
-  assert.match(r.stderr, /denying approval/);
+  // Wording comes from the shared drive-loop now ("declining"), so all three drivers log alike.
+  assert.match(r.stderr, /declining approval/);
   assert.equal(lastTwo(r.stdout)[0], 'STATUS: completed');
   rmSync(dir, { recursive: true, force: true });
 });
@@ -193,5 +194,71 @@ test('temp dirs are cleaned up on every exit path', async () => {
   await script(['--cwd', dir, '--scope', 'bogus'], { env: env('ok') });  // preflight, no boot
   const after = readdirSync(tmpdir()).filter((f) => f.startsWith('cdx-creview-')).length;
   assert.equal(after, before, 'no cdx-creview- temp dir may survive');
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a bad --base fails in the preflight, before any app-server is spawned', async () => {
+  // The spec promises a git-scope error "before any daemon boot" for this — the single most likely
+  // gate mistake. It used to pay for a full codex app-server boot and an ephemeral thread first,
+  // only to be rejected daemon-side. The --record sentinel is the proof: it exists only if the mock
+  // app-server was actually started.
+  const { dir } = repo();
+  const sentinel = join(dir, 'spawned.json');
+  const seam = {
+    ...process.env,
+    CODEX_DRIVE_TEST_MODE: '1',
+    CODEX_DRIVE_TEST_APPSERVER: JSON.stringify([process.execPath, FIXTURE, '--review-mode', 'ok', '--record', sentinel]),
+  };
+  const r = await script(['--cwd', dir, '--base', 'deadbeefdeadbeef'], { env: seam });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /--base ref does not resolve/);
+  assert.match(r.stderr, /usage:/, 'usage errors must still print USAGE (spec error table)');
+  assert.equal(existsSync(sentinel), false, 'no app-server may be spawned for a rejected --base');
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a repeated flag is LAST-wins, matching the CLI parser (it used to be first-wins here)', async () => {
+  // The same command line reviewed a different range depending on whether it entered through the
+  // CLI verb or this script. Now there is one parser, so `--scope bogus` last must lose the race.
+  const { dir } = repo();
+  const r = await script(['--cwd', dir, '--scope', 'working-tree', '--scope', 'bogus'], { env: env('ok') });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /invalid --scope 'bogus'/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a permissions-shaped approval interrupts at once, not 20 futile deny rounds', async () => {
+  // protocol.mjs refuses to fake this response shape, so denying it only errors. The spec maps it
+  // straight to interrupt + STATUS: failed; previously the script deny-looped until the drain guard
+  // gave up, emitting 20 misleading "denying approval" lines on the way.
+  const { dir } = repo();
+  const r = await script(['--cwd', dir], { env: env('permissions') });
+  assert.equal(r.code, 2);
+  assert.equal(lastTwo(r.stdout)[0], 'STATUS: failed');
+  assert.match(r.stderr, /interrupting/);
+  assert.doesNotMatch(r.stderr, /declining approval/, 'it must not try to answer this shape at all');
+  assert.equal((r.stderr.match(/interrupting/g) || []).length, 1, 'exactly one interrupt, no deny loop');
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('SIGTERM tears down instead of orphaning the app-server mid-review', async () => {
+  const { dir } = repo();
+  const before = readdirSync(tmpdir()).filter((f) => f.startsWith('cdx-creview-')).length;
+  const child = execFile(process.execPath, [SCRIPT, '--cwd', dir], {
+    env: env('noresponse', { CODEX_DRIVE_TEST_WAIT_MS: '60000' }),
+  });
+  let err = '';
+  child.stderr.on('data', (d) => { err += d; });
+  const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
+  await new Promise((r) => setTimeout(r, 1200));
+  child.kill('SIGTERM');
+  const { code, signal } = await Promise.race([exited, new Promise((r) => setTimeout(() => r({ code: 'HUNG' }), 8000))]);
+  assert.notEqual(code, 'HUNG', 'did not exit on SIGTERM');
+  // EXACTLY 143 from our handler: an unhandled SIGTERM also kills the process but skips teardown,
+  // so accepting signal-death would let the orphan bug pass.
+  assert.equal(code, 143, `expected 143 via teardown, got code=${code} signal=${signal}`);
+  assert.match(err, /SIGTERM — cleaning up/);
+  const after = readdirSync(tmpdir()).filter((f) => f.startsWith('cdx-creview-')).length;
+  assert.equal(after, before, 'the temp dir must not survive a signal');
   rmSync(dir, { recursive: true, force: true });
 });
