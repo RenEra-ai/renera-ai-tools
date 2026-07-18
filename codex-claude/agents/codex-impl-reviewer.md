@@ -87,20 +87,44 @@ re-author it.
 
    **If the driver is KILLED rather than finishing** — exit 143/130, or any exit with no `STATUS:`
    line at all — the outer Bash cap (~10 min) ended it, not Codex. The turn was alive. Retry ONCE
-   via the owned-session fallback, which is the ONE sanctioned alternative to this driver (it exists
-   precisely because a single Bash call cannot outlive that cap; the turn survives ACROSS calls):
+   via the owned-session fallback, the ONE sanctioned alternative to this driver (it exists because a
+   single Bash call cannot outlive that cap; the turn survives ACROSS calls).
+
+   Three things this recipe must get right, all of which are easy to get wrong:
+   - **Shell variables do NOT survive between Bash calls** (only the working directory does). Capture
+     the socket into a FILE and read it back with `$(cat …)` in every later call.
+   - **With a plan, you must rebuild the combined prompt yourself.** `review-round` appended the plan
+     in memory via `--plan-file`; the CLI's `send` has no such flag, so a naive retry would review
+     WITHOUT the plan and could return a false clean verdict. Concatenate with `cat` (never retype
+     the plan — that would paraphrase it).
+   - **`wait` can come back parked**, not just terminal or timed out. Answer it and wait again.
+
    ```bash
-   S=$(node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --private --cwd "$PWD" | jq -r .socket)
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs send "$(cat <that temp prompt file>)" --effort max --socket "$S"
-   # then, in SEPARATE Bash calls, until the status is terminal (repeat as many times as it takes):
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait --timeout-ms 300000 --socket "$S"
-   # a {"status":"timeout"} reply means STILL RUNNING — wait again; it does NOT interrupt the turn
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs read --socket "$S"
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs stop --socket "$S"
+   # 1. Build the combined prompt (omit the plan block entirely when you have no PLAN_PATH).
+   { cat <that temp prompt file>; printf '\n\n=== ARCHITECT DESIGN PLAN (verbatim) ===\n'; cat <PLAN_PATH>; } > /tmp/cdx-fallback-prompt.txt
+
+   # 2. Start an owned session and persist the socket path to a file (NOT a shell variable).
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --private --cwd "$PWD" > /tmp/cdx-fallback-start.json
+   node -e "console.log(JSON.parse(require('fs').readFileSync('/tmp/cdx-fallback-start.json','utf8')).socket)" > /tmp/cdx-fallback-sock.txt
+
+   # 3. Send the turn.
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs send "$(cat /tmp/cdx-fallback-prompt.txt)" --effort max --socket "$(cat /tmp/cdx-fallback-sock.txt)"
+
+   # 4. Then, in SEPARATE Bash calls, until the status is terminal — repeat as many times as needed:
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait --timeout-ms 300000 --socket "$(cat /tmp/cdx-fallback-sock.txt)"
+   #    {"status":"timeout"}  -> STILL RUNNING; wait again (it does NOT interrupt the turn)
+   #    {"status":"question"} -> answer, then wait again:
+   #        … answer --id <the question id> --option 1 --socket "$(cat /tmp/cdx-fallback-sock.txt)"
+   #    {"status":"approval"} -> a review only needs to READ; decline, then wait again:
+   #        … approve --decision deny --socket "$(cat /tmp/cdx-fallback-sock.txt)"
+   #    completed | failed | interrupted -> done, go to step 5
+
+   # 5. Read the result, then ALWAYS stop.
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs read --socket "$(cat /tmp/cdx-fallback-sock.txt)"
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs stop --socket "$(cat /tmp/cdx-fallback-sock.txt)"
    ```
-   ALWAYS `stop` when done, even on failure, or the detached daemon and its app-server are orphaned.
-   If the fallback also fails to produce a review, say so and end with `VERDICT: UNCLEAR` — never
-   invent findings.
+   ALWAYS `stop`, even on failure, or the detached daemon and its app-server are orphaned. If the
+   fallback also produces no review, say so and end with `VERDICT: UNCLEAR` — never invent findings.
 
 5. **Return a structured report** (this exact shape):
    - First a `Reviewed files: <comma-separated paths>` line (the files Codex actually inspected).

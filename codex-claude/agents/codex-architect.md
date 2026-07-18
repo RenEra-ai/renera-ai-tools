@@ -41,14 +41,25 @@ do NOT design the plan yourself and you do NOT edit code. Your final message is 
 4. **If the driver is KILLED rather than finishing** — exit 143/130, or any exit with no `STATUS:`
    line — the outer Bash cap (~10 min) ended it, not Codex; the turn was alive. Retry ONCE via the
    owned-session fallback, the ONE sanctioned alternative to this driver (the turn survives ACROSS
-   Bash calls, which is the whole point):
+   Bash calls, which is the whole point).
+
+   Shell variables do NOT survive between Bash calls (only the working directory does), so persist
+   the socket to a FILE. And `wait` can return PARKED, not just terminal or timed out — answer it and
+   wait again, or the loop never ends.
+
    ```bash
-   S=$(node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --private --cwd "$PWD" | jq -r .socket)
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs plan "$(cat <the prompt file>)" --effort max --socket "$S"
-   # then in SEPARATE Bash calls until terminal — {"status":"timeout"} means STILL RUNNING, wait again:
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait --timeout-ms 300000 --socket "$S"
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs read --out <the --out path> --socket "$S"
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs stop --socket "$S"
+   # start, and persist the socket path to a file (NOT a shell variable)
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --private --cwd "$PWD" > /tmp/cdx-plan-start.json
+   node -e "console.log(JSON.parse(require('fs').readFileSync('/tmp/cdx-plan-start.json','utf8')).socket)" > /tmp/cdx-plan-sock.txt
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs plan "$(cat <the prompt file>)" --effort max --socket "$(cat /tmp/cdx-plan-sock.txt)"
+
+   # then in SEPARATE Bash calls until terminal:
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait --timeout-ms 300000 --socket "$(cat /tmp/cdx-plan-sock.txt)"
+   #   {"status":"timeout"}  -> STILL RUNNING; wait again
+   #   {"status":"question"} -> answer --id <id> --option 1 --socket "$(cat /tmp/cdx-plan-sock.txt)", then wait again
+   #   {"status":"approval"} -> approve --decision deny --socket "$(cat /tmp/cdx-plan-sock.txt)", then wait again
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs read --out <the --out path> --socket "$(cat /tmp/cdx-plan-sock.txt)"
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs stop --socket "$(cat /tmp/cdx-plan-sock.txt)"
    ```
    ALWAYS `stop`, even on failure, or the detached daemon and its app-server are orphaned.
 

@@ -45,6 +45,12 @@ if (planPath && planPath !== '(none)') {
   prompt = buildReviewPrompt(prompt, planText);
 }
 
+// Resolved BEFORE any resource exists: testWaitMs() THROWS on an ambient
+// CODEX_DRIVE_TEST_WAIT_MS that is not gated by test mode, and doing that after the daemon
+// booted leaked it — the throw happens outside the cleanup `finally` below.
+// It also lets the offline suite shrink the cap so the re-wait path is reachable in a test.
+const WAIT_TIMEOUT_MS = testWaitMs() ?? 540000;
+
 const dir = mkdtempSync(join(tmpdir(), 'cdx-review-'));
 const socketPath = join(dir, 'r.sock');
 const daemon = new Daemon({ socketPath, clientInfo: CLIENT_INFO, appServerOpts: testAppServerOpts() });
@@ -64,9 +70,6 @@ await daemon.start();
 
 // Bounded wait: a client-side cap (under the ~10-min Bash cap) so a wedged Codex turn can't hang the
 // driver forever; on timeout, interrupt the turn and surface status:'timeout'.
-// testWaitMs() lets the offline suite shrink this cap so the re-wait path is reachable in a
-// test rather than only after nine real minutes.
-const WAIT_TIMEOUT_MS = testWaitMs() ?? 540000;
 
 // Drain clarifying questions / command-approval prompts via the SHARED engine, declining commands
 // (a review only needs to read). Records `flags.declinedExec` when a command-exec approval was

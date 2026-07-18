@@ -29,6 +29,12 @@ if (!model) {
   process.exit(1);
 }
 
+// Resolved BEFORE any resource exists: testWaitMs() THROWS on an ambient
+// CODEX_DRIVE_TEST_WAIT_MS that is not gated by test mode, and doing that after the daemon
+// booted leaked it — the throw happens outside the cleanup `finally` below.
+// It also lets the offline suite shrink the cap so the re-wait path is reachable in a test.
+const WAIT_TIMEOUT_MS = testWaitMs() ?? 540000;
+
 const dir = mkdtempSync(join(tmpdir(), 'cdx-plan-'));
 const socketPath = join(dir, 'p.sock');
 const daemon = new Daemon({ socketPath, clientInfo: CLIENT_INFO, model, appServerOpts: testAppServerOpts() });
@@ -47,9 +53,6 @@ await daemon.start();
 
 // Bounded wait: a client-side cap (under the ~10-min Bash cap) so a wedged Codex turn can't hang the
 // driver forever; on timeout, interrupt the turn and surface status:'timeout'.
-// testWaitMs() lets the offline suite shrink this cap so the re-wait path is reachable in a
-// test rather than only after nine real minutes.
-const WAIT_TIMEOUT_MS = testWaitMs() ?? 540000;
 // Drain any clarifying questions / command-approval prompts via the SHARED engine, declining
 // commands (Plan mode is read-only). Records into `flags.declinedExec` whether a command-exec
 // approval was denied — the classic Plan-mode stall (Codex wants to run pytest, can't, then stops
