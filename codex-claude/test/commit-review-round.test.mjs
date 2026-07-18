@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync, readdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, readdirSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { git, makeRepo, seamEnv } from './fixtures/helpers.mjs';
+import { git, makeRepo, seamEnv, pidAlive, pollUntil } from './fixtures/helpers.mjs';
 
 const run = promisify(execFile);
 const SCRIPT = fileURLToPath(new URL('../scripts/commit-review-round.mjs', import.meta.url));
@@ -16,7 +16,7 @@ const repo = (opts = {}) => makeRepo({ prefix: 'cdx-crr-', ...opts });
 
 // Every path is exercised offline through the gated seam — no live Codex, no network. This is what
 // review-round.test.mjs:10 documents it CANNOT do (its happy path is live-only).
-const env = (mode, extra = {}) => seamEnv(FIXTURE, mode, extra);
+const env = (mode, extra = {}, fixtureArgs = []) => seamEnv(FIXTURE, mode, extra, fixtureArgs);
 
 async function script(args, opts = {}) {
   try {
@@ -244,21 +244,36 @@ test('a permissions-shaped approval interrupts at once, not 20 futile deny round
 test('SIGTERM tears down instead of orphaning the app-server mid-review', async () => {
   const { dir } = repo();
   const before = readdirSync(tmpdir()).filter((f) => f.startsWith('cdx-creview-')).length;
+  // The lifecycle file names the EXACT app-server child, so this test proves that child died —
+  // exit 143 + the cleanup log only prove the handler ran, which stays green with daemon.stop()
+  // deleted (the very orphan bug this test exists to guard).
+  const lifePath = join(dir, 'mock.pid');
   const child = execFile(process.execPath, [SCRIPT, '--cwd', dir], {
-    env: env('noresponse', { CODEX_DRIVE_TEST_WAIT_MS: '60000' }),
+    env: env('noresponse', { CODEX_DRIVE_TEST_WAIT_MS: '60000' }, ['--lifecycle-file', lifePath]),
   });
-  let err = '';
-  child.stderr.on('data', (d) => { err += d; });
-  const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
-  await new Promise((r) => setTimeout(r, 1200));
-  child.kill('SIGTERM');
-  const { code, signal } = await Promise.race([exited, new Promise((r) => setTimeout(() => r({ code: 'HUNG' }), 8000))]);
-  assert.notEqual(code, 'HUNG', 'did not exit on SIGTERM');
-  // EXACTLY 143 from our handler: an unhandled SIGTERM also kills the process but skips teardown,
-  // so accepting signal-death would let the orphan bug pass.
-  assert.equal(code, 143, `expected 143 via teardown, got code=${code} signal=${signal}`);
-  assert.match(err, /SIGTERM — cleaning up/);
-  const after = readdirSync(tmpdir()).filter((f) => f.startsWith('cdx-creview-')).length;
-  assert.equal(after, before, 'the temp dir must not survive a signal');
-  rmSync(dir, { recursive: true, force: true });
+  let mockPid = null;
+  try {
+    let err = '';
+    child.stderr.on('data', (d) => { err += d; });
+    const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
+    await new Promise((r) => setTimeout(r, 1200));
+    await pollUntil(() => existsSync(lifePath), { label: 'mock pid file' });
+    mockPid = Number(readFileSync(lifePath, 'utf8'));
+    assert.ok(pidAlive(mockPid), 'the mock app-server must be alive before the SIGTERM');
+    child.kill('SIGTERM');
+    const { code, signal } = await Promise.race([exited, new Promise((r) => setTimeout(() => r({ code: 'HUNG' }), 8000))]);
+    assert.notEqual(code, 'HUNG', 'did not exit on SIGTERM');
+    // EXACTLY 143 from our handler: an unhandled SIGTERM also kills the process but skips teardown,
+    // so accepting signal-death would let the orphan bug pass.
+    assert.equal(code, 143, `expected 143 via teardown, got code=${code} signal=${signal}`);
+    assert.match(err, /SIGTERM — cleaning up/);
+    await pollUntil(() => !pidAlive(mockPid), { label: 'app-server death' });
+    const after = readdirSync(tmpdir()).filter((f) => f.startsWith('cdx-creview-')).length;
+    assert.equal(after, before, 'the temp dir must not survive a signal');
+  } finally {
+    // A failed assertion must not let the TEST become the orphaner it guards against.
+    if (mockPid && pidAlive(mockPid)) { try { process.kill(mockPid, 'SIGKILL'); } catch { /* best effort */ } }
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

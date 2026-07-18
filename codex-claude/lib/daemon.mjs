@@ -250,13 +250,19 @@ export class Daemon {
         if (this.turn.gen !== gen) return;
         // Status guard mirrors _onAppExit's: if the app already died, that failure message wins.
         if (this.turn.status === 'running' || this.turn.status === 'awaiting_input') {
-          // Through the finalizer, so `finalized` is set: the server keeps streaming after it
-          // rejects a turn, and without that flag a late exitedReviewMode + turn/completed walked
-          // this very turn back to `completed`, carrying the text we just refused.
+          // Through the finalizer, so `finalized` is set: stray/late traffic can still arrive on
+          // the wire after a rejection (observed live: a late exitedReviewMode + turn/completed
+          // walked this very turn back to `completed`, carrying the text we just refused).
           //
-          // NOT quarantined: an error RESPONSE means the server never created a turn at all, so
-          // there is no orphan to be confused by later. Quarantining here would turn an ordinary
-          // recoverable rejection (a bad --base, a rejected approvalPolicy) into a session that
+          // NOT quarantined: in the supported app-server lifecycle, validation/submission errors
+          // are returned BEFORE a turn is accepted — a successful submission hands back the
+          // authoritative turn id instead — so an error RESPONSE means no server-side turn exists
+          // to be confused by later. (A bad --base never reaches this arm at all: it fails
+          // synchronously in _startReview.) `finalized` here guards against stray/late traffic on
+          // the wire, not against a supported started-then-rejected lifecycle. And a non-empty
+          // turn.buffered is NOT proof of an orphan: buffering is thread-scoped — _onNotification
+          // filters only foreign threads and the prior turn's completion — not correlated to THIS
+          // request. Quarantining would turn an ordinary recoverable rejection into a session that
           // demands a restart.
           this._finalizeTurn(`${label} failed: ${err.message}`);
         }
@@ -412,16 +418,31 @@ export class Daemon {
       return Promise.resolve(this._terminalResult());
     }
     return new Promise((resolve) => {
-      this._waiters.push(resolve);
       // Drop the waiter when its client goes away. The re-wait poll (drive-loop's 'rewait' mode)
       // destroys its socket on every expired cap and opens a new one, so without this a wedged turn
       // retained one dead resolver — and its closure — per poll, forever.
-      if (sock) {
-        sock.once('close', () => {
-          const i = this._waiters.indexOf(resolve);
-          if (i >= 0) this._waiters.splice(i, 1);
-        });
-      }
+      //
+      // finish/onClose are PAIRED and idempotent: resolution detaches its own 'close' listener, and
+      // close removes exactly its own waiter. No shipped client needs the detach — client.mjs opens
+      // a fresh socket per command, and once('close') self-removes when that socket dies — but
+      // _onClient accepts many newline-delimited commands per connection, so a pipelining client
+      // could otherwise accumulate one armed close-listener per resolved wait on a long-lived
+      // socket. Protocol-surface hygiene, not a reproduced leak.
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        if (sock) sock.off('close', onClose);
+        resolve(result);
+      };
+      const onClose = () => {
+        if (settled) return;
+        settled = true;
+        const i = this._waiters.indexOf(finish);
+        if (i >= 0) this._waiters.splice(i, 1);
+      };
+      this._waiters.push(finish);
+      if (sock) sock.once('close', onClose);
     });
   }
 
@@ -447,7 +468,7 @@ export class Daemon {
   _resolveWaiters() {
     const result = this.turn.status === 'awaiting_input' ? this._parkedResult() : this._terminalResult();
     const ws = this._waiters; this._waiters = [];
-    ws.forEach((r) => r(result));
+    ws.forEach((finish) => finish(result));
   }
 
   async _answer(questionId, answers) {

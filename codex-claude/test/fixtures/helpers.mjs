@@ -41,17 +41,34 @@ export function makeRepo({ dirty = true, branch = 'main', prefix = 'cdx-t-' } = 
 }
 
 // The gated offline seam every driver/CLI test runs through: no live Codex, no network.
-export function seamEnv(fixturePath, mode = 'ok', extra = {}) {
+// `fixtureArgs` are appended to the mock's argv (e.g. ['--lifecycle-file', path]).
+export function seamEnv(fixturePath, mode = 'ok', extra = {}, fixtureArgs = []) {
   return {
     ...process.env,
     CODEX_DRIVE_TEST_MODE: '1',
-    CODEX_DRIVE_TEST_APPSERVER: JSON.stringify([process.execPath, fixturePath, '--review-mode', mode]),
+    CODEX_DRIVE_TEST_APPSERVER: JSON.stringify([process.execPath, fixturePath, '--review-mode', mode, ...fixtureArgs]),
     ...extra,
   };
 }
 
 export function rmDir(dir) {
   if (dir) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+}
+
+/** True while `pid` exists. EPERM means alive-but-not-ours; only ESRCH means gone. */
+export function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (e) { return e.code !== 'ESRCH'; }
+}
+
+/** Poll `fn` (may be async) until truthy, or throw after `timeoutMs`. */
+export async function pollUntil(fn, { timeoutMs = 8000, intervalMs = 50, label = 'condition' } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await fn()) return;
+    if (Date.now() > deadline) throw new Error(`pollUntil: timed out waiting for ${label}`);
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
 }
 
 /**

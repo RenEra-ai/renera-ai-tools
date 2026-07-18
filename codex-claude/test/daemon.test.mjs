@@ -1,5 +1,6 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -274,4 +275,98 @@ test('a parked elicitation is surfaced as unsupported and cannot be answered', a
   assert.equal(d._parkedResult().status, 'unsupported');
   const r = await d._answer('q', ['x']);
   assert.equal(r.error, 'no_pending_question');
+});
+
+// _wait's finish/onClose pairing. An EventEmitter is the fake socket: _wait only needs
+// once/off, and listenerCount observes whether resolution really detached its listener.
+const runningDaemon = () => {
+  const d = new Daemon({ socketPath: '/tmp/cdx-unit-none.sock', clientInfo: {} });
+  d.turn.status = 'running';
+  return d;
+};
+
+test('wait resolution removes its own close listener (terminal, parked, and failed endings)', async () => {
+  const endings = [
+    (d) => { d.turn.status = 'completed'; d.turn.message = 'done'; d._resolveWaiters(); },
+    (d) => { d.turn.status = 'awaiting_input'; d.turn.parked = { kind: 'question', params: {} }; d._resolveWaiters(); },
+    (d) => { d._finalizeTurn('boom'); },
+  ];
+  for (const end of endings) {
+    const d = runningDaemon();
+    const sock = new EventEmitter();
+    const p = d._wait(sock);
+    assert.equal(sock.listenerCount('close'), 1);
+    end(d);
+    await p;
+    assert.equal(sock.listenerCount('close'), 0, 'resolution must detach its own close listener');
+    assert.equal(d._waiters.length, 0);
+  }
+});
+
+test('a disconnect removes only its own waiter', async () => {
+  const d = runningDaemon();
+  const sockA = new EventEmitter();
+  const sockB = new EventEmitter();
+  d._wait(sockA);                       // abandoned below; its promise never resolves by design
+  const pB = d._wait(sockB);
+  sockA.emit('close');
+  assert.equal(d._waiters.length, 1, 'the disconnect must drop exactly one waiter');
+  d.turn.status = 'completed'; d.turn.message = 'done';
+  d._resolveWaiters();
+  assert.equal((await pB).status, 'completed', 'the surviving waiter must still resolve');
+  assert.equal(sockB.listenerCount('close'), 0);
+});
+
+test("an older socket's close cannot remove a later socket's waiter", async () => {
+  const d = runningDaemon();
+  const sockA = new EventEmitter();
+  const pA = d._wait(sockA);
+  d.turn.status = 'completed'; d.turn.message = 'first';
+  d._resolveWaiters();
+  await pA;
+  d.turn.status = 'running';
+  const sockB = new EventEmitter();
+  const pB = d._wait(sockB);
+  sockA.emit('close');                  // late close of the RESOLVED wait's socket
+  assert.equal(d._waiters.length, 1, "an old socket's close must not touch the new waiter");
+  d.turn.status = 'completed'; d.turn.message = 'second';
+  d._resolveWaiters();
+  assert.equal((await pB).message, 'second');
+});
+
+test('a resolved waiter is settled exactly once; a later close is a no-op', async () => {
+  const d = runningDaemon();
+  const sock = new EventEmitter();
+  const p = d._wait(sock);
+  d.turn.status = 'completed'; d.turn.message = 'once';
+  d._resolveWaiters();
+  assert.equal((await p).message, 'once');
+  assert.equal(sock.listenerCount('close'), 0);
+  sock.emit('close');                   // must not throw, must not splice anything
+  assert.equal(d._waiters.length, 0);
+});
+
+test('repeated fresh-socket disconnects leave _waiters empty', () => {
+  const d = runningDaemon();
+  for (let i = 0; i < 12; i++) {
+    const sock = new EventEmitter();
+    d._wait(sock);
+    sock.emit('close');
+    assert.equal(d._waiters.length, 0, `iteration ${i}: the dead resolver must be dropped`);
+  }
+});
+
+test('12 resolved waits on ONE persistent socket leave zero armed close listeners', async () => {
+  // The protocol-surface pin: _onClient accepts many commands per connection, so a pipelining
+  // client's socket must not accumulate one armed close-listener per already-resolved wait.
+  const d = runningDaemon();
+  const sock = new EventEmitter();
+  for (let i = 0; i < 12; i++) {
+    d.turn.status = 'running';
+    const p = d._wait(sock);
+    d.turn.status = 'completed'; d.turn.message = 'ok';
+    d._resolveWaiters();
+    await p;
+  }
+  assert.equal(sock.listenerCount('close'), 0, 'resolved waits must detach their close listeners');
 });

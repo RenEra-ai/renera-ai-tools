@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { performance } from 'node:perf_hooks';
 import { join } from 'node:path';
 import { driveTurn, firstOptionAnswer } from '../lib/drive-loop.mjs';
 import { rmDir } from './fixtures/helpers.mjs';
@@ -198,12 +199,96 @@ test("onMalformedQuestion:'return' hands the shape back WITHOUT interrupting", a
 
 test('an already-exhausted budget interrupts immediately instead of waiting forever', async () => {
   // sendCommand treats timeoutMs <= 0 as NO timeout, so a budget that has run out must never be
-  // passed through as a cap — that would turn "out of time" into "wait indefinitely".
-  const { socketPath, seen } = await fakeDaemon([null, { ok: true }]);
+  // passed through as a cap — that would turn "out of time" into "wait indefinitely". The interrupt
+  // is answered INSTANTLY here: a `null` script entry would make the cleanup interrupt burn its
+  // full fixed cap inside the swallowed catch, hiding the one-interrupt count this test pins.
+  const { socketPath, seen } = await fakeDaemon([(cmd) => (cmd.cmd === 'interrupt' ? { ok: true } : null)]);
   const res = await driveTurn(socketPath, { waitTimeoutMs: 5000, deadlineMs: 0 });
   assert.equal(res.status, 'timeout');
   assert.match(res.reason, /budget exhausted/);
   assert.equal(seen.filter((c) => c.cmd === 'wait').length, 0, 'must not even attempt a wait');
+  assert.equal(seen.filter((c) => c.cmd === 'interrupt').length, 1, 'exactly one bounded cleanup interrupt');
+});
+
+test('an action call that times out routes through the cleanup interrupt instead of throwing', async () => {
+  // The answer/approve sends used to have no catch at all: a daemon wedged mid-action made
+  // driveTurn REJECT, skipping the cleanup interrupt the deadline contract promises.
+  const { socketPath, seen } = await fakeDaemon([(cmd) => {
+    if (cmd.cmd === 'wait') return q(['A']);
+    if (cmd.cmd === 'answer') return null;               // wedged mid-action, never answers
+    return { ok: true };                                 // the interrupt is answered instantly
+  }]);
+  const t0 = performance.now();
+  const res = await driveTurn(socketPath, { waitTimeoutMs: 5000, deadlineMs: 400 });
+  const elapsed = performance.now() - t0;
+  assert.equal(res.status, 'timeout');
+  assert.match(res.reason, /answer call timed out/);
+  assert.equal(seen.filter((c) => c.cmd === 'answer').length, 1, 'the action was attempted once');
+  assert.equal(seen.filter((c) => c.cmd === 'interrupt').length, 1, 'exactly one bounded cleanup interrupt');
+  // Pins that a wedged action is capped by the REMAINING budget, not the fixed 10s interrupt cap.
+  // Deterministic coverage of the two-sample regression lives in the next test.
+  assert.ok(elapsed < 3000, `the wedged action must be capped by the remaining budget (took ${Math.round(elapsed)}ms)`);
+});
+
+test('the action reads the clock ONCE: a second sample can never buy a post-deadline grace', async () => {
+  // The regression pin for the two-sample bug, deterministically. The guard and the cap used to be
+  // two separate remaining() reads, so a deadline expiring between them sent the cap down the
+  // `INTERRUPT_TIMEOUT_MS` fallback and handed a wedged action a full 10s grace PAST the deadline.
+  //
+  // The ratchet reproduces exactly that interleaving: the first post-wait read leaves a small live
+  // budget (so the guard passes), and every later read is far past the deadline (so any second read
+  // takes the fallback). Asserting on the sample COUNT pins the property directly; the elapsed bound
+  // is its behavioural consequence — the old code would sit on a 10s cap the fake never answers.
+  // No production seam and no setTimeout stubbing: a smaller cap giving up sooner IS the contract.
+  const DEADLINE = 5000;
+  const realNow = performance.now;
+  let ratcheting = false;
+  let samples = 0;
+  performance.now = () => {
+    if (!ratcheting) return realNow.call(performance);
+    samples++;
+    return realNow.call(performance) + (samples === 1 ? DEADLINE - 120 : DEADLINE + 10000);
+  };
+  try {
+    const { socketPath, seen } = await fakeDaemon([(cmd) => {
+      if (cmd.cmd === 'wait') { ratcheting = true; return q(['A']); }
+      if (cmd.cmd === 'answer') return null;             // wedged: only the cap can end this call
+      return { ok: true };
+    }]);
+    const t0 = realNow.call(performance);
+    const res = await driveTurn(socketPath, { waitTimeoutMs: DEADLINE, deadlineMs: DEADLINE });
+    const elapsed = realNow.call(performance) - t0;
+    assert.equal(samples, 1, 'the action path must read the clock exactly once (guard AND cap)');
+    assert.equal(res.status, 'timeout');
+    assert.match(res.reason, /answer call timed out/);
+    assert.equal(seen.filter((c) => c.cmd === 'interrupt').length, 1, 'exactly one bounded cleanup interrupt');
+    assert.ok(elapsed < 2000,
+      `a second sample bought a post-deadline grace (took ${Math.round(elapsed)}ms; the fallback is 10s)`);
+  } finally {
+    performance.now = realNow;
+  }
+});
+
+test('a budget exhausted at a parked question goes straight to the interrupt, not another action grace', async () => {
+  // The deadline expires in the response->action gap — the one window only the pre-action guard
+  // covers. The fake's wait handler runs in THIS process before its response is written, so bumping
+  // a monotonic-clock offset there lands the expiry exactly in that gap, deterministically.
+  let offset = 0;
+  const realNow = performance.now;
+  performance.now = () => realNow.call(performance) + offset;
+  try {
+    const { socketPath, seen } = await fakeDaemon([(cmd) => {
+      if (cmd.cmd === 'wait') { offset = 10000; return q(['A']); }
+      return { ok: true };
+    }]);
+    const res = await driveTurn(socketPath, { waitTimeoutMs: 5000, deadlineMs: 5000 });
+    assert.equal(res.status, 'timeout');
+    assert.match(res.reason, /total wait budget exhausted/);
+    assert.equal(seen.filter((c) => c.cmd === 'answer').length, 0, 'no action grace after the deadline');
+    assert.equal(seen.filter((c) => c.cmd === 'interrupt').length, 1, 'exactly one bounded cleanup interrupt');
+  } finally {
+    performance.now = realNow;
+  }
 });
 
 test("onWaitExpiry:'rewait' polls instead of killing a slow-but-healthy turn", async () => {

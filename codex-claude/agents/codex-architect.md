@@ -22,8 +22,14 @@ do NOT design the plan yourself and you do NOT edit code. Your final message is 
    and stop. Do not fabricate a plan.
 
 2. **Build the prompt file.** You are given the issue/task text and the `--out` path by the
-   dispatcher. Write the plan prompt to a temp file with the Write tool — NEVER inline issue text in a
-   shell argument (it may contain backticks/`$()`/quotes). The prompt body:
+   dispatcher. First mint a UNIQUE DIRECTORY — `mktemp -d /tmp/cdx-plan.XXXXXX` — and use
+   `<that dir>/prompt` as your prompt path. Use `-d`: a bare `mktemp` CREATES the file, and Write
+   refuses to overwrite a file you have not Read, so the recipe would dead-end at its own first
+   step; a fresh path inside a unique dir is both writable and unique. Then Write the plan prompt to
+   that path — NEVER inline issue text in a shell argument (it may contain backticks/`$()`/quotes).
+   Every fallback sidecar in step 4 derives from this unique path, so concurrent architect agents can
+   never collide on a shared /tmp name (a shared sidecar meant one agent stopping the OTHER's daemon
+   and orphaning its own session). The prompt body:
    > "Architect a concrete, file-by-file plan for this task. Inspect the relevant files. Honor this
    > repo's own conventions in CLAUDE.md / AGENTS.md (no new dependencies, minimal diff, scope
    > discipline) — propose nothing that violates them. If read-only MCP discovery/query tools are
@@ -47,19 +53,22 @@ do NOT design the plan yourself and you do NOT edit code. Your final message is 
    the socket to a FILE. And `wait` can return PARKED, not just terminal or timed out — answer it and
    wait again, or the loop never ends.
 
+   `<prompt>` below is the literal `<that dir>/prompt` path from step 2 — every sidecar is derived
+   from it, so nothing here is shared with any other agent run.
+
    ```bash
-   # start, and persist the socket path to a file (NOT a shell variable)
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --private --cwd "$PWD" > /tmp/cdx-plan-start.json
-   node -e "console.log(JSON.parse(require('fs').readFileSync('/tmp/cdx-plan-start.json','utf8')).socket)" > /tmp/cdx-plan-sock.txt
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs plan "$(cat <the prompt file>)" --effort ultra --socket "$(cat /tmp/cdx-plan-sock.txt)"
+   # start, and persist the socket path to a SIDECAR of your unique prompt file (NOT a shell variable)
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --private --cwd "$PWD" > "<prompt>.start.json"
+   node -e "console.log(JSON.parse(require('fs').readFileSync('<prompt>.start.json','utf8')).socket)" > "<prompt>.sock"
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs plan "$(cat "<prompt>")" --effort ultra --socket "$(cat "<prompt>.sock")"
 
    # then in SEPARATE Bash calls until terminal:
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait --timeout-ms 300000 --socket "$(cat /tmp/cdx-plan-sock.txt)"
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait --timeout-ms 300000 --socket "$(cat "<prompt>.sock")"
    #   {"status":"timeout"}  -> STILL RUNNING; wait again
-   #   {"status":"question"} -> answer --id <id> --option 1 --socket "$(cat /tmp/cdx-plan-sock.txt)", then wait again
-   #   {"status":"approval"} -> approve --decision deny --socket "$(cat /tmp/cdx-plan-sock.txt)", then wait again
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs read --out <the --out path> --socket "$(cat /tmp/cdx-plan-sock.txt)"
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs stop --socket "$(cat /tmp/cdx-plan-sock.txt)"
+   #   {"status":"question"} -> answer --id <id> --option 1 --socket "$(cat "<prompt>.sock")", then wait again
+   #   {"status":"approval"} -> approve --decision deny --socket "$(cat "<prompt>.sock")", then wait again
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs read --out <the --out path> --socket "$(cat "<prompt>.sock")"
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs stop --socket "$(cat "<prompt>.sock")"
    ```
    ALWAYS `stop`, even on failure, or the detached daemon and its app-server are orphaned.
 

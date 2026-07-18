@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { seamEnv, rmDir } from './fixtures/helpers.mjs';
+import { seamEnv, rmDir, pidAlive, pollUntil } from './fixtures/helpers.mjs';
 
 const run = promisify(execFile);
 const REVIEW = fileURLToPath(new URL('../scripts/review-round.mjs', import.meta.url));
@@ -49,15 +49,18 @@ async function script(path, args, dir, extraEnv = {}) {
   }
 }
 
+// POSITIONAL, like commit-review-round's lastTwo(): these scripts front their metadata (STATUS,
+// then PARSED_VERDICT/PLAN_FILE, then the === marker, then the body). Independent per-line matches
+// stayed green under reordered or duplicated metadata — the drift the contract explicitly forbids.
+const headLines = (stdout, n) => stdout.split('\n').slice(0, n);
+
 test('review-round drives a turn to a verdict through the shared loop', async () => {
   const dir = workdir();
   // REVIEWPLAN makes the mock emit an internal-checklist plan delta AND the real review text, which
   // also pins that the plan stream never shadows the agent-message verdict on a plain send.
   const r = await script(REVIEW, ['--prompt-file', promptFile(dir, 'REVIEWPLAN please review')], dir);
   assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stdout, /STATUS: completed/);
-  assert.match(r.stdout, /PARSED_VERDICT: NO ISSUES/);
-  assert.match(r.stdout, /=== REVIEW ===/);
+  assert.deepEqual(headLines(r.stdout, 3), ['STATUS: completed', 'PARSED_VERDICT: NO ISSUES', '=== REVIEW ===']);
 });
 
 test('review-round answers a parked question with the first option', async () => {
@@ -65,7 +68,8 @@ test('review-round answers a parked question with the first option', async () =>
   const r = await script(REVIEW, ['--prompt-file', promptFile(dir, 'ASK me something')], dir);
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stderr, /answering question q1 -> A/);
-  assert.match(r.stdout, /STATUS: completed/);
+  // The mock's post-answer reply carries no verdict line, so this pins UNCLEAR positionally too.
+  assert.deepEqual(headLines(r.stdout, 3), ['STATUS: completed', 'PARSED_VERDICT: UNCLEAR', '=== REVIEW ===']);
 });
 
 test('review-round DECLINES an unsafe command approval (a review only needs to read)', async () => {
@@ -76,7 +80,7 @@ test('review-round DECLINES an unsafe command approval (a review only needs to r
   // A DENIED exec with no verdict is precisely what must trigger the ONE static-only re-ask, so a
   // Codex that stalled on "I need to run the tests" still produces a review rather than UNCLEAR.
   assert.match(r.stderr, /denied a command \+ no verdict — re-asking/);
-  assert.match(r.stdout, /STATUS: completed/);
+  assert.deepEqual(headLines(r.stdout, 3), ['STATUS: completed', 'PARSED_VERDICT: NO ISSUES', '=== REVIEW ===']);
 });
 
 test('plan-round persists a plan via --out and reports PLAN_FILE', async () => {
@@ -84,8 +88,7 @@ test('plan-round persists a plan via --out and reports PLAN_FILE', async () => {
   const out = join(dir, 'plan.md');
   const r = await script(PLAN, ['--prompt-file', promptFile(dir, 'PLANITEM design it'), '--out', out, '--model', 'gpt-5.6-sol'], dir);
   assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stdout, /STATUS: completed/);
-  assert.match(r.stdout, /PLAN_FILE:/);
+  assert.deepEqual(headLines(r.stdout, 3), ['STATUS: completed', 'PLAN_FILE: ' + out, '=== PLAN ===']);
   assert.equal(existsSync(out), true, 'the plan must be persisted');
   assert.match(readFileSync(out, 'utf8'), /Add GET \/healthz/);
 });
@@ -95,7 +98,8 @@ test('plan-round answers a parked question and still completes', async () => {
   const r = await script(PLAN, ['--prompt-file', promptFile(dir, 'ASK before planning'), '--model', 'gpt-5.6-sol'], dir);
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stderr, /answering question q1 -> A/);
-  assert.match(r.stdout, /STATUS: completed/);
+  // No --out → no PLAN_FILE line, and the mock's post-answer reply is not plan-shaped → (no-plan).
+  assert.deepEqual(headLines(r.stdout, 2), ['STATUS: completed (no-plan)', '=== PLAN ===']);
 });
 
 test('both drivers tear the daemon down on SIGTERM instead of orphaning the app-server', async () => {
@@ -103,22 +107,37 @@ test('both drivers tear the daemon down on SIGTERM instead of orphaning the app-
   // 9-minute review was interrupted. HANGTURN keeps the turn open so there IS something to kill.
   for (const [name, path, extra] of [['review', REVIEW, []], ['plan', PLAN, ['--model', 'gpt-5.6-sol']]]) {
     const dir = workdir();
+    // The lifecycle file names the EXACT app-server child, so this test proves that child died —
+    // exit 143 + the cleanup log only prove the handler ran, which stays green with daemon.stop()
+    // deleted (the very orphan bug this test exists to guard).
+    const lifePath = join(dir, 'mock.pid');
     const child = execFile(process.execPath, [path, '--prompt-file', promptFile(dir, 'HANGTURN forever'), ...extra], {
       cwd: dir,
-      env: seamEnv(FIXTURE, 'ok', { CODEX_DRIVE_TEST_WAIT_MS: '60000' }),
+      env: seamEnv(FIXTURE, 'ok', { CODEX_DRIVE_TEST_WAIT_MS: '60000' }, ['--lifecycle-file', lifePath]),
     });
-    let err = '';
-    child.stderr.on('data', (d) => { err += d; });
-    const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
-    await new Promise((r) => setTimeout(r, 1200));          // let it boot and start the turn
-    child.kill('SIGTERM');
-    const { code, signal } = await Promise.race([exited, new Promise((r) => setTimeout(() => r({ code: 'HUNG' }), 8000))]);
-    assert.notEqual(code, 'HUNG', `${name}-round did not exit on SIGTERM`);
-    // EXACTLY 143 from our own handler, not signal-death: an unhandled SIGTERM also terminates the
-    // process (code null / signal SIGTERM) but skips teardown, so accepting that would let the
-    // orphan bug pass this test.
-    assert.equal(code, 143, `${name}-round must exit 143 via its own teardown (got code=${code} signal=${signal})`);
-    assert.match(err, /SIGTERM — cleaning up/, `${name}-round must run its cleanup handler`);
+    let mockPid = null;
+    try {
+      let err = '';
+      child.stderr.on('data', (d) => { err += d; });
+      const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
+      await new Promise((r) => setTimeout(r, 1200));          // let it boot and start the turn
+      await pollUntil(() => existsSync(lifePath), { label: `${name}-round mock pid file` });
+      mockPid = Number(readFileSync(lifePath, 'utf8'));
+      assert.ok(pidAlive(mockPid), 'the mock app-server must be alive before the SIGTERM');
+      child.kill('SIGTERM');
+      const { code, signal } = await Promise.race([exited, new Promise((r) => setTimeout(() => r({ code: 'HUNG' }), 8000))]);
+      assert.notEqual(code, 'HUNG', `${name}-round did not exit on SIGTERM`);
+      // EXACTLY 143 from our own handler, not signal-death: an unhandled SIGTERM also terminates the
+      // process (code null / signal SIGTERM) but skips teardown, so accepting that would let the
+      // orphan bug pass this test.
+      assert.equal(code, 143, `${name}-round must exit 143 via its own teardown (got code=${code} signal=${signal})`);
+      assert.match(err, /SIGTERM — cleaning up/, `${name}-round must run its cleanup handler`);
+      await pollUntil(() => !pidAlive(mockPid), { label: `${name}-round app-server death` });
+    } finally {
+      // A failed assertion must not let the TEST become the orphaner it guards against.
+      if (mockPid && pidAlive(mockPid)) { try { process.kill(mockPid, 'SIGKILL'); } catch { /* best effort */ } }
+      try { child.kill('SIGKILL'); } catch { /* already gone */ }
+    }
   }
 });
 
@@ -131,8 +150,7 @@ test('a slow turn now COMPLETES instead of being killed by the wait cap', { time
     { CODEX_DRIVE_TEST_WAIT_MS: '400' });
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stderr, /turn still running, re-waiting/, 'the cap must be a poll, not a verdict');
-  assert.match(r.stdout, /STATUS: completed/);
-  assert.match(r.stdout, /PARSED_VERDICT: NO ISSUES/);
+  assert.deepEqual(headLines(r.stdout, 3), ['STATUS: completed', 'PARSED_VERDICT: NO ISSUES', '=== REVIEW ===']);
 });
 
 test('review-round APPROVES a safe command and DENIES an unsafe one', async () => {
@@ -143,11 +161,14 @@ test('review-round APPROVES a safe command and DENIES an unsafe one', async () =
   assert.equal(safe.code, 0, safe.stderr);
   assert.match(safe.stderr, /approving safe command/);
   assert.match(safe.stdout, /safe-decision=/, 'the allow decision must reach the server');
+  // Approved (not denied) + no verdict → no re-ask fires and the run honestly reports UNCLEAR.
+  assert.deepEqual(headLines(safe.stdout, 3), ['STATUS: completed', 'PARSED_VERDICT: UNCLEAR', '=== REVIEW ===']);
 
   const dirNo = workdir();
   const unsafe = await script(REVIEW, ['--prompt-file', promptFile(dirNo, 'APPROVE a command')], dirNo);
   assert.equal(unsafe.code, 0, unsafe.stderr);
   assert.match(unsafe.stderr, /declining approval/);
+  assert.deepEqual(headLines(unsafe.stdout, 3), ['STATUS: completed', 'PARSED_VERDICT: NO ISSUES', '=== REVIEW ===']);
 });
 
 test('review-round static re-ask actually produces a verdict', async () => {
@@ -158,7 +179,8 @@ test('review-round static re-ask actually produces a verdict', async () => {
   const r = await script(REVIEW, ['--prompt-file', promptFile(dir, 'APPROVE a command')], dir);
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stderr, /denied a command \+ no verdict — re-asking/);
-  assert.match(r.stdout, /PARSED_VERDICT: NO ISSUES/, 'the re-ask must recover a real verdict');
+  assert.deepEqual(headLines(r.stdout, 3), ['STATUS: completed', 'PARSED_VERDICT: NO ISSUES', '=== REVIEW ==='],
+    'the re-ask must recover a real verdict');
 });
 
 test('plan-round denies an unsafe command, re-asks, and still persists a plan', async () => {
@@ -170,6 +192,7 @@ test('plan-round denies an unsafe command, re-asks, and still persists a plan', 
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stderr, /declining approval/);
   assert.match(r.stderr, /denied a command \+ thin plan body — re-asking/);
+  assert.deepEqual(headLines(r.stdout, 3), ['STATUS: completed', 'PLAN_FILE: ' + out, '=== PLAN ===']);
   assert.equal(existsSync(out), true, 'the re-asked plan must be persisted');
   assert.match(readFileSync(out, 'utf8'), /after the static re-ask/);
 });
@@ -180,4 +203,6 @@ test('plan-round approves a safe command without needing the re-ask', async () =
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stderr, /approving safe command/);
   assert.doesNotMatch(r.stderr, /re-asking/, 'an approved command must not trigger the stall recovery');
+  // No --out → no PLAN_FILE line; the mock's decision echo is not plan-shaped → (no-plan).
+  assert.deepEqual(headLines(r.stdout, 2), ['STATUS: completed (no-plan)', '=== PLAN ===']);
 });
