@@ -87,7 +87,7 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --cwd "$PWD"
 ### 2. Architect turn (Plan mode, read-only)
 
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs plan "Architect a fix for <problem>. Inspect <files>. Produce a concrete, file-by-file plan. Ask if anything is ambiguous." --effort max
+node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs plan "Architect a fix for <problem>. Inspect <files>. Produce a concrete, file-by-file plan. Ask if anything is ambiguous." --effort ultra
 node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait
 ```
 

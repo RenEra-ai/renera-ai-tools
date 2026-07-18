@@ -35,7 +35,7 @@ do NOT design the plan yourself and you do NOT edit code. Your final message is 
    you need to look around, but normally you just pass the task through.)
 
 3. **Run the ephemeral Plan-mode driver FROM THE REPO ROOT** so `--out` lands in the repo:
-   `node ${CLAUDE_PLUGIN_ROOT}/scripts/plan-round.mjs --prompt-file <tmp> --out <the --out path> --effort max`
+   `node ${CLAUDE_PLUGIN_ROOT}/scripts/plan-round.mjs --prompt-file <tmp> --out <the --out path> --effort ultra`
    It prints `STATUS: …`, `PLAN_FILE: …`, then `=== PLAN ===` and the body.
 
 4. **If the driver is KILLED rather than finishing** — exit 143/130, or any exit with no `STATUS:`
@@ -51,7 +51,7 @@ do NOT design the plan yourself and you do NOT edit code. Your final message is 
    # start, and persist the socket path to a file (NOT a shell variable)
    node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --private --cwd "$PWD" > /tmp/cdx-plan-start.json
    node -e "console.log(JSON.parse(require('fs').readFileSync('/tmp/cdx-plan-start.json','utf8')).socket)" > /tmp/cdx-plan-sock.txt
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs plan "$(cat <the prompt file>)" --effort max --socket "$(cat /tmp/cdx-plan-sock.txt)"
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs plan "$(cat <the prompt file>)" --effort ultra --socket "$(cat /tmp/cdx-plan-sock.txt)"
 
    # then in SEPARATE Bash calls until terminal:
    node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait --timeout-ms 300000 --socket "$(cat /tmp/cdx-plan-sock.txt)"

@@ -23,7 +23,7 @@ const ei = process.argv.indexOf('--effort');
 const oi = process.argv.indexOf('--out');
 const outPath = oi >= 0 ? process.argv[oi + 1] : null;   // persist the plan body here when usable
 const model = (mi >= 0 ? process.argv[mi + 1] : null) || readConfiguredModel();
-const effort = ei >= 0 ? process.argv[ei + 1] : 'max';
+const effort = ei >= 0 ? process.argv[ei + 1] : 'ultra';
 if (!model) {
   console.error('plan-round: Plan mode needs a model — pass --model <name> or set model = "..." in ~/.codex/config.toml');
   process.exit(1);
