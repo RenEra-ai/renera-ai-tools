@@ -85,6 +85,23 @@ re-author it.
    the raw review after `=== REVIEW ===`. If `STATUS` is not `completed`, report that the Codex review
    did not complete (include the message) and end with `VERDICT: UNCLEAR`.
 
+   **If the driver is KILLED rather than finishing** — exit 143/130, or any exit with no `STATUS:`
+   line at all — the outer Bash cap (~10 min) ended it, not Codex. The turn was alive. Retry ONCE
+   via the owned-session fallback, which is the ONE sanctioned alternative to this driver (it exists
+   precisely because a single Bash call cannot outlive that cap; the turn survives ACROSS calls):
+   ```bash
+   S=$(node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --private --cwd "$PWD" | jq -r .socket)
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs send "$(cat <that temp prompt file>)" --effort max --socket "$S"
+   # then, in SEPARATE Bash calls, until the status is terminal (repeat as many times as it takes):
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait --timeout-ms 300000 --socket "$S"
+   # a {"status":"timeout"} reply means STILL RUNNING — wait again; it does NOT interrupt the turn
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs read --socket "$S"
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs stop --socket "$S"
+   ```
+   ALWAYS `stop` when done, even on failure, or the detached daemon and its app-server are orphaned.
+   If the fallback also fails to produce a review, say so and end with `VERDICT: UNCLEAR` — never
+   invent findings.
+
 5. **Return a structured report** (this exact shape):
    - First a `Reviewed files: <comma-separated paths>` line (the files Codex actually inspected).
    - Then one line per finding: `path:line — <the problem in one phrase> — <the suggested fix>`
