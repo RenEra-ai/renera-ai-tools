@@ -13,7 +13,9 @@
 
 import { spawnSync } from 'node:child_process';
 
-const SCOPES = ['auto', 'working-tree', 'branch'];
+// Exported so the one-shot's usage text and preflight cannot drift from the authoritative validator
+// (it used to inline its own copy of this list, and of the --base/--scope exclusivity rule).
+export const SCOPES = ['auto', 'working-tree', 'branch'];
 const DEFAULT_BRANCH_CANDIDATES = ['main', 'master', 'trunk'];
 
 // git reads a LOT of its behaviour from the environment, which would silently defeat the daemon's
@@ -45,7 +47,11 @@ function scrubEnv() {
 // Sync on purpose: the daemon awaits its command handlers, so a blocking git call is safe there,
 // and sync keeps every rule below a plain readable sequence with no interleaving to reason about.
 function git(cwd, args) {
-  const r = spawnSync('git', args, { cwd, env: scrubEnv(), encoding: 'utf8', shell: false });
+  // maxBuffer well above Node's 1 MiB default: `status --porcelain --untracked-files=normal` on a
+  // big dirty tree (an unignored node_modules, tens of thousands of untracked files) blows past it,
+  // and spawnSync then reports ENOBUFS — which surfaced as a cryptic `spawnSync git ENOBUFS`
+  // instead of a resolved working-tree scope.
+  const r = spawnSync('git', args, { cwd, env: scrubEnv(), encoding: 'utf8', shell: false, maxBuffer: 64 * 1024 * 1024 });
   if (r.error && r.error.code === 'ENOENT') throw new Error('git is not installed');
   if (r.error) throw r.error;
   return { status: r.status, stdout: (r.stdout || '').trim(), stderr: (r.stderr || '').trim() };
@@ -65,10 +71,18 @@ function refExists(cwd, ref) {
   return ok(cwd, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`]);
 }
 
-function fullSha(cwd, ref) {
+/**
+ * Resolve a ref to an immutable full commit SHA, or null when it does not resolve.
+ *
+ * Returns null rather than throwing so each call site can raise the error that fits it — the base
+ * path wants "--base ref does not resolve", not a generic one. This also folds away a duplicate
+ * subprocess: refExists() ran this exact `rev-parse` and threw the SHA away, purely to reword the
+ * failure. EVERY caller must check for null; a null reaching .slice() or a review target is a bug.
+ * @returns {string|null}
+ */
+export function fullSha(cwd, ref) {
   const r = git(cwd, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`]);
-  if (r.status !== 0 || !r.stdout) throw new Error(`could not resolve ref: ${ref}`);
-  return r.stdout;
+  return r.status === 0 && r.stdout ? r.stdout : null;
 }
 
 const isAncestor = (cwd, ref) => ok(cwd, ['merge-base', '--is-ancestor', ref, 'HEAD']);
@@ -113,8 +127,13 @@ export function detectDefaultBranch(cwd) {
     if (refExists(cwd, name)) return name;
     if (refExists(cwd, `origin/${name}`)) return `origin/${name}`;
   }
+  // TWO passes, not one interleaved loop: ALL local candidates before ANY remote one. Interleaving
+  // meant a repo whose local default is `master` but which also has a stale `origin/main` resolved
+  // to `origin/main` — diffing against the wrong branch entirely.
   for (const c of DEFAULT_BRANCH_CANDIDATES) {
     if (ok(cwd, ['show-ref', '--verify', '--quiet', `refs/heads/${c}`])) return c;
+  }
+  for (const c of DEFAULT_BRANCH_CANDIDATES) {
     // KNOWN EDGE, deliberately not papered over: `origin/<c>` resolves locally, yet
     // `git rev-parse --abbrev-ref "origin/main@{upstream}"` -> fatal. If the reviewer's @{upstream}
     // prompt template is ever selected, an origin/<c> base fails server-side and ref-existence will
@@ -130,7 +149,7 @@ const isNonBlankString = (v) => typeof v === 'string' && v.trim().length > 0;
 /**
  * @param {string} cwd absolute path the daemon owns
  * @param {{base?: unknown, scope?: unknown}} options raw, UNTRUSTED values straight off the CLI
- * @returns {{mode:'working-tree'|'branch', label:string, baseRef?:string, explicit:boolean}}
+ * @returns {{mode:'working-tree'|'branch', label:string, baseRef?:string}}
  */
 export function resolveReviewTarget(cwd, options = {}) {
   const { base, scope } = options;
@@ -154,12 +173,18 @@ export function resolveReviewTarget(cwd, options = {}) {
     const ref = base.trim();
     // Fail here, not after a daemon boot and a full Codex turn: a typo'd --base is the single most
     // likely gate mistake, and its late failure surfaces as an unexplained blank review.
-    if (!refExists(cwd, ref)) throw new Error(`--base ref does not resolve: ${ref}`);
+    //
     // Resolve to an immutable full SHA BEFORE any other git question is asked. Two reasons: every
     // later call then gets an unambiguous object (a ref named like `-base` can't be re-parsed as an
     // option by a command lacking --end-of-options), and the answers can't drift if the ref moves.
+    // One rev-parse answers BOTH "does it exist" and "what is it" — the separate refExists() probe
+    // was the identical command run twice.
     const sha = fullSha(cwd, ref);
+    if (!sha) throw new Error(`--base ref does not resolve: ${ref}`);
     const head = fullSha(cwd, 'HEAD');
+    // No HEAD means an unborn branch (a fresh repo with no commits): there is nothing to review
+    // against, and a null here would otherwise sail into the sha===head compare and the delta check.
+    if (!head) throw new Error('could not resolve HEAD (no commits yet?)');
     // base === HEAD is an ancestor of itself and, on a dirty tree, even has a delta — so neither
     // check below catches it. But "review everything since HEAD" is never what the gate means: that
     // is a working-tree review wearing a branch-diff label. Say so explicitly.
@@ -179,30 +204,33 @@ export function resolveReviewTarget(cwd, options = {}) {
     if (!hasDelta(cwd, sha)) {
       throw new Error(`--base ${ref} yields an empty delta (nothing to review)`);
     }
-    return { mode: 'branch', label: `branch diff against ${ref} (${sha.slice(0, 7)})`, baseRef: sha, explicit: true };
+    return { mode: 'branch', label: `branch diff against ${ref} (${sha.slice(0, 7)})`, baseRef: sha };
   }
 
   if (scope === 'working-tree') {
     if (!isDirty(cwd)) throw new Error('--scope working-tree on a clean tree (nothing to review)');
-    return { mode: 'working-tree', label: 'working tree diff', explicit: true };
+    return { mode: 'working-tree', label: 'working tree diff' };
   }
 
-  if (scope === 'branch') return branchAgainstDefault(cwd, true);
+  if (scope === 'branch') return branchAgainstDefault(cwd);
 
   // auto: dirty -> the working tree is the interesting thing; clean -> compare against the default
   // branch. Untracked files count as dirty, which is correct: the native uncommittedChanges target
   // reviews "staged, unstaged, and untracked files" (0.144.5 docstring).
-  if (isDirty(cwd)) return { mode: 'working-tree', label: 'working tree diff', explicit: false };
-  return branchAgainstDefault(cwd, false);
+  if (isDirty(cwd)) return { mode: 'working-tree', label: 'working tree diff' };
+  return branchAgainstDefault(cwd);
 }
 
-function branchAgainstDefault(cwd, explicit) {
+function branchAgainstDefault(cwd) {
+  // No refExists() recheck here: every return path of detectDefaultBranch has ALREADY verified the
+  // exact ref it returns (the origin/HEAD path via refExists, the candidate loops via show-ref
+  // --verify), so re-asking spawned a second identical subprocess for a question just answered.
+  // A pathological race (the ref deleted in between) still surfaces below as "no merge base".
   const ref = detectDefaultBranch(cwd);
-  if (!refExists(cwd, ref)) throw new Error(`detected default branch does not resolve: ${ref}`);
   const mb = mergeBase(cwd, ref);
   if (!mb) throw new Error(`no merge base between HEAD and ${ref}`);
   if (!hasDelta(cwd, mb)) throw new Error(`no changes between HEAD and ${ref} (nothing to review)`);
-  return { mode: 'branch', label: `branch diff against ${ref}`, baseRef: ref, explicit };
+  return { mode: 'branch', label: `branch diff against ${ref}`, baseRef: ref };
 }
 
 /**

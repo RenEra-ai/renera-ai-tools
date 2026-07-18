@@ -15,7 +15,6 @@ test('auto on a dirty tree -> working-tree', () => {
   const { dir } = repo({ dirty: true });
   const r = resolveReviewTarget(dir, {});
   assert.equal(r.mode, 'working-tree');
-  assert.equal(r.explicit, false);
   assert.deepEqual(buildNativeReviewTarget(r), { type: 'uncommittedChanges' });
   rmSync(dir, { recursive: true, force: true });
 });
@@ -43,7 +42,6 @@ test('auto on a clean tree ahead of the default branch -> branch diff', () => {
   const r = resolveReviewTarget(dir, {});
   assert.equal(r.mode, 'branch');
   assert.equal(r.baseRef, 'main');
-  assert.equal(r.explicit, false);
   assert.deepEqual(buildNativeReviewTarget(r), { type: 'baseBranch', branch: 'main' });
   rmSync(dir, { recursive: true, force: true });
 });
@@ -230,5 +228,16 @@ test('detectDefaultBranch prefers a bare local name over origin/<c>', () => {
 test('detectDefaultBranch errors when no candidate exists', () => {
   const { dir } = repo({ branch: 'weird-name' });
   assert.throws(() => detectDefaultBranch(dir), /could not detect the default branch/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a LOCAL later candidate beats an EARLIER remote one (all of refs/heads before any origin/*)', () => {
+  // The real-world shape: the repo's local default is `master`, but a stale/newer `origin/main`
+  // also resolves. Checking both refs per candidate — heads/main, origin/main, then heads/master —
+  // returned `origin/main` and reviewed against the wrong branch entirely. The spec pins local
+  // refs/heads/{main,master,trunk} FIRST, origin/* only as a fallback.
+  const { dir, head } = repo({ branch: 'master' });
+  git(dir, 'update-ref', 'refs/remotes/origin/main', head);   // no local `main` exists
+  assert.equal(detectDefaultBranch(dir), 'master');
   rmSync(dir, { recursive: true, force: true });
 });
