@@ -205,3 +205,28 @@ test('an already-exhausted budget interrupts immediately instead of waiting fore
   assert.match(res.reason, /budget exhausted/);
   assert.equal(seen.filter((c) => c.cmd === 'wait').length, 0, 'must not even attempt a wait');
 });
+
+test("onWaitExpiry:'rewait' polls instead of killing a slow-but-healthy turn", async () => {
+  // The regression this exists for: a fixed per-wait cap treated "slow" as "dead" and interrupted
+  // real work. Two healthy Codex reviews died that way in a single day.
+  let waits = 0;
+  const { socketPath, seen } = await fakeDaemon([(cmd) => {
+    if (cmd.cmd !== 'wait') return { ok: true };
+    // Silent for the first two waits (each cap expires), terminal on the third.
+    return ++waits <= 2 ? null : { status: 'completed', message: 'finished eventually' };
+  }]);
+  const res = await driveTurn(socketPath, { waitTimeoutMs: 120, onWaitExpiry: 'rewait' });
+  assert.equal(res.status, 'completed', 'the turn must survive its expired caps');
+  assert.equal(res.message, 'finished eventually');
+  assert.ok(seen.filter((c) => c.cmd === 'wait').length >= 3, 'it must have re-waited');
+  assert.equal(seen.filter((c) => c.cmd === 'interrupt').length, 0, 'and never interrupted');
+});
+
+test("onWaitExpiry:'rewait' still honours an explicit total deadline", async () => {
+  // rewait must never weaken deadlineMs — the one-shot gate depends on that hard bound.
+  const { socketPath, seen } = await fakeDaemon([(cmd) => (cmd.cmd === 'wait' ? null : { ok: true })]);
+  const res = await driveTurn(socketPath, { waitTimeoutMs: 100, deadlineMs: 350, onWaitExpiry: 'rewait' });
+  assert.equal(res.status, 'timeout');
+  assert.match(res.reason, /total wait budget exhausted/);
+  assert.equal(seen.filter((c) => c.cmd === 'interrupt').length, 1, 'budget exhaustion still interrupts');
+});

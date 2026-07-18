@@ -12,7 +12,7 @@ import { isSafeCommand } from '../lib/safe-command.mjs';
 import { buildReviewPrompt } from '../lib/review-prompt.mjs';
 import { CLIENT_INFO } from '../lib/protocol.mjs';
 import { driveTurn } from '../lib/drive-loop.mjs';
-import { testAppServerOpts } from '../lib/test-appserver.mjs';
+import { testAppServerOpts, testWaitMs } from '../lib/test-appserver.mjs';
 
 // Prefer --prompt-file (avoids shell-quoting/injection from review/plan text with backticks, $(), quotes).
 const pf = process.argv.indexOf('--prompt-file');
@@ -64,7 +64,9 @@ await daemon.start();
 
 // Bounded wait: a client-side cap (under the ~10-min Bash cap) so a wedged Codex turn can't hang the
 // driver forever; on timeout, interrupt the turn and surface status:'timeout'.
-const WAIT_TIMEOUT_MS = 540000;
+// testWaitMs() lets the offline suite shrink this cap so the re-wait path is reachable in a
+// test rather than only after nine real minutes.
+const WAIT_TIMEOUT_MS = testWaitMs() ?? 540000;
 
 // Drain clarifying questions / command-approval prompts via the SHARED engine, declining commands
 // (a review only needs to read). Records `flags.declinedExec` when a command-exec approval was
@@ -72,6 +74,11 @@ const WAIT_TIMEOUT_MS = 540000;
 // before emitting its verdict). Only this policy is driver-specific; the loop mechanics are shared.
 const drive = (flags) => driveTurn(socketPath, {
   waitTimeoutMs: WAIT_TIMEOUT_MS,
+  // The cap is a POLL INTERVAL for this driver, not a verdict: a Codex turn that needs longer
+  // than the cap is slow, not dead, and interrupting it threw away real work (two healthy
+  // reviews died that way in one day). No total deadline here — the external bound is the
+  // caller's own lifetime, and the SIGTERM handler above tears the daemon down cleanly.
+  onWaitExpiry: 'rewait',
   log: (m) => process.stderr.write(`[driver] ${m}\n`),
   decideApproval: (request) => {
     const method = request.method || '';

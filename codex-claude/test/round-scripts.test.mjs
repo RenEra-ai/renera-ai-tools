@@ -121,3 +121,63 @@ test('both drivers tear the daemon down on SIGTERM instead of orphaning the app-
     assert.match(err, /SIGTERM — cleaning up/, `${name}-round must run its cleanup handler`);
   }
 });
+
+test('a slow turn now COMPLETES instead of being killed by the wait cap', { timeout: 30000 }, async () => {
+  // The end-to-end pin for rewait. SLOWTURN finishes after ~1.5s while the cap is 400ms, so the cap
+  // expires ~3 times mid-turn. Before rewait the driver interrupted on the first expiry and reported
+  // a timeout — which is exactly how two healthy Codex reviews were destroyed in one day.
+  const dir = workdir();
+  const r = await script(REVIEW, ['--prompt-file', promptFile(dir, 'SLOWTURN please review')], dir,
+    { CODEX_DRIVE_TEST_WAIT_MS: '400' });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /turn still running, re-waiting/, 'the cap must be a poll, not a verdict');
+  assert.match(r.stdout, /STATUS: completed/);
+  assert.match(r.stdout, /PARSED_VERDICT: NO ISSUES/);
+});
+
+test('review-round APPROVES a safe command and DENIES an unsafe one', async () => {
+  // The allow arm was untested in BOTH consumers: a regression that auto-approved anything would
+  // have shipped green. `pytest -q` is safe-command's one approved family; `echo hi` is not.
+  const dirOk = workdir();
+  const safe = await script(REVIEW, ['--prompt-file', promptFile(dirOk, 'APPROVESAFE run the tests')], dirOk);
+  assert.equal(safe.code, 0, safe.stderr);
+  assert.match(safe.stderr, /approving safe command/);
+  assert.match(safe.stdout, /safe-decision=/, 'the allow decision must reach the server');
+
+  const dirNo = workdir();
+  const unsafe = await script(REVIEW, ['--prompt-file', promptFile(dirNo, 'APPROVE a command')], dirNo);
+  assert.equal(unsafe.code, 0, unsafe.stderr);
+  assert.match(unsafe.stderr, /declining approval/);
+});
+
+test('review-round static re-ask actually produces a verdict', async () => {
+  // Previously this asserted only STATUS: completed. The re-ask prompt fell through the mock to the
+  // generic 'done' reply, so the run ended UNCLEAR and the test passed anyway — green, proving
+  // nothing about the recovery path it existed to cover.
+  const dir = workdir();
+  const r = await script(REVIEW, ['--prompt-file', promptFile(dir, 'APPROVE a command')], dir);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /denied a command \+ no verdict — re-asking/);
+  assert.match(r.stdout, /PARSED_VERDICT: NO ISSUES/, 'the re-ask must recover a real verdict');
+});
+
+test('plan-round denies an unsafe command, re-asks, and still persists a plan', async () => {
+  // plan-round had NO approval or re-ask coverage at all: a regression making it approve an unsafe
+  // command, or dropping the static re-ask, would have left the suite green.
+  const dir = workdir();
+  const out = join(dir, 'plan.md');
+  const r = await script(PLAN, ['--prompt-file', promptFile(dir, 'APPROVE then plan'), '--out', out, '--model', 'gpt-5.6-sol'], dir);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /declining approval/);
+  assert.match(r.stderr, /denied a command \+ thin plan body — re-asking/);
+  assert.equal(existsSync(out), true, 'the re-asked plan must be persisted');
+  assert.match(readFileSync(out, 'utf8'), /after the static re-ask/);
+});
+
+test('plan-round approves a safe command without needing the re-ask', async () => {
+  const dir = workdir();
+  const r = await script(PLAN, ['--prompt-file', promptFile(dir, 'APPROVESAFE then plan'), '--model', 'gpt-5.6-sol'], dir);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /approving safe command/);
+  assert.doesNotMatch(r.stderr, /re-asking/, 'an approved command must not trigger the stall recovery');
+});
