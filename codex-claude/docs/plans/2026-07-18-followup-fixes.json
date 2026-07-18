@@ -1,0 +1,68 @@
+{
+  "title": "codex-claude v1.8.4 \u2014 survivable long reviews, closed coverage gaps, narrowed hook",
+  "date": "2026-07-18",
+  "target_version": "1.8.4",
+  "context": {
+    "why": "v1.8.3 shipped and deployed, but three problems remained, all observed live: long Codex turns were still killed by a fixed per-wait cap; three test-coverage gaps were knowingly left open; and the review-findings hook misfired on every offline test run.",
+    "baseline": "218 pass / 0 fail / 3 skipped (live-only) at v1.8.3.",
+    "result": "228 pass / 0 fail / 3 skipped."
+  },
+  "root_cause_found": {
+    "finding": "spec:763's tests could never boot a daemon under a redirected HOME.",
+    "cause": "macOS caps Unix socket paths at 104 bytes. The socket name `daemon-<pid>-<Date.now()>.sock` (31 chars) pushed a temp-HOME path to 109, so bind() failed INSIDE the stdio-ignored detached child and the parent could only report 'daemon did not come up'. The real HOME path is 56 bytes, which is why this never showed in normal use.",
+    "fix": "Shortened to `d-<pid>-<base36>.sock` (98 bytes under temp HOME, verified), added a fail-fast length guard in daemon._listen, and gave the child a boot-error channel (`<socket>.err`) so its real failure reaches the parent."
+  },
+  "phases": [
+    {
+      "n": 1,
+      "name": "Survivable long turns",
+      "changes": [
+        "lib/drive-loop.mjs: new `onWaitExpiry: 'interrupt' | 'rewait'` (default interrupt). In rewait mode an expired per-wait cap logs and polls again instead of killing the turn; deadlineMs exhaustion STILL interrupts, so an explicit total budget is never weakened.",
+        "review-round.mjs / plan-round.mjs: pass onWaitExpiry 'rewait', and now honour testWaitMs() so the path is reachable offline (previously only commit-review-round read the seam).",
+        "lib/drive-loop.mjs: the allow-arm log names the COMMAND again ('approving safe command: <cmd>'); the 1.8.3 migration had reduced it to the method.",
+        "agents/codex-impl-reviewer.md + agents/codex-architect.md: documented the owned-session fallback for a turn that outlives the ~10-min Bash cap (start --private -> send/plan -> repeated wait in SEPARATE Bash calls -> read --out -> stop), scoped as the one sanctioned alternative and only after the bounded driver was killed.",
+        "SKILL.md: troubleshooting now states a wait timeout is a poll result, not a stopped turn."
+      ],
+      "tests": [
+        "drive-loop: rewait polls and never interrupts; rewait still honours deadlineMs",
+        "round-scripts: SLOWTURN completes under a 400ms cap (was a timeout)",
+        "both revert-checked"
+      ]
+    },
+    {
+      "n": 2,
+      "name": "Closed the three coverage gaps",
+      "changes": [
+        "mock-appserver: APPROVESAFE (pytest -q \u2014 the one family safe-command approves), SLOWTURN, and static-reask branches keyed on the drivers' own re-ask phrases.",
+        "round-scripts tests: allow arm for BOTH drivers, review re-ask now asserts PARSED_VERDICT (it previously passed on UNCLEAR), plan-round deny -> re-ask -> plan persisted, plan-round allow without re-ask.",
+        "detached-cli: spec:763 closed for real \u2014 the precedence test drives the STATE path (non-private start, then corrupt only state.cwd), because a --socket variant is vacuous by construction (bin sets state=null when --socket is given). Verified: reversing the precedence now fails the test, where the first attempt still passed.",
+        "detached-cli: over-long socket path fails loudly with a named cause."
+      ]
+    },
+    {
+      "n": 3,
+      "name": "Narrowed the review-findings hook (user-level)",
+      "changes": [
+        "~/.claude/hooks/enforce-receiving-code-review.sh exempts offline runs by COMMAND (CODEX_DRIVE_TEST_MODE, mock-appserver, node --test, npm test) rather than by output. Verified across 6 cases: tests exempt, real reviews still exit 2, clean passes still exit 0."
+      ]
+    },
+    {
+      "n": 4,
+      "name": "Release",
+      "changes": [
+        "marketplace.json + README to 1.8.4",
+        "plugin.json stays version-less; CLIENT_INFO/package.json stay 0.1.0"
+      ]
+    }
+  ],
+  "verification": {
+    "suite": "cd codex-claude && npm test \u2014 228 pass / 0 fail / 3 skipped",
+    "revert_checks": "rewait (unit + driver), safe-approve allow arm, socket-length guard, and the read --out precedence test were each verified to FAIL when their fix is reverted",
+    "leakage": "temp-dir and mock-process delta 0 across a full run",
+    "live": "deployed-plugin end-to-end review of this diff is the final step"
+  },
+  "accepted_limits": [
+    "In-process rewait cannot beat the Bash tool cap (~10 min per call); that is why the agent-md fallback exists.",
+    "commit-review-round keeps its hard total deadline \u2014 a shell gate must fail fast."
+  ]
+}
