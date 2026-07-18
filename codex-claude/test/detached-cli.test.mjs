@@ -52,11 +52,13 @@ async function cli(args, opts = {}) {
 async function startPrivate(dir, mode = 'ok', extra = []) {
   const r = await cli(['start', '--private', '--cwd', dir, '--sandbox', 'read-only',
     '--approval-policy', 'never', '--ephemeral', ...extra], { env: env(mode) });
+  // Register BEFORE asserting or parsing: both can throw, and by then the daemon is already
+  // running — which is precisely when the trailing `stop` never runs and it outlives the suite.
+  let out = null;
+  try { out = JSON.parse(r.stdout); } catch { /* asserted below */ }
+  if (out && out.socket) SPAWNED.push(out.socket);
   assert.equal(r.code, 0, `start failed: ${r.stderr}`);
-  const out = JSON.parse(r.stdout);
-  // Record before the caller can trip an assertion — that is exactly when the trailing `stop`
-  // never runs and the detached daemon outlives the suite.
-  if (out.socket) SPAWNED.push(out.socket);
+  assert.ok(out && out.socket, `start produced no socket: ${r.stdout}`);
   return out;
 }
 
