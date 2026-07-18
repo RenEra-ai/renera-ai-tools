@@ -54,8 +54,11 @@ export function parseStartProfile(flags = {}) {
   if (approvalPolicy !== undefined && !APPROVAL_POLICIES.includes(approvalPolicy)) {
     throw new Error(`invalid --approval-policy '${approvalPolicy}'; expected one of ${APPROVAL_POLICIES.join(', ')}`);
   }
-  if ('ephemeral' in flags && flags.ephemeral !== true) {
-    throw new Error('--ephemeral is a boolean flag and takes no value');
+  // Every boolean-only flag validated the same way. `--force no` used to be the string 'no', which
+  // is TRUTHY — so it force-stopped a live session the caller was trying not to touch. `--private no`
+  // was the mirror image: it looked private but wrote global state.
+  for (const b of ['ephemeral', 'force', 'private', 'resume-latest']) {
+    if (b in flags && flags[b] !== true) throw new Error(`--${b} is a boolean flag and takes no value`);
   }
   const ephemeral = flags.ephemeral === true ? true : undefined;
   const resuming = 'resume' in flags || 'resume-latest' in flags;
@@ -96,26 +99,45 @@ function compact(obj) {
 // got a full unscoped review of the cwd, at the cost of a live Codex turn to notice. Same class as
 // the `--flag=value` hazard below.
 const TRANSPORT_FLAGS = ['socket', 'timeout-ms'];
+// `start` and `doctor` never reach toCommand (bin returns early for both), so they had NO allowlist
+// at all: `start --help` silently booted a live daemon and overwrote ~/.codex-drive/state.json, and
+// a typo'd profile flag was dropped so every later `review` failed wrong_thread_profile — after the
+// session had already been paid for. They are listed here and asserted from bin directly.
 const VERB_FLAGS = {
+  start: ['cwd', 'model', 'resume', 'resume-latest', 'force', 'private', 'sandbox', 'approval-policy', 'ephemeral'],
+  doctor: [],
   plan: ['effort', 'approval-policy'],
   send: ['effort', 'approval-policy', 'mode'],
   review: ['base', 'scope'],
   wait: [],
   answer: ['id', 'option', 'text'],
   approve: ['decision'],
-  read: ['full', 'out'],
+  read: ['out'],
   interrupt: [],
   status: [],
   stop: [],
 };
 
-function assertKnownFlags(verb, flags) {
+// Neither start nor doctor talks to an existing daemon, so the transport flags are not merely
+// unused there — accepting them would be a NEW silently-ignored flag, the very class this exists
+// to close.
+const takesTransportFlags = (verb) => verb !== 'start' && verb !== 'doctor';
+
+export function assertKnownFlags(verb, flags) {
   const allowed = VERB_FLAGS[verb];
   if (!allowed) return;   // unknown verb: toCommand's default throws with a better message
+  assertOnlyFlags(flags, takesTransportFlags(verb) ? [...allowed, ...TRANSPORT_FLAGS] : allowed,
+    `unknown flag --%s for verb '${verb}'`);
+}
+
+/**
+ * Reject any flag outside `allowed`. Shared so every entry point — the CLI verbs and the one-shot
+ * gate script — enforces the same rule from one place instead of hand-rolling it (the one-shot's
+ * own copy is how `--help` once ran a live review).
+ */
+export function assertOnlyFlags(flags, allowed, template = 'unknown flag --%s') {
   for (const k of Object.keys(flags)) {
-    if (!allowed.includes(k) && !TRANSPORT_FLAGS.includes(k)) {
-      throw new Error(`unknown flag --${k} for verb '${verb}'`);
-    }
+    if (!allowed.includes(k)) throw new Error(template.replace('%s', k));
   }
 }
 
@@ -136,11 +158,30 @@ export function toCommand({ verb, positional, flags = {} }) {
     case 'review': return compact({ cmd: 'review', base: flags.base, scope: flags.scope });
     case 'wait': return { cmd: 'wait' };
     case 'answer': {
-      const answers = flags.text !== undefined ? [String(flags.text)] : [`__option:${flags.option}`];
+      // The daemon matches /^__option:(\d+)$/ and sends anything else VERBATIM as the answer text.
+      // So a valueless `--option` (boolean true) built the literal string '__option:true' and
+      // answered a live Codex question with it, while the caller believed option 1 was chosen.
+      // Same for a valueless `--text`, which became the answer "true".
+      if ((flags.text === undefined) === (flags.option === undefined)) {
+        throw new Error('answer requires exactly one of --text or --option');
+      }
+      requireValue(flags, 'id');
+      if (flags.id === undefined) throw new Error('--id requires a value');
+      let answers;
+      if (flags.text !== undefined) {
+        answers = [String(requireValue(flags, 'text'))];
+      } else {
+        const opt = requireValue(flags, 'option');
+        // 1-based index, so 0 is as wrong as 'abc'.
+        if (!/^[1-9]\d*$/.test(opt)) throw new Error(`--option must be a positive integer (got '${opt}')`);
+        answers = [`__option:${opt}`];
+      }
       return { cmd: 'answer', id: flags.id, answers };
     }
     case 'approve': return { cmd: 'approve', decision: flags.decision };
-    case 'read': return { cmd: 'read', full: !!flags.full };
+    // No `full`: nothing in lib/ ever read cmd.full, so `read --full` was accepted, sent over the
+    // wire and silently ignored — it is now a loud unknown-flag error like any other typo.
+    case 'read': return { cmd: 'read' };
     case 'interrupt': return { cmd: 'interrupt' };
     case 'status': return { cmd: 'status' };
     case 'stop': return { cmd: 'stop' };
