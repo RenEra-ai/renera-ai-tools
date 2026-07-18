@@ -38,7 +38,10 @@ async function main() {
   }
 
   const parsed = parseArgs(argv);
-  const store = new StateStore();
+
+  // NOTE: the StateStore is constructed AFTER validation below — its constructor mkdirs
+  // ~/.codex-drive, which is itself an observable side effect. Creating it here meant a rejected
+  // `start --help` still touched a clean HOME.
 
   // `doctor` and `start` return before toCommand(), which is where assertKnownFlags normally runs —
   // so validate here, BEFORE anything observable happens. For `start` that means before the profile
@@ -52,6 +55,9 @@ async function main() {
       fail(`verb '${parsed.verb}' takes no positional argument (got '${parsed.positional}')`);
     }
   }
+
+  // Only now, once the verb and its flags are known-good, may we touch the filesystem.
+  const store = new StateStore();
 
   if (parsed.verb === 'doctor') {
     const { doctorReport } = await import('../lib/doctor.mjs');
