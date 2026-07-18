@@ -27,6 +27,10 @@ test('malformed values are hard errors, never a silent fallback to the real bina
   assert.throws(() => testAppServerOpts({ ...m, CODEX_DRIVE_TEST_APPSERVER: '[1,2]' }), /non-empty JSON array/);
   assert.throws(() => testWaitMs({ ...m, CODEX_DRIVE_TEST_WAIT_MS: 'soon' }), /positive integer/);
   assert.throws(() => testWaitMs({ ...m, CODEX_DRIVE_TEST_WAIT_MS: '0' }), /positive integer/);
+  // A fraction between 0 and 1 cleared the old n<=0 guard, then floored to 0 — and sendCommand
+  // reads 0 as "no timeout" (client.mjs:8), so the cap silently became unbounded.
+  assert.throws(() => testWaitMs({ ...m, CODEX_DRIVE_TEST_WAIT_MS: '0.5' }), /positive integer/);
+  assert.throws(() => testWaitMs({ ...m, CODEX_DRIVE_TEST_WAIT_MS: '1500.7' }), /positive integer/);
 });
 
 test('a relative command is rejected: the child is spawned with the REVIEW cwd, not ours', () => {

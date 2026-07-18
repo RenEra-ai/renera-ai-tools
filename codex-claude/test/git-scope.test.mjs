@@ -3,30 +3,13 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { resolveReviewTarget, buildNativeReviewTarget, detectDefaultBranch } from '../lib/git-scope.mjs';
+import { git, makeRepo } from './fixtures/helpers.mjs';
 
 // Real temp-dir git fixtures: the module's whole job is talking to git, so a mock would only test
-// our idea of git rather than git.
-function git(cwd, ...args) {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-}
-
-function repo({ dirty = false, branch = 'main' } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'cdx-gs-'));
-  git(dir, 'init', '-q', '-b', branch);
-  git(dir, 'config', 'user.email', 't@t.t');
-  git(dir, 'config', 'user.name', 'T');
-  writeFileSync(join(dir, 'a.txt'), 'one\n');
-  git(dir, 'add', '.');
-  git(dir, 'commit', '-qm', 'first');
-  const first = git(dir, 'rev-parse', 'HEAD');
-  writeFileSync(join(dir, 'a.txt'), 'one\ntwo\n');
-  git(dir, 'commit', '-aqm', 'second');
-  const head = git(dir, 'rev-parse', 'HEAD');
-  if (dirty) writeFileSync(join(dir, 'a.txt'), 'one\ntwo\nDIRTY\n');
-  return { dir, first, head };
-}
+// our idea of git rather than git. Clean-by-default here (most scope rules key off a clean tree),
+// which is the one place this suite differs from the shared default.
+const repo = (opts = {}) => makeRepo({ dirty: false, prefix: 'cdx-gs-', ...opts });
 
 test('auto on a dirty tree -> working-tree', () => {
   const { dir } = repo({ dirty: true });

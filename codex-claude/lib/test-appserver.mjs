@@ -53,6 +53,9 @@ export function testWaitMs(env = process.env) {
     throw new Error(`${TEST_WAIT_MS_ENV} is set but ${TEST_MODE_ENV}=1 is not; refusing to shorten the wait cap`);
   }
   const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) throw new Error(`${TEST_WAIT_MS_ENV} must be a positive integer (got '${raw}')`);
-  return Math.floor(n);
+  // Integer, not merely finite-and-positive: `0.5` passed the old n<=0 guard and Math.floor turned
+  // it into 0 — which sendCommand reads as NO timeout (client.mjs:8), making the wait unbounded in
+  // the very harness that exists to bound it.
+  if (!Number.isInteger(n) || n <= 0) throw new Error(`${TEST_WAIT_MS_ENV} must be a positive integer (got '${raw}')`);
+  return n;
 }

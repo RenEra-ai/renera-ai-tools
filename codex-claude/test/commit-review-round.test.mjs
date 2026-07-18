@@ -3,43 +3,20 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFileSync, execFile } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { git, makeRepo, seamEnv } from './fixtures/helpers.mjs';
 
 const run = promisify(execFile);
 const SCRIPT = fileURLToPath(new URL('../scripts/commit-review-round.mjs', import.meta.url));
 const FIXTURE = fileURLToPath(new URL('./fixtures/mock-appserver.mjs', import.meta.url));
 
-function git(cwd, ...args) {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-}
-
-function repo({ dirty = true } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'cdx-crr-'));
-  git(dir, 'init', '-q', '-b', 'main');
-  git(dir, 'config', 'user.email', 't@t.t');
-  git(dir, 'config', 'user.name', 'T');
-  writeFileSync(join(dir, 'a.txt'), 'one\n');
-  git(dir, 'add', '.');
-  git(dir, 'commit', '-qm', 'first');
-  const first = git(dir, 'rev-parse', 'HEAD');
-  writeFileSync(join(dir, 'a.txt'), 'one\ntwo\n');
-  git(dir, 'commit', '-aqm', 'second');
-  if (dirty) writeFileSync(join(dir, 'a.txt'), 'one\ntwo\nDIRTY\n');
-  return { dir, first };
-}
+const repo = (opts = {}) => makeRepo({ prefix: 'cdx-crr-', ...opts });
 
 // Every path is exercised offline through the gated seam — no live Codex, no network. This is what
 // review-round.test.mjs:10 documents it CANNOT do (its happy path is live-only).
-function env(mode, extra = {}) {
-  return {
-    ...process.env,
-    CODEX_DRIVE_TEST_MODE: '1',
-    CODEX_DRIVE_TEST_APPSERVER: JSON.stringify([process.execPath, FIXTURE, '--review-mode', mode]),
-    ...extra,
-  };
-}
+const env = (mode, extra = {}) => seamEnv(FIXTURE, mode, extra);
 
 async function script(args, opts = {}) {
   try {

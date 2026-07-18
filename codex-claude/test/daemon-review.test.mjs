@@ -1,15 +1,28 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { connect } from 'node:net';
-import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Daemon } from '../lib/daemon.mjs';
+import { git, makeRepo, rmDir } from './fixtures/helpers.mjs';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/mock-appserver.mjs', import.meta.url));
 const REVIEW_PROFILE = { sandbox: 'read-only', approvalPolicy: 'never', ephemeral: true };
+
+// Every daemon and temp dir this suite creates, cleaned up at the end no matter how tests exit.
+// The per-test teardown below runs only on the happy path: one failed assertion used to leave a
+// live daemon (holding a mock app-server child) and leak BOTH temp dirs — and the `cdx-ds-` socket
+// dir was never removed even when everything passed, so a full run leaked ~19 of them.
+const CREATED = [];
+after(async () => {
+  for (const r of CREATED) {
+    try { await r.daemon?.stop(); } catch { /* best effort */ }
+    rmDir(r.sockDir);
+  }
+  CREATED.length = 0;
+});
 
 function rpcCall(socketPath, cmdObj) {
   return new Promise((resolve, reject) => {
@@ -26,38 +39,29 @@ function rpcCall(socketPath, cmdObj) {
   });
 }
 
-function git(cwd, ...args) {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-}
-
 // A real repo: git-scope shells out for real, so the daemon needs a genuine dirty tree to resolve.
 // TWO commits, deliberately: with only one, `first` IS HEAD, and a --base test would exercise the
 // base-is-HEAD rejection rather than a real branch diff.
-function repo() {
-  const dir = mkdtempSync(join(tmpdir(), 'cdx-dr-'));
-  git(dir, 'init', '-q', '-b', 'main');
-  git(dir, 'config', 'user.email', 't@t.t');
-  git(dir, 'config', 'user.name', 'T');
-  writeFileSync(join(dir, 'a.txt'), 'one\n');
-  git(dir, 'add', '.');
-  git(dir, 'commit', '-qm', 'first');
-  const first = git(dir, 'rev-parse', 'HEAD');
-  writeFileSync(join(dir, 'a.txt'), 'one\ntwo\n');
-  git(dir, 'commit', '-aqm', 'second');              // so `first` is a real ancestor, not HEAD
-  writeFileSync(join(dir, 'a.txt'), 'one\ntwo\nDIRTY\n');   // dirty -> auto resolves to working-tree
-  return { dir, first };
+function repo(opts = {}) {
+  const r = makeRepo({ prefix: 'cdx-dr-', ...opts });
+  CREATED.push({ sockDir: r.dir });   // swept by the `after` hook even if this test throws
+  return r;
 }
 
-async function startDaemon({ mode = 'ok', profile = REVIEW_PROFILE, cwd, ...extra } = {}) {
+async function startDaemon({ mode = 'ok', profile = REVIEW_PROFILE, cwd, appServerArgs = [], ...extra } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'cdx-ds-'));
   const socketPath = join(dir, 't.sock');
   const daemon = new Daemon({
     socketPath,
-    appServerOpts: { command: process.execPath, args: [FIXTURE, '--review-mode', mode] },
+    appServerOpts: { command: process.execPath, args: [FIXTURE, '--review-mode', mode, ...appServerArgs] },
     clientInfo: { name: 'codex-drive', version: '0.1.0' },
     cwd, profile,
     ...extra,
   });
+  // Registered BEFORE start(): a boot that throws part-way still leaves the socket dir (and
+  // possibly a spawned child) behind, and the caller never gets a handle to clean up.
+  const rec = { daemon, sockDir: dir };
+  CREATED.push(rec);
   await daemon.start();
   return { daemon, socketPath };
 }

@@ -1,42 +1,41 @@
 // The DETACHED CLI path: `start` re-spawns bin/codex-drive.mjs as `__daemon`, so nothing a test
 // constructs in-process reaches that daemon. These drive the real binary end-to-end, offline, via
 // the gated test seam (which the __daemon branch honours precisely so this file can exist).
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFileSync, execFile } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { git, makeRepo, seamEnv, rmDir } from './fixtures/helpers.mjs';
 
 const run = promisify(execFile);
 const CLI = fileURLToPath(new URL('../bin/codex-drive.mjs', import.meta.url));
 const FIXTURE = fileURLToPath(new URL('./fixtures/mock-appserver.mjs', import.meta.url));
 
-function git(cwd, ...args) {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-}
+// These spawn REAL detached, unref'd daemons. The per-test `stop` runs only after the assertions,
+// so one failure used to strand a daemon (plus its mock app-server child) on the developer's
+// machine indefinitely and leave a socket behind in the real ~/.codex-drive.
+const SPAWNED = [];   // { socket, mode }
+const DIRS = [];
+after(async () => {
+  for (const s of SPAWNED) {
+    try { await cli(['stop', '--socket', s], { env: env() }); } catch { /* best effort */ }
+  }
+  SPAWNED.length = 0;
+  for (const d of DIRS) rmDir(d);
+  DIRS.length = 0;
+});
 
 function repo() {
-  const dir = mkdtempSync(join(tmpdir(), 'cdx-dcli-'));
-  git(dir, 'init', '-q', '-b', 'main');
-  git(dir, 'config', 'user.email', 't@t.t');
-  git(dir, 'config', 'user.name', 'T');
-  writeFileSync(join(dir, 'a.txt'), 'one\n');
-  git(dir, 'add', '.');
-  git(dir, 'commit', '-qm', 'first');
-  writeFileSync(join(dir, 'a.txt'), 'one\ntwo\n');   // dirty
+  const { dir } = makeRepo({ prefix: 'cdx-dcli-' });
+  DIRS.push(dir);
   return dir;
 }
 
-function env(mode = 'ok') {
-  return {
-    ...process.env,
-    CODEX_DRIVE_TEST_MODE: '1',
-    CODEX_DRIVE_TEST_APPSERVER: JSON.stringify([process.execPath, FIXTURE, '--review-mode', mode]),
-  };
-}
+const env = (mode = 'ok', extra = {}) => seamEnv(FIXTURE, mode, extra);
 
 async function cli(args, opts = {}) {
   try {
@@ -53,7 +52,11 @@ async function startPrivate(dir, mode = 'ok', extra = []) {
   const r = await cli(['start', '--private', '--cwd', dir, '--sandbox', 'read-only',
     '--approval-policy', 'never', '--ephemeral', ...extra], { env: env(mode) });
   assert.equal(r.code, 0, `start failed: ${r.stderr}`);
-  return JSON.parse(r.stdout);
+  const out = JSON.parse(r.stdout);
+  // Record before the caller can trip an assertion — that is exactly when the trailing `stop`
+  // never runs and the detached daemon outlives the suite.
+  if (out.socket) SPAWNED.push(out.socket);
+  return out;
 }
 
 test('profile survives the __daemon handoff: review is ACCEPTED on a --private review session', async () => {

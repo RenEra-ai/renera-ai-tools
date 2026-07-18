@@ -1,0 +1,557 @@
+{
+  "title": "codex-claude v1.8.3 - fix plan for 40 verified review findings (native commit review feature)",
+  "date": "2026-07-18",
+  "revision": 2,
+  "target_version": "1.8.3",
+  "revision_note": "Rev 2 folds in the Codex architect review (codex-claude/docs/plans/2026-07-18-commit-review-fixes-review.md, VERDICT: sound-with-adjustments). Rev 1's D2/D4 were confirmed; D1 had three correctness gaps (cancellation, parked requests, app-exit finalization) and D3's test story was too weak. All 11 Codex adjustments are accepted except one misattribution (its adjustment 11 cites README.md:213 for the interrupt contract; the row is actually SKILL.md:213, which rev 1 already covered).",
+  "context": {
+    "review": "Multi-agent review (11 angles + Codex second opinion, per-finding adversarial verification) of the native commit-review feature, commits 5a04a9c...HEAD, spec codex-claude/docs/specs/2026-07-16-commit-review-native-design.md. 40 verified findings: 39 CONFIRMED, 1 PLAUSIBLE.",
+    "headline": "Daemon turn-lifecycle bugs of the same class v1.8.2 fixed (failed turns still resurrect as completed on two paths; two wedge scenarios defeat the documented interrupt recovery). Plus flag-validation holes (start --help boots a live daemon), spec deviations, one-shot robustness gaps, drifted duplication, mock/test fidelity gaps, three missing spec-required tests.",
+    "scope": "All 40 findings, shipped as plugin v1.8.3. All work under codex-claude/. Tests: cd codex-claude && npm test (offline via CODEX_DRIVE_TEST_* mock seam). Commits: short one-line messages.",
+    "baseline": "Pre-change test baseline captured 2026-07-18: 174 tests, 171 pass, 0 fail, 3 skipped (the live-only integration tests, which need CODEX_DRIVE_LIVE=1).",
+    "verified_constraints": [
+      "client.mjs:8 - sendCommand treats timeoutMs <= 0 as NO timeout (unbounded). Any computed remaining-budget that rounds to 0 must become an immediate timeout, never a call.",
+      "appserver.mjs:29-31 - rejectAll() runs BEFORE emit('exit'), so pending RPCs are already rejected at app exit; not writing to the dead transport afterwards is correct.",
+      "spec:305-307 - a late response from a superseded turn is logged and dropped, never mutates current state (constrains the late-interrupt design).",
+      "spec:678 error table - usage errors print USAGE and exit 1 BEFORE daemon boot.",
+      "spec:776 - 'Any change to review-round.mjs / plan-round.mjs beyond the effort default' is OUT OF SCOPE; migrating them onto the shared drive-loop is deviation 8 and must be declared in rev-6.",
+      "CLIENT_INFO stays 0.1.0 and plugin.json stays version-less (spec :617-623)",
+      "marketplace.json version bump is the load-bearing one (plugin cache is version-keyed)",
+      "StateStore roots at os.homedir() which honors $HOME (enables temp-HOME tests)",
+      "SKILL.md:213 (not README.md) carries the interrupt verb-table row advertising {error:'no_active_turn'}",
+      "daemon.mjs:334 already extracts opt.label ?? opt.value; all three driver scripts use only .label"
+    ]
+  },
+  "design_decisions": {
+    "D1_daemon_lifecycle": {
+      "summary": "Invariants with one owner each. Rev 2 corrects three gaps Codex identified: transport-death policy, parked-request timing on interrupt, and unknown-id quarantine.",
+      "invariants": [
+        "I1 single terminal finalizer WITH an explicit transport policy: _finalizeTurn(message, { status = 'failed', settleRequests = true }). Every failed/interrupted path goes through it. The _sendStart rejection arm (daemon.mjs:208-219) calls it inside its existing gen+status guard (closes :216). _onAppExit calls the SAME finalizer with settleRequests:false and clears local buffered/parked state - the transport is dead and AppServer already rejected pending RPCs (appserver.mjs:29). This resolves rev 1's contradiction between I1 and the no-write-after-exit rule.",
+        "I2 every server request gets exactly one response WHILE THE TRANSPORT REMAINS WRITABLE (app exit is the declared exception). Helpers: _answerServerRequest(req) (deny approvals in their own shape; permissions-shaped and unknown shapes get respondError; try/catch best-effort) and _settleOutstandingRequests() (answer turn.parked then null it, answer every buffered ['__serverRequest', req], clear buffered). Called from _finalizeTurn when settleRequests is true (closes :262), from the TURN_COMPLETED finalization in _dispatchNotification, and defensively at the top of _beginTurn.",
+        "I3 no state transition after finalized: _onServerRequest (:505) folds this.turn.finalized into the not-ours test so a late request is answered via the existing decline branch, never parked. _dispatchNotification keeps its finalized early-return. (Codex: sound as written.)",
+        "I4 an awaitingResponse turn always terminates, but its residue is quarantined: a buffered turn/completed with status completed arms the backstop (unchanged); status failed/interrupted finalizes IMMEDIATELY per spec :321-325. Because _isStaleTurn cannot judge anything while turn.id is null (daemon.mjs:367), this CAN misfire on a stale same-thread completion from a previous turn - so it is paired with the unknown-id quarantine below rather than being waved through as a liveness trade-off."
+      ],
+      "interrupt_design": {
+        "problem": "daemon.mjs:359 awaits turn/interrupt while a parked server request may still be outstanding; the server can withhold completion until its request is answered, so the interrupt can deadlock.",
+        "design": "_interrupt: (1) if not running/awaiting_input -> {error:'no_active_turn'}; (2) FIRST answer and clear any parked request via _answerServerRequest and normalize status off awaiting_input (so _wait/_parkedResult can never dereference a null parked); (3) set this.turn.cancelRequested = true (the explicit cancellation marker); (4) if turn.id is known, await turn/interrupt; (5) if turn.id is null, finalize locally via _finalizeTurn('interrupted before the turn id was known', {status:'interrupted'}) and enter the unknown-id quarantine. Returns {ok:true} in both cases.",
+        "late_interrupt": "In _onStartResponse's !awaitingResponse early return, fire a best-effort turn/interrupt for the late id ONLY when this.turn.cancelRequested is set - never for backstop-finalized, app-exit, or immediate-failed-completion cases (spec:305-307 says those late responses are simply dropped). Always .catch(() => {}).",
+        "quarantine": "When a pre-response turn is finalized locally with no authoritative turn id, the session cannot distinguish that turn's later traffic from a new turn's. Set this.restartRequired = true; subsequent plan/send/review return {error:'restart_required'} until the daemon is stopped/restarted. status reports it so a caller can act. The one-shot is unaffected (it tears the daemon down); the documented owned-session fallback gets an honest, fail-closed answer instead of a silently corruptible session. This REPLACES rev 1's unsafe 'a second review is accepted immediately' assertion."
+      },
+      "riding_along": [
+        "daemon.mjs:421: if (!params || typeof params !== 'object') return; at the top of _onNotification (before buffering, so params-less entries are never buffered or replayed)",
+        "daemon.mjs:414 + replay hardening: replay buffered NOTIFICATIONS through _onNotification (after clearing awaitingResponse), not _dispatchNotification directly (daemon.mjs:250), so the params and foreign-thread guards really are authoritative; buffered server requests keep replaying through _onServerRequest. Then delete _dispatchNotification's duplicate foreign-thread check. Add foreign-entry and malformed-entry buffered-replay tests.",
+        "daemon.mjs:239: gate the reviewThreadId validation on this.turn.isReview; drop the now-unused resolved param from _sendStart/_onStartResponse and the call site; update the two direct-call tests in daemon-review.test.mjs (:246, :262) to the 3-arg form"
+      ],
+      "daemon_171_disposition": "ACCEPTED, NOT FIXED (deviation 1), but rev 2 strengthens the mitigation per Codex: keeping sync git matches rev 5, however a probe TIMEOUT must not be read as proof the daemon is dead. bin/codex-drive.mjs:138 raises the cap to 10000 ms AND distinguishes outcomes: definite absence (ECONNREFUSED / ENOENT) may replace state; a timeout or malformed response fails CLOSED - refuse to replace the session and tell the user to stop it explicitly (or pass --force). Plus the phase-4 spawn reductions and a comment at _startReview."
+    },
+    "D2_flag_validation": {
+      "summary": "One allowlist in verbs.mjs for every entry point. Codex confirmed the design; rev 2 adds two validations it flagged.",
+      "changes": [
+        "VERB_FLAGS gains start: [cwd, model, resume, resume-latest, force, private, sandbox, approval-policy, ephemeral] and doctor: []",
+        "assertKnownFlags exported; skips TRANSPORT_FLAGS for start/doctor (--socket/--timeout-ms there would be a new silent no-op)",
+        "bin/codex-drive.mjs: immediately after parseArgs, for doctor and start: assertKnownFlags(verb, flags) + reject positionals - BEFORE parseStartProfile and the session probe. start --help becomes a loud error (no daemon boot, no state overwrite); start /some/repo no longer silently anchors to the caller's cwd",
+        "parseStartProfile: boolean-only validation for force/private/resume-latest (start --force no today force-stops a live session, string 'no' is truthy). bin's now-redundant --private check at :131 removed",
+        "REV 2 (Codex): apply requireValue to --text as well as --id in the answer verb - a valueless --text otherwise still becomes the literal answer 'true', the same truthiness family the release is closing",
+        "repeated flags stay last-wins (parseArgs semantics); commit-review-round adopts them in phase 6"
+      ]
+    },
+    "D3_shared_constants_drive_loop": {
+      "constants": [
+        "REVIEW_PROFILE: export the existing const (daemon.mjs:16); import in commit-review-round.mjs and daemon-review.test.mjs:12 (both copies deleted)",
+        "CLIENT_INFO: hoist to lib/protocol.mjs; consume in bin/codex-drive.mjs, commit-review-round.mjs, plan-round.mjs:31, review-round.mjs:47. Value stays 0.1.0 (spec :623)",
+        "SCOPES + fullSha: export from git-scope.mjs; fullSha returns null on failure. REV 2 (Codex): every caller must then raise an explicit error - especially the HEAD call - so nothing reaches .slice() or builds a review target from null"
+      ],
+      "drive_loop_contract": "New lib/drive-loop.mjs: driveTurn(socketPath, { waitTimeoutMs, deadlineMs?, log, decideApproval(request) -> allow|deny|fail, onMalformedQuestion, onUnsupported, maxDrains = 20 }) -> {status, message, empty?, reason?}. REV 2 (Codex) pins the contract: (a) a {error:...} response from answer/approve ends the loop via interrupt + status failed, never a silent re-loop; (b) the total budget uses a MONOTONIC elapsed source, and when no positive budget remains the loop interrupts immediately rather than calling sendCommand - because client.mjs:8 treats timeoutMs <= 0 as UNBOUNDED, which would recreate the very hang being fixed; (c) first-option extraction accepts a plain string, {label}, AND {value} (daemon.mjs:334 already does; all three scripts today use only .label); (d) exact drain-count semantics are specified and tested.",
+      "consumers": [
+        "review-round.mjs / plan-round.mjs: replace driveWait+drain; decideApproval closures keep isSafeCommand-allow + declinedExec tracking; no total deadline; static re-ask stays in the scripts; output contracts byte-identical. REV 2: also install the same idempotent SIGINT/SIGTERM teardown these scripts lack today (killing a driver mid-turn is how app-servers get orphaned - observed live during this very planning session, when a plan-round run was interrupted).",
+        "commit-review-round.mjs: decideApproval: (req) => req.method === 'item/permissions/requestApproval' ? 'fail' : 'deny' (closes cr:145, the spec's direct permissions->interrupt mapping, no 20-round deny spam); onMalformedQuestion/onUnsupported: fail; deadlineMs: WAIT_TIMEOUT_MS (closes cr:173)"
+      ],
+      "test_correction": "REV 2 (Codex, verified): rev 1's claim that the round-scripts' existing tests are the migration drift alarm is FALSE - review-round.test.mjs:10-13 states it covers ONLY the --plan-file fail-closed guard and never boots the daemon, and there is no plan-round.test.mjs at all. Phase 5 must therefore ADD offline subprocess tests for both migrated consumers (approval policy, question handling, static re-ask, output contract, cleanup) using the mock seam, or the migration ships unverified."
+    },
+    "D4_commit_review_round_preflight": {
+      "steps": [
+        "--help/-h pre-scan stays first (USAGE, exit 0)",
+        "REV 2 (Codex): install idempotent SIGINT/SIGTERM handlers BEFORE any resource creation (before mkdtempSync and daemon boot), guarded against re-entry; they run teardown then exit 130/143 AFTER cleanup completes",
+        "parseArgs(['commit-review-round', ...process.argv.slice(2)]) in try/catch -> die (inherits --flag=value rejection). Reject positionals; check flags against [base, scope, cwd] via a shared assertOnlyFlags(flags, allowed) exported from verbs.mjs (also used internally by assertKnownFlags)",
+        "--cwd non-blank check stays script-side (message pinned by a test), then resolve()",
+        "preflight = resolveReviewTarget(cwd, { base, scope }) in try/catch: the FULL validation (repo, enum, exclusivity, ref, ancestry, empty-delta) in milliseconds BEFORE any daemon boot, scrubbed env (closes :77, :79, :110; spec :680). REV 2 (Codex): the catch must print USAGE alongside e.message - spec:678 requires usage + exit 1 for these conditions, and rev 1's bare die(e.message, 1) would have dropped it. Build USAGE's scope list from exported SCOPES. Daemon still re-validates authoritatively; scopeLabel still taken from the daemon response",
+        "headSha() -> git-scope's fullSha(cwd, 'HEAD') with an explicit null check (scrubbed; fixes the GIT_DIR trailer misreport)",
+        "exit: process.exit(clean ? 0 : 2) (:196)"
+      ]
+    }
+  },
+  "phases": [
+    {
+      "n": 1,
+      "name": "Test harness: shared fixtures, mock fidelity, cleanup discipline",
+      "commit": "1.8.3 wip: shared test fixtures, mock app-server fidelity, temp-dir hygiene",
+      "closes": [
+        "commit-review-round.test.mjs:14",
+        "mock-appserver.mjs:167",
+        "test-appserver.mjs:57",
+        "detached-cli.test.mjs:59",
+        "daemon-review.test.mjs:52"
+      ],
+      "changes": [
+        "New test/fixtures/helpers.mjs (outside the test/*.test.mjs glob): git(cwd, ...args); makeRepo({dirty=true, branch='main'}) -> {dir, first, head} - superset of the four drifted copies, plus git config commit.gpgsign false; seamEnv(fixturePath, mode, extra). Migrate git-scope / commit-review-round / daemon-review / detached-cli (+ daemon.test.mjs where applicable); delete local copies",
+        "REV 2 (Codex): helpers must clean up even when daemon startup itself throws before returning (wrap the boot so a partially-created socket dir is still removed)",
+        "mock-appserver.mjs fidelity (:167): accept an ERROR response as a final answer to a pending server request; the catch-all answers only requests (messages WITH method); a response to an untracked id is ignored",
+        "mock-appserver.mjs new capabilities: --record <path> writes {params, cwd: process.cwd()} on thread/start. New REVIEW_MODES: permissions and failbeforeresponse",
+        "test-appserver.mjs:57: Number.isInteger(n) && n > 0 (drop Math.floor); add a '0.5'-rejected case",
+        "Teardown symmetry (:59, :52): try/finally in daemon-review, detached-cli and daemon.test.mjs; remove the cdx-ds- socket dirs each test creates"
+      ],
+      "verify": "npm test green. REV 2 (Codex, verified): the tmp census must be NARROWED to in-scope prefixes (cdx-ds-, cdx-d-, cdx-home-, cdx-creview-) - a global cdx-* census cannot pass, because client.test.mjs:14, config.test.mjs:9, review-round.test.mjs:19 and state.test.mjs:9 also leak by design. Compare mock-process counts before/after rather than requiring a globally empty pgrep in a shared workspace."
+    },
+    {
+      "n": 2,
+      "name": "Daemon turn-lifecycle hardening (+ regression tests)",
+      "commit": "1.8.3 wip: daemon turn finalization - one finalizer, every request answered, no resurrection",
+      "closes": [
+        "daemon.mjs:216",
+        "daemon.mjs:400",
+        "daemon.mjs:360",
+        "daemon.mjs:505",
+        "daemon.mjs:262",
+        "daemon.mjs:359",
+        "daemon.mjs:414",
+        "daemon.mjs:421",
+        "daemon.mjs:239",
+        "daemon.mjs:171 (accepted disposition + fail-closed probe)",
+        "spec:726 generation-token test",
+        "daemon-review.test.mjs:192 cwd coherence"
+      ],
+      "changes": [
+        "Implement D1 as revised: _finalizeTurn with a transport policy; _onAppExit routed through it with settleRequests:false; _interrupt answers/clears the parked request BEFORE awaiting turn/interrupt and sets cancelRequested; unknown-id local finalization enters the restart_required quarantine; late interrupt fires only on cancelRequested (always .catch); replay through _onNotification; params guard; isReview gate",
+        "bin/codex-drive.mjs:138 probe: raise to 10000 ms AND classify the outcome - only definite absence (ECONNREFUSED/ENOENT) may replace state; timeout/malformed fails closed without overwriting state.json"
+      ],
+      "tests": [
+        ":216 - stub app.request = reject('boom'); after a tick feed exitedReviewMode + turn/completed{completed} -> stays failed, no leaked text",
+        ":262 - awaitingResponse turn with a buffered same-thread server request; _onStartResponse with a foreign reviewThreadId -> exactly one respond/respondError recorded for the buffered id",
+        ":359 - REV 2 (Codex): prove ORDERING, not just eventual settlement - parked approval + _interrupt -> the response to the parked request is emitted BEFORE any turn/completed is fed, parked is null, and status is no longer awaiting_input",
+        ":400 - unit: awaitingResponse + turn/completed{status:'failed'} -> finalized immediately, waiter resolved, backstop null. End-to-end: mock failbeforeresponse -> wait resolves failed (no hang). Update the existing backstop test with the new finalize assertion",
+        ":360 - socket test with mock noresponse: review -> interrupt -> {ok:true} -> wait -> interrupted. REV 2: assert the session is then restart_required (a further review returns {error:'restart_required'}) INSTEAD of rev 1's unsafe 'second review accepted'. Unit: late _onStartResponse after a cancelRequested fail -> stub records turn/interrupt for the late id; and a backstop-finalized late response records NO interrupt (spec:305-307)",
+        ":505 - finalized turn (completed AND failed-null-id variants); matching server request -> answered, never parked, state intact",
+        ":421 - _onNotification with missing/non-object params -> no throw",
+        ":414 + replay - buffered foreign-thread and malformed entries are dropped on replay through _onNotification",
+        ":239 - update the two direct _onStartResponse calls to the 3-arg form",
+        "spec:726 both arms of the generation-token drop",
+        "spec:727-728 cwd coherence via mock --record: record.params.cwd === daemon.cwd and realpathSync(record.cwd) === realpathSync(daemon.cwd)"
+      ]
+    },
+    {
+      "n": 3,
+      "name": "Flag-validation unification (verbs.mjs + bin/codex-drive.mjs)",
+      "commit": "1.8.3 wip: reject unknown flags on start/doctor, fix answer --option, drop dead read --full",
+      "closes": [
+        "bin/codex-drive.mjs:117",
+        "bin/codex-drive.mjs:43",
+        "bin/codex-drive.mjs:166",
+        "verbs.mjs:139",
+        "verbs.mjs:106",
+        "spec:763 read --out state tests"
+      ],
+      "changes": [
+        "Implement D2 (incl. the REV 2 --text requireValue)",
+        "verbs.mjs:139 answer: exactly one of --text/--option; --id and --text via requireValue; --option must match /^[1-9]\\d*$/",
+        "verbs.mjs:106: remove 'full' from VERB_FLAGS.read and the full: !!flags.full mapping; update the two verbs.test.mjs assertions; add read --full -> unknown flag",
+        "bin/codex-drive.mjs:166: parent-side testAppServerOpts() preflight before the probe/spawn",
+        "spec:763 detached-cli tests with a temp HOME: absent state and mismatched state (decoy cwd) - artifact lands under the daemon repo both times"
+      ],
+      "tests": [
+        "REV 2 (Codex): table-driven boolean-flag cases - start --help, --force no, --private no, --resume-latest no all exit 1 loudly",
+        "start --private --bogus x -> exit 1, no daemon (record sentinel absent), no state write",
+        "start --private /positional -> exit 1; doctor --bogus -> exit 1",
+        "REV 2 (Codex): isolate start/doctor tests under a temporary HOME when asserting no state mutation",
+        "seam preflight: CODEX_DRIVE_TEST_APPSERVER without CODEX_DRIVE_TEST_MODE -> start --private exits 1 'refusing to substitute'",
+        "probe classification: a live-but-busy daemon (timeout) is NOT replaced and state.json is untouched"
+      ]
+    },
+    {
+      "n": 4,
+      "name": "git-scope fixes",
+      "commit": "1.8.3 wip: git-scope - maxBuffer, spec-ordered default branch, fewer spawns, drop dead explicit",
+      "closes": [
+        "git-scope.mjs:48",
+        "git-scope.mjs:116",
+        "git-scope.mjs:157",
+        "git-scope.mjs:201",
+        "git-scope.mjs:182"
+      ],
+      "changes": [
+        ":48 - spawnSync maxBuffer: 64 MiB (no regression fixture; deviation 4)",
+        ":116 - detectDefaultBranch: origin/HEAD block first, then ALL of refs/heads/{main,master,trunk}, then ALL of refs/remotes/origin/{...} per spec :205-206. Test: local master + synthesized refs/remotes/origin/main -> returns master",
+        ":157 + :201 - fullSha returns null on failure and is exported; base path drops the duplicate refExists (identical error message); branchAgainstDefault drops the refExists recheck. REV 2 (Codex): add an explicit null check at EVERY fullSha caller, especially HEAD, so no caller reaches .slice() or builds a target from null",
+        ":182 - drop explicit from the return objects, the branchAgainstDefault param, JSDoc, and the two git-scope.test.mjs assertions",
+        "Export SCOPES"
+      ]
+    },
+    {
+      "n": 5,
+      "name": "Shared constants + lib/drive-loop.mjs (+ round-script migration, now with real tests)",
+      "commit": "1.8.3 wip: shared REVIEW_PROFILE/CLIENT_INFO, extract drive-loop helper",
+      "closes": [
+        "commit-review-round.mjs:34 (export side)",
+        "commit-review-round.mjs:105",
+        "commit-review-round.mjs:141 (lib + round scripts)"
+      ],
+      "changes": [
+        "Export REVIEW_PROFILE (daemon.mjs) and CLIENT_INFO (protocol.mjs); delete the duplicate literals in bin, the three scripts, and daemon-review.test.mjs:12",
+        "New lib/drive-loop.mjs implementing the REV 2 contract (action-response errors, monotonic budget, never pass timeoutMs<=0 to sendCommand, {label}/{value}/string option extraction, exact drain semantics)",
+        "New test/drive-loop.test.mjs against a scripted in-process net server: terminal pass-through; option extraction variants; approval allow/deny/fail; malformed-question and unsupported in both modes; drain exhaustion; per-wait timeout -> interrupt + timeout; deadline arithmetic incl. the zero-remaining-budget case",
+        "Migrate review-round.mjs + plan-round.mjs onto driveTurn, and add the idempotent signal teardown they lack",
+        "REV 2 (Codex, verified gap): ADD offline subprocess tests for both migrated consumers (there is no plan-round.test.mjs, and review-round.test.mjs never reaches the daemon path) covering approval policy, question handling, static re-ask, output contract and cleanup - otherwise this phase can regress them undetected"
+      ]
+    },
+    {
+      "n": 6,
+      "name": "commit-review-round rewrite",
+      "commit": "1.8.3 wip: commit-review-round - shared parser/preflight/drive-loop, signals, total deadline",
+      "closes": [
+        "commit-review-round.mjs:61",
+        "commit-review-round.mjs:77",
+        "commit-review-round.mjs:79",
+        "commit-review-round.mjs:110",
+        "commit-review-round.mjs:135",
+        "commit-review-round.mjs:141 (third copy dies)",
+        "commit-review-round.mjs:145",
+        "commit-review-round.mjs:173",
+        "commit-review-round.mjs:196",
+        "commit-review-round.mjs:34 (consumer half)"
+      ],
+      "changes": [
+        "Implement D4 as revised (USAGE preserved on every preflight failure; signal handlers installed before resource creation; exit 130/143 after cleanup) + the drive-loop consumption"
+      ],
+      "tests": [
+        "Existing suite green with the documented message-regex edits",
+        "No daemon boot on bad --base (--record sentinel absent), and the error still prints USAGE",
+        "Last-wins pin: --scope working-tree --scope bogus -> exit 1 invalid --scope 'bogus'",
+        "Permissions (:145): exit 2, STATUS: failed, stderr /interrupt/ and NOT /denying approval/",
+        "SIGTERM (:135): kill mid-run -> exit 143, cdx-creview- census unchanged, no orphan mock"
+      ]
+    },
+    {
+      "n": 7,
+      "name": "Docs, spec alignment, release",
+      "commit": "1.8.3: daemon lifecycle hardening, unified flag validation, shared drive-loop",
+      "closes": [
+        "SKILL.md:140"
+      ],
+      "changes": [
+        "SKILL.md:140 - align with the :215 verb table (stop leaves state.json as a stale record)",
+        "SKILL.md verb table: answer row (exactly-one-of, integer --option, nonblank --text); interrupt row at :213 - it currently advertises only {ok}/{error:'no_active_turn'} and must document the pre-id local-cancel behavior and the restart_required quarantine. (This is Codex adjustment 11, corrected: it cited README.md:213, but the row lives in SKILL.md:213; codex-claude/README.md has no such row.)",
+        "Spec rev-6 notes: preflight runs full git-scope validation before boot; shared lib/drive-loop.mjs backs all three drivers (declared as deviation 8 against spec:776, which puts round-script changes out of scope); daemon.mjs:171 disposition and the fail-closed probe; qualify the request/response invariant as 'while the transport is writable'; and reconcile spec:307's 'logged and dropped' with reality - the daemon has NO logging path, so rev 6 says 'dropped' unless logging is deliberately added",
+        "Version bump: .claude-plugin/marketplace.json codex-claude 1.8.2 -> 1.8.3; root README.md:27 -> 1.8.3. plugin.json stays version-less, package.json and CLIENT_INFO stay 0.1.0",
+        "Release: commit -> push -> /plugin update -> verify BOTH the 1.8.3 cache dir exists AND the loaded plugin moved"
+      ]
+    }
+  ],
+  "deviations": [
+    "1. daemon.mjs:171 - NOT converted to async (matches rev 5). REV 2: the mitigation is strengthened per Codex - a probe timeout must NOT be read as a dead daemon; only definite absence may replace state.json, timeout fails closed.",
+    "2. daemon.mjs:360 - local finalize + late interrupt, NOT interrupt-by-threadId (wire shape unverified offline). REV 2: gated on an explicit cancelRequested marker and paired with the restart_required quarantine, per Codex.",
+    "3. git-scope.mjs:157 - the further ref+HEAD single-invocation fold skipped (Codex agrees)",
+    "4. git-scope.mjs:48 - no >1 MiB regression fixture (Codex agrees; ~70k files is disproportionate)",
+    "5. commit-review-round.mjs:105 - CLIENT_INFO value stays 0.1.0 per spec :623 (Codex agrees)",
+    "6. verbs.mjs:139 - broader answer validation than the finding asked (Codex agrees; rev 2 adds nonblank --text)",
+    "7. Repeated flags - unified on parseArgs last-wins (Codex agrees)",
+    "8. REV 2 (new, per Codex): migrating review-round.mjs and plan-round.mjs onto the shared drive-loop exceeds spec:776's 'out of scope' line for those scripts. Justified by finding commit-review-round.mjs:141 (three copies of the drain loop), and therefore declared in rev-6 and covered by the new consumer tests."
+  ],
+  "codex_review": {
+    "verdict": "sound-with-adjustments",
+    "path": "codex-claude/docs/plans/2026-07-18-commit-review-fixes-review.md",
+    "accepted": "All 11 concrete adjustments accepted and folded into rev 2, with one correction: adjustment 11 cites README.md:213 for the interrupt contract, but that row is at SKILL.md:213 (verified: codex-claude/README.md is 129 lines and contains no such row).",
+    "confirmed_by_inspection": [
+      "client.mjs:8 - timeoutMs <= 0 is unbounded (deadline arithmetic must never round to 0)",
+      "review-round.test.mjs:10-13 - self-documents that it never boots the daemon, so it cannot be the migration drift alarm",
+      "appserver.mjs:29-31 - rejectAll precedes emit('exit')",
+      "spec:678 usage-error contract, spec:776 round-script out-of-scope line, spec:305-307 late-response drop rule"
+    ]
+  },
+  "verification": {
+    "per_phase": "cd codex-claude && npm test. Hygiene: census NARROWED to the in-scope prefixes (cdx-ds-, cdx-d-, cdx-home-, cdx-creview-); mock-process count compared before/after rather than requiring a globally empty pgrep",
+    "baseline": "171 pass / 0 fail / 3 skipped (live-only) before any change",
+    "live_smoke": "one-shot: node codex-claude/scripts/commit-review-round.mjs --cwd . -> review text + STATUS/SCOPE trailers, honest exit. Owned-session fallback: start --private -> review --socket S -> interrupt --socket S (must return {ok:true} even pre-id) -> wait -> a further review must report restart_required -> stop. Flag hardening: start --help and doctor --bogus -> loud errors, exit 1, NO daemon boot",
+    "coverage": "39 findings fixed, 1 accepted+mitigated (daemon.mjs:171)"
+  },
+  "findings": [
+    {
+      "file": "codex-claude/lib/daemon.mjs",
+      "line": 216,
+      "verdict": "CONFIRMED",
+      "summary": "The _sendStart rejection handler marks the turn failed without setting finalized=true (unlike _failTurn), so later same-thread notifications resurrect the failed turn as completed — the exact bug class commit f339a09 fixed on the other failure paths. [angles: A-line-scan, C-cross-file, D-js-pitfalls, simplification (line 213), codex (ISSUES FOUND, line 208)]",
+      "failure_scenario": "review/start (or turn/start) rejects after the server has begun streaming: rejection sets status='failed' but leaves finalized=false and turn.id=null, so _isStaleTurn filters nothing; a subsequent item/completed{exitedReviewMode} + turn/completed walks the turn back to 'completed' carrying the rejected review text. Reproduced with the real Daemon class: after a rejected _sendStart, injecting the two notifications yields status 'completed' / message 'LEAKED REVIEW TEXT', so a later `read`/`wait` hands the gate a review that was refused. Fix: use _failTurn(...) (guarded by the running/awaiting_input check) in the rejection handler."
+    },
+    {
+      "file": "codex-claude/lib/daemon.mjs",
+      "line": 400,
+      "verdict": "CONFIRMED",
+      "summary": "While awaitingResponse, only a turn/completed with status 'completed' arms the response backstop; a buffered completion with status 'failed' or 'interrupted' is buffered forever when the start response never arrives, wedging the daemon — the design spec says these must finalize immediately. [angles: A-line-scan, C-cross-file, F-spec-conformance, codex (ISSUES FOUND, line 394)]",
+      "failure_scenario": "Probe-verified: turn/completed{status:'failed'} received while the review/start response is outstanding leaves status 'running', backstop null, `wait` hangs indefinitely, every later plan/send/review returns {error:'busy'}, and `interrupt` returns no_active_turn (turn.id null). In the long-review fallback owned session this bricks the session until `stop`; the spec's turn-lifecycle rule ('interrupted/failed finalize immediately' — what 'keeps the documented timeout→interrupt→STATUS: failed path from deadlocking') and its error table are not implemented for these statuses. Spec: docs/specs/2026-07-16-commit-review-native-design.md:321-325. A bare `codex-drive wait` (no --timeout-ms) hangs forever; the one-shot only escapes via the 540 s client cap and mislabels the outcome `timeout`."
+    },
+    {
+      "file": "codex-claude/lib/daemon.mjs",
+      "line": 360,
+      "verdict": "CONFIRMED",
+      "summary": "_interrupt returns {error:'no_active_turn'} whenever turn.id is null, which includes a running turn whose start response is still outstanding — so the documented wait-cap→interrupt recovery cannot cancel a wedged turn/start or review/start. [angles: A-line-scan, C-cross-file, D-js-pitfalls]",
+      "failure_scenario": "Server accepts review/start but never responds and emits nothing: turn.status='running', turn.id=null. commit-review-round's waitOnce caps out after 540s and sends interrupt, which is refused (no_active_turn, verified by probe) — the one-shot survives only because teardown kills the daemon, but on the fallback owned session (`wait --timeout-ms … --socket $S` then `interrupt --socket $S` per the SKILL/spec recipe) the interrupt silently fails, the turn stays 'running' forever, and every subsequent verb gets 'busy' until the user runs `stop`, contradicting the error table's 'Wait cap expires → Interrupt' row. Regression: previously turn.id was adopted from turn/started, so interrupt worked once the turn was announced. _interrupt could fail the local turn (or interrupt by threadId) when no id exists."
+    },
+    {
+      "file": "codex-claude/bin/codex-drive.mjs",
+      "line": 117,
+      "verdict": "CONFIRMED",
+      "summary": "The `start` verb never rejects unknown flags (parseStartProfile ignores unrecognised keys and startDaemon has no allowlist; the assertKnownFlags allowlist lives in toCommand, a layer start never reaches, and there is no 'start' entry in VERB_FLAGS) — the same silently-ignored-flag hazard class fixed for commit-review-round (98af6f4) and for every other verb via VERB_FLAGS in verbs.mjs. [angles: A-line-scan, C-cross-file, D-js-pitfalls, E-wrapper-proxy, altitude (verbs.mjs:112), codex (ISSUES FOUND, bin/codex-drive.mjs:49)]",
+      "failure_scenario": "Repro confirmed offline: `codex-drive start --help` prints no help, boots a live detached daemon (a real `codex app-server` in production), overwrites ~/.codex-drive/state.json, and exits 0 — the exact --help failure mode the 1.8.1 fix removed elsewhere. Likewise a typo'd profile flag (`start --sandbxo read-only --ephemral`) is silently dropped, producing a session without the review profile so every later `review` is refused wrong_thread_profile after the session cost was already paid, and a mistyped `--privte` writes global state the caller believed it was avoiding (with a live shared session the user is told to use --force, and `start --force --privte` then force-stops the unrelated shared session). Positionals are likewise silently ignored: `codex-drive start /some/repo` (forgetting --cwd) anchors the daemon to the caller's cwd, and `start --force no` treats the positional \"no\" as truthy and may stop an existing session."
+    },
+    {
+      "file": "codex-claude/scripts/commit-review-round.mjs",
+      "line": 79,
+      "verdict": "CONFIRMED",
+      "summary": "The repo preflight (line 79) and headSha() (line 87) re-implement git-scope.mjs's ensureRepo/fullSha with raw execFileSync and NO scrubEnv, so they answer from a different git environment than the daemon-side validator; reuse (export) git-scope's scrubbed git()/fullSha helpers. [angles: A-line-scan, C-cross-file, reuse, altitude]",
+      "failure_scenario": "git-scope.mjs:21-24 live-verified that GIT_DIR redirects `git rev-parse --show-toplevel` to another repo. With GIT_DIR set in the caller's env: (a) a non-repo --cwd passes this preflight and only fails after a daemon boot, defeating the fail-fast purpose; (b) worse, when --cwd IS a repo, headSha() reports the GIT_DIR-pointed repo's HEAD while the scrubbed daemon reviewed the --cwd repo — the `SCOPE: ... head=<sha>` trailer misidentifies what was actually reviewed, which is the trailer's stated sole purpose; a fix-scope re-review that takes `--base <last-reviewed-sha>` from that trailer then fails to resolve or reviews the wrong delta."
+    },
+    {
+      "file": "codex-claude/lib/daemon.mjs",
+      "line": 505,
+      "verdict": "CONFIRMED",
+      "summary": "_onServerRequest has no `finalized` guard, so a late server request whose turnId matches (or a null-turn.id failed turn, which _isStaleTurn cannot judge) re-opens a terminal turn: parked is set and status walks from completed/failed back to awaiting_input — the server-request mirror of the notification-resurrection bug fixed in f339a09. [angles: A-line-scan, C-cross-file (line 487), D-js-pitfalls, E-wrapper-proxy]",
+      "failure_scenario": "Turn completes (finalized, status 'completed', message = review text); the server then delivers one more approval/question request for that same turnId (the code already assumes the server keeps streaming past termination — that is why the finalized guard exists for notifications). Repro confirmed: status flips to 'awaiting_input', so a subsequent `read`/`read --out` reports awaiting_input with message null and the completed review is lost to the orchestrator; on a failed turn (turn.id null after wrongthread/backstop) the same park makes the busy guard refuse every new turn while `interrupt` returns no_active_turn — the persistent session is bricked until stop/restart. Finalized turns should decline the request (like the foreign branch) instead of parking it."
+    },
+    {
+      "file": "codex-claude/lib/verbs.mjs",
+      "line": 139,
+      "verdict": "CONFIRMED",
+      "summary": "`answer` with a valueless or non-numeric --option (or with neither --text nor --option) builds the literal string `__option:true`/`__option:abc`/`__option:undefined`, which fails the daemon's /^__option:(\\d+)$/ match and is sent verbatim to Codex as the answer text — silent garbage of the same truthiness class this release hardens everywhere else. [angle: A-line-scan]",
+      "failure_scenario": "During the fallback recipe a question parks and the operator runs `codex-drive answer --id q1 --option` (forgot the value): instead of an error, the daemon answers the live Codex question with the literal text '__option:true', the review proceeds on a nonsense answer, and the caller believes their first-option choice was applied."
+    },
+    {
+      "file": "codex-claude/lib/daemon.mjs",
+      "line": 262,
+      "verdict": "CONFIRMED",
+      "summary": "_failTurn (and the _sendStart rejection path at line 214) clears turn.buffered without answering any buffered __serverRequest entries, violating the module's own documented contract that every JSON-RPC server request must receive SOME response. [angles: E-wrapper-proxy, codex (ISSUES FOUND, line 261)]",
+      "failure_scenario": "Review turn: the app-server emits item/tool/requestUserInput before the review/start response arrives (buffered while awaitingResponse), then the response carries a foreign reviewThreadId (or never arrives and the 5s backstop fires) -> _failTurn clears the buffer and the request is never answered (repro: 0 responses sent to the app object). The still-alive app-server waits forever on its request, wedging the thread; on a persistent (detached) session the next send/review on that thread can hang wait with no daemon-side cap, and interrupt cannot help because turn.id is null on these failure paths. Fix: before clearing the buffer, deny recognized approvals and send respondError for every other buffered request."
+    },
+    {
+      "file": "codex-claude/lib/daemon.mjs",
+      "line": 359,
+      "verdict": "PLAUSIBLE",
+      "summary": "A parked server request is abandoned without any JSON-RPC response when the turn is interrupted or a new turn begins — violating the every-request-gets-a-response contract this same diff added respondError to enforce. [angle: C-cross-file]",
+      "failure_scenario": "commit-review-round's interruptAndFail path (unsupported request / malformed question / drain exhaustion): the parked request id sits in turn.parked; _interrupt only sends turn/interrupt and _beginTurn later resets turn.parked without responding, so the server's outstanding JSON-RPC request is never answered. On the reused fallback session this leaves the request permanently unanswered — the exact condition the diff's own comments say 'can wedge the originating turn' — while foreign/stale requests are carefully answered with deny/respondError."
+    },
+    {
+      "file": "codex-claude/scripts/commit-review-round.mjs",
+      "line": 110,
+      "verdict": "CONFIRMED",
+      "summary": "A full codex app-server boot plus ephemeral thread/start is wasted on every invalid --base: git-scope's ref-existence/ancestry/empty-delta validation runs only in the daemon's _startReview, after daemon.start() has already spawned the app-server, while the script's preflight checks only flag syntax and repo-ness — contradicting the design spec's error table, which promises \"--base ref does not resolve -> git-scope error before any daemon boot\" (spec :680). Cheaper: call resolveReviewTarget(cwd, {base, scope}) in the script preflight (same package, pure git) before constructing the Daemon; the daemon still re-validates authoritatively. [angles: F-spec-conformance (line 78), efficiency, codex (ISSUES FOUND, line 78)]",
+      "failure_scenario": "Gate runs `commit-review-round.mjs --base <typo'd-or-stale sha>` (the spec calls a typo'd --base \"the single most likely gate mistake\"): the script spawns the real `codex app-server`, runs initialize and thread/start (seconds of startup plus a server-side ephemeral thread), only for _startReview's resolveReviewTarget to reject the ref; the whole boot is then torn down and the caller retries — paying the boot cost again — when two local git spawns before daemon construction would have failed in milliseconds. (The spec is internally inconsistent — step 1 at :355-359 lists a narrower preflight — but the rev-5 error-table row is the stricter, later statement and is not implemented.)"
+    },
+    {
+      "file": "codex-claude/lib/git-scope.mjs",
+      "line": 116,
+      "verdict": "CONFIRMED",
+      "summary": "detectDefaultBranch checks refs/heads/<c> and refs/remotes/origin/<c> interleaved per candidate, deviating from the spec's pinned preference order 'local refs/heads/{main,master,trunk} first, refs/remotes/origin/* last' (spec :205-206). [angle: F-spec-conformance]",
+      "failure_scenario": "Repo whose local default branch is `master` (no local `main`) but which has a remote-tracking `origin/main` (e.g. upstream later added main, or a stale fetch ref): spec order returns local `master`; the implementation returns `origin/main` — an auto/branch-scope review diffs against the wrong branch entirely, and returns the origin/-prefixed form the module's own comment (:118-122) warns fails server-side if the reviewer's @{upstream} template is selected."
+    },
+    {
+      "file": "codex-claude/scripts/commit-review-round.mjs",
+      "line": 145,
+      "verdict": "CONFIRMED",
+      "summary": "drive() denies EVERY parked approval including item/permissions/requestApproval, which the spec maps directly to interrupt + STATUS: failed (spec :375-379, :684); since the daemon's deny path deliberately throws for that shape, the script loops deny->error->wait 20 times and only reaches interrupt via drain-guard exhaustion. [angle: F-spec-conformance]",
+      "failure_scenario": "A permissions-shaped approval parks the review: each `approve deny` returns {error:'permissions approval not supported…'} (never inspected by the script), the parked state persists, and 20 futile deny/wait round-trips emit 20 misleading '[commit-review] denying approval' stderr lines before 'drain guard exhausted' interrupts. Terminal contract (STATUS: failed, exit 2) is reached only by accident of the guard; the spec's direct permissions->interrupt mapping is not implemented."
+    },
+    {
+      "file": "codex-claude/skills/codex-claude/SKILL.md",
+      "line": 140,
+      "verdict": "CONFIRMED",
+      "summary": "The spec-ordered doc-drift fix ('stop only unlinks the socket; ~/.codex-drive/state.json survives as a stale record', spec :591-595) was applied to the verb table (SKILL.md:215) but the loop-section prose still claims stop 'removes the socket + state'. [angle: F-spec-conformance]",
+      "failure_scenario": "Concrete cost: the skill contradicts itself — line 140 tells the model/user that state.json is gone after `stop` while line 215 says it survives; a reader trusting :140 skips the stale-state cleanup reasoning the spec item existed to enable (why start's liveness probe exists), reintroducing exactly the confusion the spec ordered purged."
+    },
+    {
+      "file": "codex-claude/docs/specs/2026-07-16-commit-review-native-design.md",
+      "line": 726,
+      "verdict": "CONFIRMED",
+      "summary": "The spec's daemon unit-test list requires a 'generation-token drop of a superseded response' test, but no test in daemon.test.mjs or daemon-review.test.mjs ever calls _onStartResponse (or the rejection arm) with a mismatched generation. [angle: F-spec-conformance]",
+      "failure_scenario": "A regression in _sendStart/_onStartResponse's gen check (e.g. comparing this._gen instead of this.turn.gen, or dropping the guard) would let a late response from a superseded turn overwrite the current turn's id/state — the exact cross-turn corruption the token exists to stop — and the whole suite would still pass green."
+    },
+    {
+      "file": "codex-claude/docs/specs/2026-07-16-commit-review-native-design.md",
+      "line": 763,
+      "verdict": "CONFIRMED",
+      "summary": "The spec requires the detached-CLI `read --out` relative-resolution behavior to be 'tested with absent and with mismatched global state', but detached-cli.test.mjs:97-111 runs only against whatever ambient ~/.codex-drive/state.json happens to exist — the mismatched-global-state case is never constructed. [angle: F-spec-conformance]",
+      "failure_scenario": "A regression reintroducing the pre-fix behavior (preferring state.cwd / falling back to the caller's process cwd over the daemon-reported res.cwd in bin/codex-drive.mjs:100) would pass the suite on any machine where state.json is absent or coincidentally matches, and the review artifact would silently land in a foreign repo when a real concurrent session's state.json points elsewhere."
+    },
+    {
+      "file": "codex-claude/scripts/commit-review-round.mjs",
+      "line": 34,
+      "verdict": "CONFIRMED",
+      "summary": "REVIEW_PROFILE is a hand-copied literal of daemon.mjs:16's unexported authoritative constant (a third copy sits in test/daemon-review.test.mjs:12); export it from lib/daemon.mjs and import it instead. [angles: reuse, simplification, altitude]",
+      "failure_scenario": "Daemon's _hasReviewProfile does an exact field-by-field match against its own REVIEW_PROFILE. If the daemon-side profile ever changes (e.g. a protocol rename of the sandbox value or a new required field), the script's stale copy no longer matches, so every Stage-2 gate run gets {error:'wrong_thread_profile'} and exits 1 — the native review feature is bricked until someone finds the second copy; a whole-gate outage caused purely by the duplicated constant."
+    },
+    {
+      "file": "codex-claude/scripts/commit-review-round.mjs",
+      "line": 61,
+      "verdict": "CONFIRMED",
+      "summary": "The one-shot hand-rolls a third argv parser (walk + flag()) that duplicates the shared layer's policies verbatim (`--flag=value` rejection message, unknown-flag rejection, blank-value rule) instead of reusing parseArgs plus a verb allowlist, and its semantics already diverge from the shared parser's. [angles: reuse, altitude]",
+      "failure_scenario": "Verified divergence today: parseArgs is last-wins on a repeated flag (`review --base A --base B` reviews B) while this script's indexOf-based flag() is first-wins (reviews A) — the same command line silently reviews different ranges depending on whether it enters via the CLI verb or the gate script. The KNOWN_FLAGS set is also already inconsistent with VERB_FLAGS.review (adds 'cwd'), and every future policy fix (like the 1.8.1 unknown-flag change, which had to be implemented twice) must now be applied in two parsers or they drift. This exact drift class already shipped a bug once (commit 98af6f4: '--help ran a live review')."
+    },
+    {
+      "file": "codex-claude/scripts/commit-review-round.mjs",
+      "line": 77,
+      "verdict": "CONFIRMED",
+      "summary": "The preflight re-hardcodes the scope enum ['auto','working-tree','branch'] (inlined here and again in the USAGE string) and the --base/--scope mutual-exclusion rule that lib/git-scope.mjs authoritatively owns (unexported SCOPES at git-scope.mjs:16, rules at resolveReviewTarget; confirmed git-scope exports only detectDefaultBranch/resolveReviewTarget/buildNativeReviewTarget); export SCOPES (or call resolveReviewTarget for preflight) instead. [angles: reuse, simplification, altitude]",
+      "failure_scenario": "The spec names 'commit' as a known future ReviewTarget variant. Add it to git-scope's SCOPES and the daemon accepts `--scope commit`, but this preflight copy still rejects it with exit 1 before the daemon is ever consulted — the CLI contradicts its own authoritative validator, the error strings for the same bad input differ between the preflight and daemon paths, and the 'daemon is the authoritative validator' design is silently split between the two entry points."
+    },
+    {
+      "file": "codex-claude/scripts/commit-review-round.mjs",
+      "line": 141,
+      "verdict": "CONFIRMED",
+      "summary": "drive()/waitOnce()/interruptAndFail() (lines 141-186) are the THIRD copy of the wait-timeout-interrupt + question-drain loop already in review-round.mjs:53-94 and plan-round.mjs:37-78 (identical drain guard of 20, identical first-option answer extraction, a third 540000ms cap); the mechanics belong in a shared lib helper with the approval policy injected. [angle: reuse]",
+      "failure_scenario": "A protocol change to the requestUserInput payload (e.g. options carrying {value} instead of {label}) must be fixed identically in three scripts; miss one and that driver silently answers questions with 'undefined' mid-review. The change's own spec mandates exactly this factoring for the analogous test-seam parse ('ONE shared helper so the script and the CLI cannot drift') but did not apply it here."
+    },
+    {
+      "file": "codex-claude/test/commit-review-round.test.mjs",
+      "line": 14,
+      "verdict": "CONFIRMED",
+      "summary": "The git()/repo() temp-repo fixture builders are copy-pasted into four test files added or touched by this change (git-scope.test.mjs:11, commit-review-round.test.mjs:14, daemon-review.test.mjs:29, detached-cli.test.mjs:17), and the CODEX_DRIVE_TEST_* env() helper is duplicated between commit-review-round.test.mjs and detached-cli.test.mjs; one shared test/fixtures helper would serve all four. [angles: reuse, simplification (daemon-review.test.mjs:29)]",
+      "failure_scenario": "Concrete cost: any git-environment fix (e.g. adding `commit.gpgsign=false` so the suite passes on machines with global commit signing, or an init-flag change) must be repeated in four places, and the copies have already drifted (repo() defaults dirty=true in one file, dirty=false in another, no option at all in two) — missing one yields a test file that fails only on that machine, making cross-file test reasoning and future edits error-prone."
+    },
+    {
+      "file": "codex-claude/scripts/commit-review-round.mjs",
+      "line": 105,
+      "verdict": "CONFIRMED",
+      "summary": "A fourth inline literal of clientInfo { name: 'codex-drive', version: '0.1.0' } — bin/codex-drive.mjs:13 already defines it as CLIENT_INFO, and plan-round.mjs:31 / review-round.mjs:47 inline it too; hoist one shared constant into lib. [angle: reuse]",
+      "failure_scenario": "Concrete cost: the version string is already stale (plugin is at 1.8.2 while every copy says 0.1.0); updating what the client reports to the app-server on initialize requires four coordinated edits, and a partial update makes different drivers identify as different client versions in Codex-side logs."
+    },
+    {
+      "file": "codex-claude/scripts/commit-review-round.mjs",
+      "line": 196,
+      "verdict": "CONFIRMED",
+      "summary": "The exit expression `clean ? 0 : (status === 'timeout' ? 2 : 2)` contains a dead ternary whose two arms are both 2; it should just be `process.exit(clean ? 0 : 2)`. [angles: simplification, altitude]",
+      "failure_scenario": "Concrete cost: a reader (or future editor) auditing the exit-code contract (the script's whole reason to exist is exit-code honesty for `&&`-style shell gates) assumes timeout and failed were meant to exit with different codes and 'fixes' one arm, silently changing the shell-gate contract; the conditional does nothing today and only obscures that the spec deliberately maps both timeout and failed to exit 2."
+    },
+    {
+      "file": "codex-claude/lib/git-scope.mjs",
+      "line": 182,
+      "verdict": "CONFIRMED",
+      "summary": "The `explicit` field on resolveReviewTarget's result (and the boolean parameter threaded through branchAgainstDefault solely to populate it) is dead in production — the daemon uses only mode/label/baseRef and nothing outside the tests ever reads `.explicit`. [angle: simplification]",
+      "failure_scenario": "Concrete cost: write-only state carried through the public return shape and an extra function parameter; tests assert its value so it must be maintained forever despite driving no behavior — dropping the field and the branchAgainstDefault parameter shrinks the contract to what the daemon actually consumes."
+    },
+    {
+      "file": "codex-claude/lib/verbs.mjs",
+      "line": 106,
+      "verdict": "CONFIRMED",
+      "summary": "The new VERB_FLAGS allowlist explicitly blesses `read --full` (and toCommand still maps `full: !!flags.full` at line 143) even though the diff's own spec (rev 5) documents that nothing in lib/ ever reads cmd.full — the allowlist added to stop silently-ignored flags now whitelists a known silently-ignored flag. [angle: simplification]",
+      "failure_scenario": "A user runs `codex-drive read --full` expecting the full transcript (the 2026-05-31 spec's documented meaning): the flag is accepted, sent over the wire, and ignored by the daemon's read handler, returning only the last message with no error — exactly the 'asked for one thing, silently got another' failure class the allowlist comment says it exists to prevent; removing 'full' from the allowlist and the mapping makes it a loud unknown-flag error."
+    },
+    {
+      "file": "codex-claude/lib/daemon.mjs",
+      "line": 414,
+      "verdict": "CONFIRMED",
+      "summary": "_dispatchNotification's foreign-thread check is unreachable duplicate logic: its only callers are _onNotification (which drops foreign traffic at line 393 before buffering or dispatching) and the _onStartResponse replay of entries that were buffered after passing that same check. [angle: simplification]",
+      "failure_scenario": "Concrete cost: the same safety-critical filter is maintained in two places with a comment ('applied to every kind') implying it does independent work; a future editor reordering _onNotification could reasonably assume either copy suffices and delete the wrong one — hoisting the single check into _onNotification (or dispatching only through it) leaves one authoritative filter."
+    },
+    {
+      "file": "codex-claude/lib/git-scope.mjs",
+      "line": 157,
+      "verdict": "CONFIRMED",
+      "summary": "refExists(cwd, ref) followed immediately by fullSha(cwd, ref) at line 161 spawns the byte-identical `git rev-parse --verify --quiet --end-of-options <ref>^{commit}` subprocess twice; the first call already captured the full SHA on stdout and threw it away, and fullSha already handles the failure case. Cheaper: one call — have fullSha return null on failure and raise the \"--base ref does not resolve\" message at this call site (the adjacent fullSha(cwd,'HEAD') could further fold into the same single `git rev-parse <ref>^{commit} HEAD` invocation). [angle: efficiency]",
+      "failure_scenario": "Every `review --base <sha>` — the Stage-2 gate's default path on every task — pays one extra git process spawn (plus a scrubbed-env rebuild) per review purely to reword an error message; on the daemon this also extends the synchronous event-loop blockage of _startReview for no informational gain."
+    },
+    {
+      "file": "codex-claude/lib/git-scope.mjs",
+      "line": 201,
+      "verdict": "CONFIRMED",
+      "summary": "branchAgainstDefault re-runs refExists on the ref detectDefaultBranch just returned, but every return path of detectDefaultBranch has already verified that exact ref (the origin/HEAD path via the very same refExists call, the candidates path via `show-ref --verify --quiet`), and the following mergeBase call would surface non-resolution anyway — so this is a redundant git subprocess on every auto-clean and --scope branch review. Cheaper: drop the recheck, or have detectDefaultBranch return the SHA/ref it already verified. [angle: efficiency]",
+      "failure_scenario": "Any review resolving to branch scope (clean tree under auto, or --scope branch) spawns `git rev-parse --verify ... <ref>^{commit}` a second time for a check that just passed inside detectDefaultBranch, adding a wasted subprocess (and env rebuild) to the daemon's synchronous scope-resolution sequence."
+    },
+    {
+      "file": "codex-claude/lib/daemon.mjs",
+      "line": 171,
+      "verdict": "CONFIRMED",
+      "summary": "resolveReviewTarget runs up to ~12 sequential spawnSync git calls — including full-worktree `git status --porcelain --untracked-files=normal` and `git diff --quiet <sha>` — synchronously inside the daemon's command handler, freezing the event loop so no other socket client (status/wait/stop) and no app-server stdout is serviced until the chain finishes; an async execFile chain guarded by a provisional turn state would keep the busy-guard atomic without blocking. [angle: efficiency]",
+      "failure_scenario": "On a large or cold-cache repo where `git status`/`git diff` take multiple seconds, a `review` sent to a globally-registered review-profile session (start --sandbox read-only --approval-policy never --ephemeral, without --private) blocks the daemon; a concurrent `codex-drive start` liveness probe (2 s timeout at bin/codex-drive.mjs:138) then times out, misreads the live session as dead, and overwrites ~/.codex-drive/state.json — orphaning the live daemon — while ordinary `status`/`wait` callers stall for the duration."
+    },
+    {
+      "file": "codex-claude/lib/daemon.mjs",
+      "line": 239,
+      "verdict": "CONFIRMED",
+      "summary": "_onStartResponse gates the mandatory reviewThreadId defense-in-depth validation on the truthiness of the optional `resolved` side-channel parameter instead of the turn's own authoritative kind flag this.turn.isReview, which _beginTurn already records. [angle: altitude]",
+      "failure_scenario": "Fragility cost: any future call path that starts a review without threading `resolved` through _sendStart (a retry path, or a refactor that drops the now-unused-after-validation argument) silently skips the reviewThreadId !== threadId check the spec mandates as runtime defense-in-depth — a foreign review would then be attributed to this session with no error, and nothing in tests keyed on turn.isReview would notice the guard vanished."
+    },
+    {
+      "file": "codex-claude/scripts/commit-review-round.mjs",
+      "line": 135,
+      "verdict": "CONFIRMED",
+      "summary": "The one-shot installs no SIGTERM/SIGINT handlers, so teardown() (daemon.stop + temp-dir removal) only runs on normal completion — a signal kills the process without cleanup despite the script's own comments treating orphaning as the cardinal sin. [angle: D-js-pitfalls]",
+      "failure_scenario": "The gate's outer runner SIGTERMs the script (e.g. the Bash tool's cap expiring — the drain loop can legitimately exceed WAIT_TIMEOUT_MS since each of up to 20 waitOnce calls gets its own 540s budget — or a user aborting the gate). Node dies immediately: the mkdtemp dir (cdx-creview-* with the socket) leaks on every such run, and the codex app-server child survives as an orphan unless it happens to exit on stdin EOF — mid-review that is a full Codex turn still burning. A process.on('SIGTERM'/'SIGINT') → teardown().then(()=>process.exit(...)) hook (as the detached __daemon path already has) closes the gap."
+    },
+    {
+      "file": "codex-claude/lib/daemon.mjs",
+      "line": 421,
+      "verdict": "CONFIRMED",
+      "summary": "_dispatchNotification dereferences params without a null guard (params.turnId for deltas, params.turn for turn/completed), so a params-less notification throws a TypeError inside the stdout data handler and crashes the daemon process. [angle: D-js-pitfalls]",
+      "failure_scenario": "A notification line like {\"jsonrpc\":\"2.0\",\"method\":\"item/agentMessage/delta\"} (no params — malformed server output or a future protocol change) passes _onNotification's `params && _isForeignThread` guard, reaches _dispatchNotification, and `params.turnId` throws on undefined. The exception propagates uncaught through JsonRpc.feed → child.stdout 'data' handler: the detached daemon dies mid-turn without running stop() (stale state.json left behind; a `wait` client with no --timeout-ms hangs forever since sendCommand handles neither 'close' nor this), and the one-shot dies without its finally, leaking the temp dir."
+    },
+    {
+      "file": "codex-claude/lib/test-appserver.mjs",
+      "line": 57,
+      "verdict": "CONFIRMED",
+      "summary": "testWaitMs accepts fractional values between 0 and 1 (0.5 passes the n<=0 guard) and Math.floor turns them into 0, which downstream `testWaitMs() ?? 540000` keeps as 0 — and sendCommand treats timeoutMs 0 as NO timeout. [angle: D-js-pitfalls]",
+      "failure_scenario": "CODEX_DRIVE_TEST_WAIT_MS=0.5 with CODEX_DRIVE_TEST_MODE=1: the guard demands 'a positive integer' but only checks n<=0 before flooring, so the function returns 0; commit-review-round's WAIT_TIMEOUT_MS becomes 0, sendCommand skips the timer entirely, and the wait is unbounded — the exact hang the cap exists to prevent, in the harness meant to shorten it (a wedged mock then hangs the test run instead of timing out). Validate Number.isInteger(n) or check the floored value."
+    },
+    {
+      "file": "codex-claude/test/fixtures/mock-appserver.mjs",
+      "line": 167,
+      "verdict": "CONFIRMED",
+      "summary": "The mock only accepts `msg.result !== undefined` as the answer to one of its server requests, so the daemon's respondError decline path never resolves pendingServerReq, and the catch-all at line 217-219 replies {id,result:{}} to messages that are RESPONSES — both diverge from the real app-server, which treats an error response as a final answer and never responds to a response. [angle: E-wrapper-proxy]",
+      "failure_scenario": "Concrete cost: any test that drives the daemon's decline-with-respondError path through the mock (e.g. a future ask/approve-mode test where a stale or unknown-shaped request is declined during replay) hangs forever at runReview's `await answered` instead of completing like the live server would — the test times out mysteriously rather than pinning the behaviour; meanwhile the mock's bogus {result:{}} echo to unmatched ids injects wire traffic a real server never sends, so an id-collision bug in JsonRpc response matching would go unnoticed while tests stay green."
+    },
+    {
+      "file": "codex-claude/test/daemon-review.test.mjs",
+      "line": 192,
+      "verdict": "CONFIRMED",
+      "summary": "The spec-required cwd-coherence test (spec :727-728: git scope, app-server spawn cwd, AND thread/start cwd all follow the review cwd) is only one-third implemented: this test checks the git-scope leg, while the mock discards thread/start params entirely (mock-appserver.mjs:176-179) and nothing observes the spawned child's cwd.",
+      "failure_scenario": "Remove `cwd: this.cwd` from daemon.start()'s thread/start params (daemon.mjs:67) or drop `opts.cwd` in AppServer.start() (appserver.mjs:22) -> entire test suite stays green, but live Codex resolves the review against the caller's cwd while git-scope resolves against the review repo — the exact split-brain the spec's 'one coherent cwd' P1 rule exists to prevent, shipping undetected."
+    },
+    {
+      "file": "codex-claude/lib/git-scope.mjs",
+      "line": 48,
+      "verdict": "CONFIRMED",
+      "summary": "git() calls spawnSync without a maxBuffer option, so any git command whose stdout exceeds Node's 1 MiB default — realistically `git status --porcelain --untracked-files=normal` on a large dirty tree — is killed with ENOBUFS and the raw error is rethrown.",
+      "failure_scenario": "A repo with an unignored node_modules (or tens of thousands of untracked files) runs `review` with auto scope: porcelain output exceeds 1 MiB -> spawnSync sets r.error ENOBUFS -> git() throws the raw error -> _startReview returns `{error:'spawnSync git ENOBUFS'}` and the one-shot exits 1 with a cryptic message plus a misleading usage hint, instead of resolving the working-tree scope."
+    },
+    {
+      "file": "codex-claude/scripts/commit-review-round.mjs",
+      "line": 173,
+      "verdict": "CONFIRMED",
+      "summary": "WAIT_TIMEOUT_MS is applied per waitOnce() call and resets after every parked question/approval round, so total wall-clock is bounded only by the 20-round drain guard (~21 x 540s ≈ 3h), contradicting the script's own claim that the cap keeps it 'under the ~10-min Bash cap so a wedged turn can't hang the gate forever'.",
+      "failure_scenario": "A misprofiled session where approvals actually prompt (the very case the deny path exists for): two parked approvals with slow turn segments push runtime past 10 minutes -> the gate's Bash tool kills the script (SIGTERM, no handler installed) -> no teardown, orphaned codex app-server and leaked temp dir, and the gate sees an ambiguous kill instead of the promised STATUS trailer."
+    },
+    {
+      "file": "codex-claude/bin/codex-drive.mjs",
+      "line": 166,
+      "verdict": "CONFIRMED",
+      "summary": "The parent `start` path never runs testAppServerOpts() as a preflight, so the test seam's mandated loud rejections (CODEX_DRIVE_TEST_APPSERVER set without CODEX_DRIVE_TEST_MODE=1, malformed JSON, relative command) occur inside the detached __daemon child whose stdio is 'ignore' — the caller gets only a generic 'daemon did not come up' after a 5s poll, and no detached-CLI test covers a bad-seam start.",
+      "failure_scenario": "CODEX_DRIVE_TEST_APPSERVER lingers in the environment (e.g. exported in a test shell) without test mode; user runs `codex-drive start`: the child throws the 'refusing to substitute the app-server' error into /dev/null and exits, the parent polls 5 seconds then prints 'codex-drive: daemon did not come up' — the loud, actionable refusal the seam was designed to give never reaches anyone."
+    },
+    {
+      "file": "codex-claude/test/detached-cli.test.mjs",
+      "line": 59,
+      "verdict": "CONFIRMED",
+      "summary": "Every test spawns a REAL detached unref'd daemon via `bin start` and relies on a trailing `cli(['stop'...])` placed after the assertions with no try/finally, so any assertion failure or test timeout permanently orphans the detached daemon plus its mock app-server child and leaves a stale socket file in the user's real ~/.codex-drive.",
+      "failure_scenario": "One regression makes `assert.equal(res.ok, true)` fail in the first test: the stop call is never reached, the detached node daemon (holding the mock app-server on stdin) survives the test run indefinitely on the developer's machine, and a daemon-<pid>-<ts>.sock accumulates in ~/.codex-drive on every re-run of the failing suite."
+    },
+    {
+      "file": "codex-claude/test/daemon-review.test.mjs",
+      "line": 52,
+      "verdict": "CONFIRMED",
+      "summary": "startDaemon mkdtemps a 'cdx-ds-' socket temp dir that no test ever removes — each test rmSync's only the repo fixture dir — and daemon.stop()/rmSync run after the assertions with no try/finally, so failures additionally leak live mock app-server children.",
+      "failure_scenario": "Concrete cost: every `npm test` run unconditionally leaks ~19 cdx-ds-* directories into the OS tmpdir (plus cdx-d-*/cdx-home-* from the copied helper in daemon.test.mjs), growing without bound on dev machines and CI images; a single failing assertion also leaves the in-process daemon and its spawned mock node child running until the test process exits."
+    },
+    {
+      "file": "codex-claude/bin/codex-drive.mjs",
+      "line": 43,
+      "verdict": "CONFIRMED",
+      "summary": "The `doctor` verb returns before any flag validation (it never reaches toCommand/assertKnownFlags and has no VERB_FLAGS entry), so unknown flags on doctor are silently ignored — the last remaining instance, beyond the already-flagged `start`, of the silently-ignored-flag class this release eradicates everywhere else.",
+      "failure_scenario": "`codex-drive doctor --sockt /path` or `doctor --bogus` prints a normal doctor report for the default environment and exits 0; the caller believes the flag was honoured (same silent-discard class as the `review --bsae` hazard the release fixed), with no error ever surfaced."
+    }
+  ]
+}
