@@ -137,7 +137,8 @@ dispatch the `codex-impl-reviewer` subagent instead — see below.)
 node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs stop
 ```
 
-Always `stop` when done — it kills the `codex app-server` child and removes the socket + state.
+Always `stop` when done — it kills the `codex app-server` child and removes the socket. The
+`~/.codex-drive/state.json` record survives as a stale entry; `start`'s liveness probe replaces it.
 
 ## Human supervision (important)
 
@@ -203,15 +204,15 @@ repo's workflow must read it), and **`/codex-doctor`** to preflight which mode a
 |---|---|---|
 | `doctor` | — | `{ codexVersion, authPresent, threads }` |
 | `start` | `[--cwd <path>] [--model <m>] [--resume <uuid> \| --resume-latest] [--force] [--private] [--sandbox <s>] [--approval-policy <p>] [--ephemeral]` | `{ ok, threadId, socket, pid, cwd, private }` — **idempotent**: refuses if a live session already exists (avoids orphaning its daemon); `--force` stops the existing one first. `--private` neither reads nor writes the global state (use with `--socket` below). Profile flags are validated **before** any existing session is probed or stopped, and are rejected on a `--resume` |
-| `plan` | `"<prompt>" [--effort <e>] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"no_model_for_mode"}` |
-| `send` | `"<prompt>" [--effort <e>] [--mode default] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"no_model_for_mode"}` (only with `--mode`) |
-| `review` | `[--base <ref\|sha> \| --scope <auto\|working-tree\|branch>]` | `{ ok, status:"running", scope }` · `{error:"busy"}` · `{error:"wrong_thread_profile"}` · `{error:"<validation>"}`. **Native git-scoped commit review** (`review/start`) — distinct from a prompt-based `send` review: it takes no prompt, inherits the config's effort, and returns the built-in reviewer's findings. Requires a session started with `--sandbox read-only --approval-policy never --ephemeral`. Scope is validated synchronously: an unresolvable/non-ancestor/empty-delta base is an error, never a silent fallback |
+| `plan` | `"<prompt>" [--effort <e>] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"restart_required"}` · `{error:"no_model_for_mode"}` |
+| `send` | `"<prompt>" [--effort <e>] [--mode default] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"restart_required"}` · `{error:"no_model_for_mode"}` (only with `--mode`) |
+| `review` | `[--base <ref\|sha> \| --scope <auto\|working-tree\|branch>]` | `{ ok, status:"running", scope }` · `{error:"busy"}` · `{error:"wrong_thread_profile"}` · `{error:"restart_required"}` · `{error:"<validation>"}`. **Native git-scoped commit review** (`review/start`) — distinct from a prompt-based `send` review: it takes no prompt, inherits the config's effort, and returns the built-in reviewer's findings. Requires a session started with `--sandbox read-only --approval-policy never --ephemeral`. Scope is validated synchronously: an unresolvable/non-ancestor/empty-delta base is an error, never a silent fallback |
 | `wait` | `[--timeout-ms <N>]` | `{status:"completed",message[,empty:true]}` · `{status:"question",question}` · `{status:"approval",request}` · `{status:"interrupted"\|"failed",message}` · `{status:"unsupported",request}` · `{status:"timeout"}` (exit 2) |
-| `answer` | `--id <qid> (--option <n> \| --text "<s>")` | `{ ok }` · `{error:"no_pending_question"}` (`--option` is 1-based; one selection per call — answering resumes the turn) |
+| `answer` | `--id <qid> (--option <n> \| --text "<s>")` | `{ ok }` · `{error:"no_pending_question"}` (`--option` is 1-based; one selection per call — answering resumes the turn). Exactly one of `--option`/`--text` is required and both need a real value: a valueless flag used to answer the live question with the literal text `__option:true` / `true` |
 | `approve` | `--decision allow\|deny` | `{ ok }` · `{error:"no_pending_approval"}` |
 | `read` | `[--out <path>]` | `{ status, message[, empty:true], cwd }` (last assistant message; `empty:true` flags a completed turn that produced no content). `--out` writes a non-empty message to a file; a RELATIVE path resolves against the daemon's reported `cwd`, not the caller's |
-| `interrupt` | — | `{ ok }` · `{error:"no_active_turn"}` |
-| `status` | — | `{ threadId, turnStatus, parked, cwd }` |
+| `interrupt` | — | `{ ok }` · `{error:"no_active_turn"}` (only when nothing is running or awaiting input). A turn whose `turn/start` response has not arrived yet is **also** interruptible: it is ended locally as `interrupted` and the session is marked `restartRequired` (that turn's id never reached us, so its later traffic can no longer be told apart from a new turn's) |
+| `status` | — | `{ threadId, turnStatus, parked, cwd, restartRequired[, restartReason] }` — `restartRequired:true` means the session refuses new turns until `stop` + `start` |
 | `stop` | — | `{ ok }` (tears down the daemon, kills the app-server, removes the socket; the `~/.codex-drive/state.json` record is left behind as a stale entry — `start`'s liveness probe replaces it) |
 
 Every verb except `start` and `doctor` also accepts **`--socket <path>`**, which talks to that daemon

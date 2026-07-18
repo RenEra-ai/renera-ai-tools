@@ -793,3 +793,49 @@ are coupled to the companion** and rev 4 handled none of them. Order matters:
   the repository under review (refs + reflog, leaking on SIGKILL, PID-collision-prone).
 - Detached/background workers of any kind (the owned-session fallback covers long
   reviews).
+
+## rev 6 — implementation notes (v1.8.3)
+
+Written while fixing the 40 verified findings from the post-landing review
+(`docs/plans/2026-07-18-commit-review-fixes.json`). These record where the shipped code now
+deviates from, or sharpens, rev 5.
+
+- **The one-shot preflight runs the FULL git-scope validation before any daemon boot.** Step 1's
+  narrower wording is superseded by the error table (`--base ref does not resolve` → "git-scope
+  error before any daemon boot"), which is the stricter and later statement. `commit-review-round`
+  now calls `resolveReviewTarget` directly, so the repo check, the scope enum, `--base`/`--scope`
+  exclusivity, ancestry and the empty-delta rule all come from the authoritative validator instead
+  of a hand-rolled subset — and with a scrubbed git env, which the raw `execFileSync` calls it
+  replaced did not have.
+- **One shared drive-loop backs all three drivers** (`lib/drive-loop.mjs`). This EXCEEDS the
+  "Out of scope" line that excluded changes to `review-round.mjs` / `plan-round.mjs`, and is a
+  deliberate deviation: the wait/drain/interrupt logic existed in three copies, so a protocol
+  change to the question payload had to be fixed three times. Both round scripts also gained the
+  gated test seam, which is what finally made their drive path testable offline at all.
+- **The "every server request gets exactly one response" invariant is qualified**: it holds while
+  the transport is WRITABLE. App exit is the declared exception — the child's stdin is gone, so a
+  `respond()` there writes into a dead pipe rather than answering anyone. (`AppServer.rejectAll`
+  settles our OUTBOUND requests only; inbound ones are abandoned with the transport.)
+- **`failed`/`interrupted` completions arriving pre-response now finalize immediately**, as rev 5
+  required. Only a SUCCESSFUL completion still waits on the response (and its backstop).
+- **New session state `restartRequired`.** When a turn ends locally while its authoritative id is
+  still unknown, the server may keep streaming for a turn we can never identify, and `_isStaleTurn`
+  needs a truthy `turn.id` to judge anything. Rather than risk that orphan's traffic being adopted
+  by a later turn, the session refuses new turns until `stop` + `start`. It is set ONLY where a
+  server-side turn genuinely exists but its id never reached us (no-id response, backstop, a
+  pre-response failed/interrupted completion, a pre-response interrupt) — NOT on a rejected
+  `turn/start` (an error response means no turn was ever created) and NOT on app exit.
+- **`turn.id` is adopted BEFORE the `reviewThreadId` validation**, so a foreign-thread failure keeps
+  the id that makes the stale filter work and does not quarantine a session that has everything it
+  needs to stay honest.
+- **A last-known-turn-id filter guards the pre-response window.** One review legitimately spans
+  several ids (`turn/started` announces a different one from the response), so a straggling
+  completion from the previous turn could otherwise finalize the turn that follows it.
+- **`daemon.mjs`'s synchronous git chain is accepted, not fixed** (matching rev 5). Making
+  `resolveReviewTarget` async would churn every consumer and re-open busy-guard atomicity in the
+  same release that hardens it. Mitigations: two redundant `git rev-parse` spawns removed, output
+  bounded with `maxBuffer`, and — the part that actually bit — `start`'s liveness probe now treats a
+  probe TIMEOUT as "possibly live, refuse" rather than as a dead socket eligible for replacement.
+  Only definite absence (`ENOENT`/`ECONNREFUSED`) may replace the recorded session.
+- **Superseded responses are DROPPED, not logged.** Rev 5 says "logged and dropped", but the daemon
+  has no logging path and none was added.
