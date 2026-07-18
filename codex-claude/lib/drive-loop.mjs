@@ -8,7 +8,12 @@
 import { performance } from 'node:perf_hooks';
 import { sendCommand } from './client.mjs';
 
-// Cap on the interrupt call itself: a wedged daemon must not turn cleanup into a second hang.
+// Fixed cap on the cleanup interrupt itself: a wedged daemon must not turn cleanup into a second
+// hang. Deliberately NOT clamped by deadlineMs — the deadline is the wait/drain budget, and once it
+// is exhausted this is the one bounded post-deadline grace that actually delivers the cancellation.
+// Clamping it to the exhausted remainder would either become UNBOUNDED in sendCommand (a timeout
+// <= 0 disables the timer entirely, client.mjs) or destroy the socket before the interrupt is even
+// written — abandoning the very cancellation the budget exists to guarantee.
 const INTERRUPT_TIMEOUT_MS = 10000;
 
 /**
@@ -32,7 +37,10 @@ export function firstOptionAnswer(question) {
  *  - waitTimeoutMs   per-wait client cap (a timeout interrupts the turn and yields status 'timeout')
  *  - deadlineMs      OPTIONAL total wall-clock budget across ALL waits. Without it each parked
  *                    round resets the cap, so N rounds could run N × waitTimeoutMs — which is how a
- *                    "9 minute" cap became a ~3 hour worst case.
+ *                    "9 minute" cap became a ~3 hour worst case. deadlineMs bounds WAITING and
+ *                    DRAINING only: when it exhausts, one final cleanup `interrupt` is still sent
+ *                    under its own fixed INTERRUPT_TIMEOUT_MS cap, so "out of budget" ends with a
+ *                    bounded cancellation, not an abandonment.
  *  - log(msg)        stderr logger; the caller supplies its own '[prefix] '
  *  - decideApproval(request) => 'allow' | 'deny' | 'fail'   ('fail' => interrupt, status 'failed')
  *  - onMalformedQuestion 'fail' | 'return'  (default 'fail')
@@ -64,20 +72,34 @@ export async function driveTurn(socketPath, opts = {}) {
   const remaining = () => (deadlineMs == null ? waitTimeoutMs
     : Math.min(waitTimeoutMs, Math.ceil(deadlineMs - (performance.now() - startedAt))));
 
-  // Answering/approving must be bounded too — client.mjs reads a missing or <=0 timeout as NO
-  // timeout, so an unanswered action call hung the whole loop past its total budget. Never <=0:
-  // fall back to the interrupt cap so an exhausted budget still yields a bounded call rather than
-  // an unbounded one.
-  const actionBudget = () => {
-    const left = remaining();
-    return left > 0 ? Math.min(left, INTERRUPT_TIMEOUT_MS) : INTERRUPT_TIMEOUT_MS;
-  };
-
+  // The one sanctioned post-deadline action: a single interrupt under the fixed cap above.
   async function interruptAndReturn(status, reason) {
     log(`${reason} — interrupting`);
     try { await sendCommand(socketPath, { cmd: 'interrupt' }, { timeoutMs: INTERRUPT_TIMEOUT_MS }); }
     catch { /* best effort: the point is not to leave the turn running, not to prove we stopped it */ }
     return { status, message: '', reason };
+  }
+
+  // One bounded action (answer/approve), budget-guarded like the waits: an exhausted deadline goes
+  // straight to the single cleanup interrupt instead of granting the action another grace, and an
+  // action that TIMES OUT (a daemon wedged mid-answer) routes through interruptAndReturn like an
+  // expired wait — it used to throw straight out of driveTurn, skipping the cleanup interrupt the
+  // deadline contract promises. Returns {reply} from the daemon, or {terminal} to hand the caller.
+  //
+  // ONE sample of remaining() decides both the guard and the cap: re-reading the clock for the cap
+  // meant a deadline expiring between the two reads still handed the action a full post-deadline
+  // grace — the interrupt-only contract, lost to a race. client.mjs reads <= 0 as NO timeout, which
+  // the guard above has already excluded here.
+  async function actionOnce(cmdObj, name) {
+    const budget = remaining();
+    if (budget <= 0) return { terminal: await interruptAndReturn('timeout', 'total wait budget exhausted') };
+    try {
+      const timeoutMs = Math.min(budget, INTERRUPT_TIMEOUT_MS);
+      return { reply: await sendCommand(socketPath, cmdObj, { timeoutMs }) };
+    } catch (e) {
+      if (!/timeout/i.test(e.message)) throw e;
+      return { terminal: await interruptAndReturn('timeout', `${name} call timed out`) };
+    }
   }
 
   async function waitOnce() {
@@ -121,11 +143,12 @@ export async function driveTurn(socketPath, opts = {}) {
       log(decision === 'allow'
         ? `approving safe command: ${cmd ? String(cmd).slice(0, 140) : (request.method || '?')}`
         : `declining approval: ${request.method || '?'}`);
-      const r = await sendCommand(socketPath, { cmd: 'approve', decision }, { timeoutMs: actionBudget() });
+      const a = await actionOnce({ cmd: 'approve', decision }, 'approve');
+      if (a.terminal) return a.terminal;
       // An {error} here means the daemon could not act on our decision (e.g. a shape protocol.mjs
       // refuses to fake). Looping would just re-park the same request until the drain guard ran out,
       // spraying misleading log lines on the way.
-      if (r && r.error) return interruptAndReturn('failed', `approve rejected: ${r.error}`);
+      if (a.reply && a.reply.error) return interruptAndReturn('failed', `approve rejected: ${a.reply.error}`);
     } else {
       const qs = res.question && res.question.questions;
       if (!Array.isArray(qs) || !qs.length) {
@@ -139,8 +162,9 @@ export async function driveTurn(socketPath, opts = {}) {
       const q = qs[0];
       const answer = firstOptionAnswer(q);
       log(`answering question ${q.id} -> ${answer}`);
-      const r = await sendCommand(socketPath, { cmd: 'answer', id: q.id, answers: [answer] }, { timeoutMs: actionBudget() });
-      if (r && r.error) return interruptAndReturn('failed', `answer rejected: ${r.error}`);
+      const a = await actionOnce({ cmd: 'answer', id: q.id, answers: [answer] }, 'answer');
+      if (a.terminal) return a.terminal;
+      if (a.reply && a.reply.error) return interruptAndReturn('failed', `answer rejected: ${a.reply.error}`);
     }
     res = await waitOnce();
   }

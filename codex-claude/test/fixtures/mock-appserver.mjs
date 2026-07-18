@@ -48,6 +48,19 @@ if (!REVIEW_MODES.has(REVIEW_MODE)) {
   process.exit(2);
 }
 
+// --lifecycle-file <path>: OPT-IN observability seam. Synchronously persist our PID at boot and
+// hold the event loop open with a REFERENCED keepalive. Without the keepalive this mock exits
+// naturally on stdin EOF, so a daemon that died WITHOUT killing its child would leave no
+// observable orphan — and a deleted daemon.stop() would stay green in the SIGTERM tests. Only an
+// actual kill(), not a dropped pipe, may end a lifecycle-tracked mock. Default behaviour (no
+// flag) is unchanged.
+const lfIdx = process.argv.indexOf('--lifecycle-file');
+const LIFECYCLE_PATH = lfIdx >= 0 ? process.argv[lfIdx + 1] : null;
+if (LIFECYCLE_PATH) {
+  writeFileSync(LIFECYCLE_PATH, String(process.pid));
+  setInterval(() => {}, 1 << 30);   // referenced on purpose — never unref this
+}
+
 let threadSeq = 0;
 let turnSeq = 0;
 let serverReqSeq = 1000;

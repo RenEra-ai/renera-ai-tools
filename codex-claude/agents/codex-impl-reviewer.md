@@ -48,8 +48,15 @@ re-author it.
 2. **Confirm the scope.** Use the changed-file list you were given. If you were not given one, derive
    it from the diff via Bash (`git diff --name-only <base>..HEAD`).
 
-3. **Build the review prompt in a temp FILE with the Write tool** (never inline the plan/file text in a
-   shell argument — it may contain backticks/`$()`/quotes). This file holds the **instructions only** —
+3. **Build the review prompt in a temp FILE with the Write tool.** First mint a UNIQUE DIRECTORY —
+   `mktemp -d /tmp/cdx-review.XXXXXX` — and use `<that dir>/prompt` as your prompt path. Use `-d`:
+   a bare `mktemp` CREATES the file, and Write refuses to overwrite a file you have not Read, so the
+   recipe would dead-end at its own first step; a fresh path inside a unique dir is both writable and
+   unique. Then Write the prompt to that path (never inline the plan/file text in a
+   shell argument — it may contain backticks/`$()`/quotes). Every fallback sidecar in step 4 derives
+   from this unique path, so concurrent reviewer agents can never overwrite each other's sidecars
+   (a shared sidecar meant one agent stopping the OTHER's daemon and orphaning its own session).
+   This file holds the **instructions only** —
    do NOT paste the plan into it; the driver appends the plan verbatim from `PLAN_PATH` (step 4). Pick
    the body by whether you got a plan:
    - **With a plan:** "Review the implementation against the architect design plan provided below, then
@@ -99,29 +106,35 @@ re-author it.
      the plan — that would paraphrase it).
    - **`wait` can come back parked**, not just terminal or timed out. Answer it and wait again.
 
+   `<prompt>` below is the literal `<that dir>/prompt` path from step 3 — every sidecar is derived
+   from it, so nothing here is shared with any other agent run.
+
    ```bash
-   # 1. Build the combined prompt (omit the plan block entirely when you have no PLAN_PATH).
-   { cat <that temp prompt file>; printf '\n\n=== ARCHITECT DESIGN PLAN (verbatim) ===\n'; cat <PLAN_PATH>; } > /tmp/cdx-fallback-prompt.txt
+   # 1. Build the combined prompt as a SIDECAR of your unique prompt file.
+   #    WITH a plan — concatenate the saved plan verbatim:
+   { cat "<prompt>"; printf '\n\n=== ARCHITECT DESIGN PLAN (verbatim) ===\n'; cat "<PLAN_PATH>"; } > "<prompt>.fallback"
+   #    WITHOUT a plan — copy only the original review prompt (no plan block):
+   cat "<prompt>" > "<prompt>.fallback"
 
    # 2. Start an owned session and persist the socket path to a file (NOT a shell variable).
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --private --cwd "$PWD" > /tmp/cdx-fallback-start.json
-   node -e "console.log(JSON.parse(require('fs').readFileSync('/tmp/cdx-fallback-start.json','utf8')).socket)" > /tmp/cdx-fallback-sock.txt
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --private --cwd "$PWD" > "<prompt>.start.json"
+   node -e "console.log(JSON.parse(require('fs').readFileSync('<prompt>.start.json','utf8')).socket)" > "<prompt>.sock"
 
    # 3. Send the turn.
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs send "$(cat /tmp/cdx-fallback-prompt.txt)" --effort ultra --socket "$(cat /tmp/cdx-fallback-sock.txt)"
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs send "$(cat "<prompt>.fallback")" --effort ultra --socket "$(cat "<prompt>.sock")"
 
    # 4. Then, in SEPARATE Bash calls, until the status is terminal — repeat as many times as needed:
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait --timeout-ms 300000 --socket "$(cat /tmp/cdx-fallback-sock.txt)"
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait --timeout-ms 300000 --socket "$(cat "<prompt>.sock")"
    #    {"status":"timeout"}  -> STILL RUNNING; wait again (it does NOT interrupt the turn)
    #    {"status":"question"} -> answer, then wait again:
-   #        … answer --id <the question id> --option 1 --socket "$(cat /tmp/cdx-fallback-sock.txt)"
+   #        … answer --id <the question id> --option 1 --socket "$(cat "<prompt>.sock")"
    #    {"status":"approval"} -> a review only needs to READ; decline, then wait again:
-   #        … approve --decision deny --socket "$(cat /tmp/cdx-fallback-sock.txt)"
+   #        … approve --decision deny --socket "$(cat "<prompt>.sock")"
    #    completed | failed | interrupted -> done, go to step 5
 
    # 5. Read the result, then ALWAYS stop.
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs read --socket "$(cat /tmp/cdx-fallback-sock.txt)"
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs stop --socket "$(cat /tmp/cdx-fallback-sock.txt)"
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs read --socket "$(cat "<prompt>.sock")"
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs stop --socket "$(cat "<prompt>.sock")"
    ```
    ALWAYS `stop`, even on failure, or the detached daemon and its app-server are orphaned. If the
    fallback also produces no review, say so and end with `VERDICT: UNCLEAR` — never invent findings.

@@ -367,18 +367,25 @@ test('a REJECTED turn/start is finalized (no resurrection) and does NOT quaranti
   const d = unitDaemon();
   // Drive the REAL rejection arm: stub the RPC to reject and call _sendStart, rather than calling
   // _finalizeTurn by hand — otherwise reverting the fix in _sendStart leaves this test green.
-  d.app.request = () => Promise.reject(new Error('simulated'));
+  // DEFERRED rejection: same-thread traffic must be able to arrive (and be buffered) first, to
+  // prove the arm stays recoverable even with a non-empty buffer — buffering is thread-scoped,
+  // not request-correlated, so a buffered notification is not proof a server turn exists.
+  let reject;
+  d.app.request = () => new Promise((_, rej) => { reject = rej; });
   d._beginTurn({ isReview: true });
   d._sendStart('review/start', {}, 'review/start');
+  d._onNotification('turn/started', { threadId: 'T-mine', turn: { id: 'started-x' } });
+  assert.equal(d.turn.buffered.length, 1, 'the same-thread notification must be buffered pre-rejection');
+  reject(new Error('simulated'));
   await new Promise((r) => setImmediate(r));               // let the rejection handler run
   assert.equal(d.turn.status, 'failed');
   assert.equal(d.turn.finalized, true, 'the rejection arm must FINALIZE, not just set status');
-  assert.equal(d.turn.finalized, true);
+  assert.deepEqual(d.turn.buffered, [], 'finalizing must clear the buffered traffic');
+  assert.equal(d.restartRequired, false, 'a rejected start must not demand a restart');
   d._onNotification('item/completed', { threadId: 'T-mine', turnId: 'x', item: { type: 'exitedReviewMode', review: 'LEAKED' } });
   d._onNotification('turn/completed', { threadId: 'T-mine', turn: { id: 'x', status: 'completed' } });
   assert.equal(d.turn.status, 'failed', 'a finalized turn must stay finalized');
   assert.ok(!/LEAKED/.test(d.turn.message || ''));
-  assert.equal(d.restartRequired, false, 'a rejected start must not demand a restart');
 });
 
 test('a foreign reviewThreadId fails the turn WITHOUT quarantining (the id was known)', () => {

@@ -21,32 +21,37 @@ function tmpFile(name, content) {
   return p;
 }
 
+// POSITIONAL, like the one-shot's lastTwo(): this script's contract fronts the metadata (STATUS,
+// PARSED_VERDICT, === REVIEW ===, then the body). Independent per-line matches stayed green under
+// reordered or duplicated lines — the exact drift the positional contract exists to forbid.
+const headLines = (stdout, n) => stdout.split('\n').slice(0, n);
+const failClosedHead = (stdout) => {
+  assert.deepEqual(headLines(stdout, 3), ['STATUS: failed', 'PARSED_VERDICT: UNCLEAR', '=== REVIEW ===']);
+  assert.match(stdout.split('\n')[3], /^Codex review did not run: /);
+};
+
 test('review-round fails CLOSED (UNCLEAR) when a requested --plan-file cannot be read', async () => {
   const promptFile = tmpFile('prompt.txt', 'review body');
   const missing = join(tmpdir(), 'cdx-definitely-missing-plan-xyz.md');
   const { stdout } = await run('node', [script, '--prompt-file', promptFile, '--plan-file', missing], { timeout: 15000 });
-  assert.match(stdout, /^STATUS: failed$/m);
-  assert.match(stdout, /^PARSED_VERDICT: UNCLEAR$/m);
+  failClosedHead(stdout);
 });
 
 test('review-round fails CLOSED (UNCLEAR) when a requested --plan-file is empty', async () => {
   const promptFile = tmpFile('prompt.txt', 'review body');
   const emptyPlan = tmpFile('issue.md', '   \n\n');
   const { stdout } = await run('node', [script, '--prompt-file', promptFile, '--plan-file', emptyPlan], { timeout: 15000 });
-  assert.match(stdout, /^STATUS: failed$/m);
-  assert.match(stdout, /^PARSED_VERDICT: UNCLEAR$/m);
+  failClosedHead(stdout);
 });
 
 test('review-round fails CLOSED (UNCLEAR) when --plan-file is given without a path (last token)', async () => {
   const promptFile = tmpFile('prompt.txt', 'review body');
   const { stdout } = await run('node', [script, '--prompt-file', promptFile, '--plan-file'], { timeout: 15000 });
-  assert.match(stdout, /^STATUS: failed$/m);
-  assert.match(stdout, /^PARSED_VERDICT: UNCLEAR$/m);
+  failClosedHead(stdout);
 });
 
 test('review-round fails CLOSED (UNCLEAR) when --plan-file value is an empty string', async () => {
   const promptFile = tmpFile('prompt.txt', 'review body');
   const { stdout } = await run('node', [script, '--prompt-file', promptFile, '--plan-file', ''], { timeout: 15000 });
-  assert.match(stdout, /^STATUS: failed$/m);
-  assert.match(stdout, /^PARSED_VERDICT: UNCLEAR$/m);
+  failClosedHead(stdout);
 });

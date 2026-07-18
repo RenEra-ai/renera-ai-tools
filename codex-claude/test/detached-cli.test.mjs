@@ -89,16 +89,30 @@ test('start WITHOUT profile flags -> review refused wrong_thread_profile', async
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('--private writes NO global state (a concurrent session cannot be clobbered or hijacked)', async () => {
+test('--private writes NO global state (a concurrent session cannot be clobbered or hijacked)', { timeout: 30000 }, async () => {
   const dir = repo();
-  const statePath = join(process.env.HOME, '.codex-drive', 'state.json');
-  const before = existsSync(statePath) ? readFileSync(statePath, 'utf8') : null;
-  const { socket, private: isPrivate } = await startPrivate(dir);
-  assert.equal(isPrivate, true);
-  const after = existsSync(statePath) ? readFileSync(statePath, 'utf8') : null;
-  assert.equal(after, before, '--private must not touch ~/.codex-drive/state.json');
-  await cli(['stop', '--socket', socket], { env: env() });
-  rmSync(dir, { recursive: true, force: true });
+  // A REDIRECTED temp HOME, like the sibling at the bottom of this file: reading the developer's
+  // real $HOME tested the machine as much as the code, and startPrivate()'s env() would not have
+  // carried a redirected HOME to the daemon anyway — the start below runs under the same `e` the
+  // assertion inspects.
+  const home = mkdtempSync(join(tmpdir(), 'cdx-h-'));
+  DIRS.push(home);
+  const e = { ...env('ok'), HOME: home };
+  const statePath = join(home, '.codex-drive', 'state.json');
+  assert.equal(existsSync(statePath), false, 'a fresh HOME starts with no state');
+  const r0 = await cli(['start', '--private', '--cwd', dir, '--sandbox', 'read-only',
+    '--approval-policy', 'never', '--ephemeral'], { env: e });
+  // Register BEFORE asserting or parsing (startPrivate's rule): a malformed reply or a failed
+  // assertion must not strand the daemon this call just spawned.
+  let out = null;
+  try { out = JSON.parse(r0.stdout); } catch { /* asserted below */ }
+  if (out && out.socket) SPAWNED.push(out.socket);
+  assert.equal(r0.code, 0, `start failed: ${r0.stderr}`);
+  assert.ok(out && out.socket, `start produced no socket: ${r0.stdout}`);
+  assert.equal(out.private, true);
+  assert.equal(existsSync(statePath), false,
+    '--private must not write state.json into the HOME it actually ran under');
+  await cli(['stop', '--socket', out.socket], { env: e });
 });
 
 test('read --out resolves a relative path against the SOCKET-selected daemon cwd', async () => {
