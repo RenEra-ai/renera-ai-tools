@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { join, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { parseArgs, toCommand, parseStartProfile } from '../lib/verbs.mjs';
+import { parseArgs, toCommand, parseStartProfile, assertKnownFlags } from '../lib/verbs.mjs';
 import { sendCommand } from '../lib/client.mjs';
 import { StateStore } from '../lib/state.mjs';
 import { Daemon } from '../lib/daemon.mjs';
@@ -39,6 +39,19 @@ async function main() {
 
   const parsed = parseArgs(argv);
   const store = new StateStore();
+
+  // `doctor` and `start` return before toCommand(), which is where assertKnownFlags normally runs —
+  // so validate here, BEFORE anything observable happens. For `start` that means before the profile
+  // is parsed, before the existing-session probe, and before any spawn: `start --help` used to
+  // print no help, boot a real daemon and overwrite the global state file, exiting 0.
+  if (parsed.verb === 'doctor' || parsed.verb === 'start') {
+    try { assertKnownFlags(parsed.verb, parsed.flags); } catch (e) { fail(e.message); }
+    // A positional here is a forgotten flag name, never an argument: `start /some/repo` silently
+    // anchored the daemon to the caller's cwd instead of that path.
+    if (parsed.positional !== undefined) {
+      fail(`verb '${parsed.verb}' takes no positional argument (got '${parsed.positional}')`);
+    }
+  }
 
   if (parsed.verb === 'doctor') {
     const { doctorReport } = await import('../lib/doctor.mjs');
@@ -118,6 +131,11 @@ async function startDaemon(parsed, store) {
   } catch (e) {
     fail(e.message);
   }
+  // Validate the test seam HERE, in the parent. The detached child calls testAppServerOpts() too —
+  // authoritatively — but its stdio is 'ignore', so a seam misconfiguration (CODEX_DRIVE_TEST_APPSERVER
+  // set without CODEX_DRIVE_TEST_MODE=1, malformed JSON, a relative command) threw into /dev/null and
+  // the caller saw only a generic 'daemon did not come up' five seconds later.
+  try { testAppServerOpts(); } catch (e) { fail(e.message); }
   // Normalize to an ABSOLUTE path: a relative `--cwd repo` is anchored to the start-time process cwd
   // (where the daemon is also spawned), so `state.cwd` stays a stable absolute anchor. Later consumers —
   // `read --out` artifact resolution and `--resume-latest` thread-index matching — then can't drift to a
@@ -127,8 +145,10 @@ async function startDaemon(parsed, store) {
   // long-review fallback cannot work as documented — its own `start` would refuse whenever ANY
   // unrelated session is live (below), while itself clobbering state.json for everyone else. The
   // caller keeps the printed socket and passes --socket to every later verb.
+  // parseStartProfile already rejected a valued --private (with every other boolean-only flag),
+  // and it runs BEFORE the session probe — which is the point: validating here would have meant
+  // `start --force --privte` tore down a live session first and only then complained.
   const isPrivate = parsed.flags.private === true;
-  if ('private' in parsed.flags && !isPrivate) fail('--private is a boolean flag and takes no value');
 
   // Idempotency: do NOT silently clobber a LIVE session — that orphans its detached codex app-server.
   // Probe the recorded socket; if a daemon answers, refuse (or, with --force, stop it first).

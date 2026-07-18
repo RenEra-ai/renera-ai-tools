@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseArgs, toCommand, parseStartProfile } from '../lib/verbs.mjs';
+import { parseArgs, toCommand, parseStartProfile, assertKnownFlags } from '../lib/verbs.mjs';
 
 test('review maps --base / --scope, and omits what was not given', () => {
   assert.deepEqual(toCommand({ verb: 'review', flags: { base: 'abc123' } }), { cmd: 'review', base: 'abc123' });
@@ -85,6 +85,54 @@ test('toCommand maps answer --option to answers array and --text to answers arra
     { cmd: 'answer', id: 'q1', answers: ['B'] });
 });
 
+test('answer rejects every shape that would send garbage to a live Codex question', () => {
+  // The daemon only recognises /^__option:(\d+)$/ and passes anything else through VERBATIM as the
+  // answer text. So each of these used to be answered with a literal nonsense string while the
+  // caller believed their choice had been applied.
+  const bad = [
+    [{ id: 'q1', option: true }, /--option requires a value/],        // valueless --option -> '__option:true'
+    [{ id: 'q1', option: 'abc' }, /positive integer/],
+    [{ id: 'q1', option: '0' }, /positive integer/],                  // options are 1-based
+    [{ id: 'q1', option: '-1' }, /positive integer/],
+    [{ id: 'q1', text: true }, /--text requires a value/],            // valueless --text -> answer "true"
+    [{ id: 'q1' }, /exactly one of --text or --option/],              // neither -> '__option:undefined'
+    [{ id: 'q1', text: 'B', option: '2' }, /exactly one of --text or --option/],
+    [{ option: '1' }, /--id requires a value/],
+    [{ id: true, option: '1' }, /--id requires a value/],
+  ];
+  for (const [flags, re] of bad) {
+    assert.throws(() => toCommand({ verb: 'answer', flags }), re, `expected ${JSON.stringify(flags)} to throw ${re}`);
+  }
+});
+
+test('read --full is a loud unknown flag (nothing in lib ever read cmd.full)', () => {
+  // It was accepted, sent over the wire and ignored: the caller asked for the full transcript and
+  // silently got only the last message — the exact class the allowlist exists to stop.
+  assert.throws(() => toCommand({ verb: 'read', flags: { full: true } }), /unknown flag --full/);
+});
+
+test('start/doctor reject unknown flags, positional-shaped typos and valued booleans', () => {
+  // Neither verb reaches toCommand in bin, so these are asserted through the exported allowlist.
+  assert.throws(() => assertKnownFlags('start', { help: true }), /unknown flag --help for verb 'start'/);
+  assert.throws(() => assertKnownFlags('start', { sandbxo: 'read-only' }), /unknown flag --sandbxo/);
+  assert.throws(() => assertKnownFlags('doctor', { bogus: 'x' }), /unknown flag --bogus for verb 'doctor'/);
+  // Legitimate start flags still pass.
+  assertKnownFlags('start', { cwd: '/r', sandbox: 'read-only', 'approval-policy': 'never', ephemeral: true, private: true });
+  assertKnownFlags('doctor', {});
+  // Transport flags are NOT silently accepted here — neither verb talks to an existing daemon.
+  assert.throws(() => assertKnownFlags('start', { socket: '/tmp/s' }), /unknown flag --socket/);
+  assert.throws(() => assertKnownFlags('doctor', { 'timeout-ms': '5' }), /unknown flag --timeout-ms/);
+});
+
+test('boolean-only start flags reject a value (--force no used to force-stop a live session)', () => {
+  // 'no' is a truthy string: `start --force no` stopped the very session the caller was protecting,
+  // and `start --private no` wrote the global state it looked like it was avoiding.
+  for (const b of ['ephemeral', 'force', 'private', 'resume-latest']) {
+    assert.throws(() => parseStartProfile({ [b]: 'no' }), new RegExp(`--${b} is a boolean flag`));
+  }
+  assert.doesNotThrow(() => parseStartProfile({ force: true, private: true }));
+});
+
 test('toCommand maps approve', () => {
   assert.deepEqual(toCommand({ verb: 'approve', flags: { decision: 'allow' } }),
     { cmd: 'approve', decision: 'allow' });
@@ -107,7 +155,7 @@ test('an unknown flag is a loud error, never silently dropped into a different r
   assert.throws(() => toCommand({ verb: 'wait', flags: { bogus: 'x' } }), /unknown flag --bogus/);
   // Transport flags that bin consumes must still pass through every verb, or real calls break.
   assert.deepEqual(toCommand({ verb: 'wait', flags: { 'timeout-ms': '5000', socket: '/tmp/s' } }), { cmd: 'wait' });
-  assert.deepEqual(toCommand({ verb: 'read', flags: { out: '/tmp/x', socket: '/tmp/s' } }), { cmd: 'read', full: false });
+  assert.deepEqual(toCommand({ verb: 'read', flags: { out: '/tmp/x', socket: '/tmp/s' } }), { cmd: 'read' });
   assert.deepEqual(toCommand({ verb: 'review', flags: { base: 'abc', socket: '/tmp/s' } }), { cmd: 'review', base: 'abc' });
 });
 

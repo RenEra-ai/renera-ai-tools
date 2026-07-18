@@ -149,6 +149,55 @@ test('invalid start flags error BEFORE any session is probed, stopped or spawned
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('start --help errors loudly instead of booting a daemon and clobbering global state', async () => {
+  // The regression this closes: `start --help` printed no help, spawned a REAL detached daemon,
+  // overwrote ~/.codex-drive/state.json and exited 0 — the same `--help` hazard 1.8.1 removed from
+  // the one-shot. `--record` doubles as the sentinel: if the app-server were ever spawned, the file
+  // would exist. HOME is redirected so a state write would land somewhere observable, not on the
+  // developer's real session.
+  const dir = repo();
+  const home = mkdtempSync(join(tmpdir(), 'cdx-home-'));
+  DIRS.push(home);
+  const sentinel = join(home, 'spawned.json');
+  const seam = {
+    ...env('ok'),
+    HOME: home,
+    CODEX_DRIVE_TEST_APPSERVER: JSON.stringify([process.execPath, FIXTURE, '--review-mode', 'ok', '--record', sentinel]),
+  };
+  const cases = [
+    [['start', '--help'], /unknown flag --help/],
+    [['start', '--bogus', 'x'], /unknown flag --bogus/],
+    [['start', dir], /takes no positional/],              // a forgotten --cwd, not an argument
+    [['start', '--private', 'no'], /--private is a boolean flag/],   // 'no' is truthy: looked private, wrote global state
+    [['start', '--force', 'no'], /--force is a boolean flag/],       // 'no' is truthy: force-stopped a live session
+  ];
+  for (const [args, re] of cases) {
+    const r = await cli([...args, '--cwd', dir], { env: seam });
+    assert.equal(r.code, 1, `${args.join(' ')} should exit 1, got ${r.code}: ${r.stdout}`);
+    assert.match(r.stderr, re);
+  }
+  assert.equal(existsSync(sentinel), false, 'no app-server may be spawned for a rejected start');
+  assert.equal(existsSync(join(home, '.codex-drive', 'state.json')), false, 'no global state may be written');
+});
+
+test('doctor rejects unknown flags instead of silently ignoring them', async () => {
+  const r = await cli(['doctor', '--sockt', '/tmp/s'], { env: env() });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /unknown flag --sockt/);
+});
+
+test('a bad test seam fails LOUDLY in the parent, not silently in the stdio-ignored child', async () => {
+  // Without the parent-side preflight the child threw the real reason into /dev/null and the caller
+  // saw only 'daemon did not come up' five seconds later.
+  const dir = repo();
+  const bad = { ...env('ok') };
+  delete bad.CODEX_DRIVE_TEST_MODE;                     // seam set, gate not
+  const r = await cli(['start', '--private', '--cwd', dir], { env: bad });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /refusing to substitute/);
+  assert.doesNotMatch(r.stderr, /did not come up/);
+});
+
 test('a non-start verb with neither --socket nor an active session fails cleanly', async () => {
   const r = await cli(['status', '--socket', '/nonexistent/nope.sock'], { env: env() });
   assert.notEqual(r.code, 0);
