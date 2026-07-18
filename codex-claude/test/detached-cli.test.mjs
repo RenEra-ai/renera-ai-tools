@@ -79,6 +79,7 @@ test('start WITHOUT profile flags -> review refused wrong_thread_profile', async
   const dir = repo();
   const r0 = await cli(['start', '--private', '--cwd', dir], { env: env() });
   const { socket } = JSON.parse(r0.stdout);
+  SPAWNED.push(socket);          // tracked like every other start, or a failure here orphans it
   const r = await cli(['review', '--socket', socket], { env: env() });
   assert.equal(r.code, 2);                       // {error} -> exit 2
   assert.match(r.stdout, /wrong_thread_profile/);
@@ -237,3 +238,11 @@ test('start FAILS CLOSED when the recorded session probes as busy rather than ab
     await new Promise((r) => server.close(r));
   }
 });
+
+// KNOWN GAP — spec:763 (finding 15) is NOT closed. The absent/mismatched global-state cases need a
+// daemon booted under a redirected HOME, and `start` reliably reports "daemon did not come up" in
+// that setup even though the same child boots in ~2s when launched directly with the same env — an
+// unresolved interaction with the detached spawn, not with the code under test. A test that cannot
+// boot proves nothing, and a --socket variant would be vacuous by construction (bin sets
+// `state = socketFlag ? null : store.readState()`, so a decoy state.json is never even read).
+// Left open deliberately rather than papered over with coverage that asserts nothing.

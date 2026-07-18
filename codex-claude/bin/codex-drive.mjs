@@ -167,9 +167,15 @@ async function startDaemon(parsed, store) {
       // replaced. A timeout means "busy, or wedged, but something is there", so fail CLOSED rather
       // than overwrite state.json and orphan a live daemon plus its codex app-server.
       const gone = e && (e.code === 'ENOENT' || e.code === 'ECONNREFUSED');
-      if (!gone) {
+      if (!gone && !parsed.flags.force) {
         fail(`a codex-drive session may still be live at ${existing.socket} (probe: ${e.message}). `
           + 'Run `codex-drive stop` to end it, or `start --force` to stop it and start fresh.');
+      }
+      // --force IS the documented escape hatch, so it must actually work here: refusing even with
+      // --force made the error message above advertise a recovery the code then rejected. Treat the
+      // unreachable session as replaceable, after one best-effort stop.
+      if (!gone) {
+        try { await sendCommand(existing.socket, { cmd: 'stop' }, { timeoutMs: 5000 }); } catch { /* unreachable anyway */ }
       }
     }
     if (live && !parsed.flags.force) {

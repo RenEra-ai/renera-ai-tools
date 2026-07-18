@@ -39,9 +39,13 @@ function fakeDaemon(script) {
         const cmd = JSON.parse(line);
         seen.push(cmd);
         const entry = script[Math.min(i++, script.length - 1)];
-        const res = typeof entry === 'function' ? entry(cmd) : entry;
-        if (res === null) return;              // deliberately silent
-        sock.write(JSON.stringify(res) + '\n');
+        const out = typeof entry === 'function' ? entry(cmd) : entry;
+        // An entry may return a Promise: a round that takes real time is the only way to exercise a
+        // budget spread ACROSS parked rounds (instant answers drain the guard before any clock runs).
+        Promise.resolve(out).then((res) => {
+          if (res === null || res === undefined) return;   // deliberately silent
+          try { sock.write(JSON.stringify(res) + '\n'); } catch { /* closed */ }
+        });
       }
     });
     sock.on('error', () => {});
@@ -148,13 +152,48 @@ test('a per-wait cap on a silent daemon interrupts and reports timeout', async (
 test('deadlineMs is a TOTAL budget: parked rounds cannot reset it', async () => {
   // The bug this pins: the cap applied per wait, so each parked round started the clock again and
   // the real bound was maxDrains × waitTimeoutMs, not waitTimeoutMs.
-  const { socketPath, seen } = await fakeDaemon([(cmd) => (cmd.cmd === 'wait' ? null : { ok: true })]);
+  //
+  // The turn must PARK repeatedly (never time out a single wait), or the loop exits on the first
+  // per-wait cap and the test passes even if deadlineMs is ignored entirely.
+  // Each wait takes ~120ms, so the 400ms total budget runs out after a few parked rounds — long
+  // before maxDrains, and without any single wait hitting the 5s per-wait cap.
+  const slowPark = (cmd) => (cmd.cmd === 'wait'
+    ? new Promise((r) => setTimeout(() => r(q(['A'])), 120))
+    : { ok: true });
+  const { socketPath, seen } = await fakeDaemon([slowPark]);
   const t0 = Date.now();
-  const res = await driveTurn(socketPath, { waitTimeoutMs: 100, deadlineMs: 250, maxDrains: 20 });
+  const res = await driveTurn(socketPath, { waitTimeoutMs: 5000, deadlineMs: 400, maxDrains: 50 });
   const elapsed = Date.now() - t0;
   assert.equal(res.status, 'timeout');
-  assert.ok(elapsed < 2000, `must stop at the total budget, took ${elapsed}ms`);
-  assert.ok(seen.filter((c) => c.cmd === 'wait').length <= 4, 'a handful of waits, not 20');
+  assert.match(res.reason, /budget exhausted/, 'must stop on the TOTAL budget, not a per-wait cap');
+  assert.ok(elapsed < 3000, `must stop at the total budget, took ${elapsed}ms`);
+  // Answered several rounds (so the budget really was being consumed across parks), then stopped
+  // well short of maxDrains.
+  const answers = seen.filter((c) => c.cmd === 'answer').length;
+  assert.ok(answers >= 1 && answers < 50, `expected a few drained rounds, got ${answers}`);
+});
+
+test('an ANSWER-side {error} also interrupts (not just approve)', async () => {
+  const { socketPath, seen } = await fakeDaemon([
+    q(['A']),
+    { error: 'no_pending_question' },
+    { ok: true },
+  ]);
+  const res = await driveTurn(socketPath, {});
+  assert.equal(res.status, 'failed');
+  assert.match(res.reason, /answer rejected/);
+  assert.equal(seen.filter((c) => c.cmd === 'answer').length, 1, 'one attempt, then stop');
+});
+
+test("onMalformedQuestion:'return' hands the shape back WITHOUT interrupting", async () => {
+  // It used to `break`, leaving status 'question' — which the post-loop guard then read as drain
+  // exhaustion, so 'return' mode interrupted the turn and reported failed. Both round scripts use
+  // this mode, so that was a silent behaviour regression for them.
+  const bad = { status: 'question', question: { questions: [] } };
+  const { socketPath, seen } = await fakeDaemon([bad, { ok: true }]);
+  const res = await driveTurn(socketPath, { onMalformedQuestion: 'return' });
+  assert.equal(res.status, 'question', 'the parked shape is returned to the caller');
+  assert.equal(seen.filter((c) => c.cmd === 'interrupt').length, 0, 'and the turn is NOT interrupted');
 });
 
 test('an already-exhausted budget interrupts immediately instead of waiting forever', async () => {

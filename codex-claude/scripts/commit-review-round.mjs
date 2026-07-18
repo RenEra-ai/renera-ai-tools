@@ -29,11 +29,6 @@ import { testAppServerOpts, testWaitMs } from '../lib/test-appserver.mjs';
 
 const USAGE = `usage: commit-review-round.mjs [--base <ref> | --scope <${SCOPES.join('|')}>] [--cwd <repo>]`;
 
-// TOTAL wall-clock budget for the whole drive, under the ~10-min Bash cap so a wedged turn can't
-// hang the gate. It used to be applied PER wait, so each parked round reset it and the real bound
-// was 20 rounds × 9 minutes ≈ 3 hours — the opposite of the guarantee the comment claimed.
-const WAIT_TIMEOUT_MS = testWaitMs() ?? 540000;
-
 const ALLOWED_FLAGS = ['base', 'scope', 'cwd'];
 
 function die(msg, code) {
@@ -59,6 +54,15 @@ try {
   die(e.message, 1);
 }
 if (parsed.positional !== undefined) die(`unexpected argument '${parsed.positional}'`, 1);
+
+// TOTAL wall-clock budget for the whole drive, under the ~10-min Bash cap so a wedged turn can't
+// hang the gate. It used to be applied PER wait, so each parked round reset it and the real bound
+// was 20 rounds × 9 minutes ≈ 3 hours — the opposite of the guarantee the comment claimed.
+//
+// Resolved AFTER the help/argv preflight on purpose: testWaitMs() THROWS on a malformed ambient
+// CODEX_DRIVE_TEST_WAIT_MS, and at module top that turned `--help` into a stack trace and exit 1.
+let WAIT_TIMEOUT_MS;
+try { WAIT_TIMEOUT_MS = testWaitMs() ?? 540000; } catch (e) { die(e.message, 1); }
 
 const flagValue = (name) => {
   if (!(name in parsed.flags)) return undefined;
@@ -171,6 +175,12 @@ process.stdout.write(`STATUS: ${clean ? 'completed' : (status === 'timeout' ? 't
 // (via git-scope), so an exported GIT_DIR cannot make this name a different repo's HEAD than the one
 // the daemon reviewed.
 const head = fullSha(cwd, 'HEAD');
-process.stdout.write(`SCOPE: ${scopeLabel}${head ? ` head=${head}` : ''}\n`);
+if (!head) {
+  // Never silently drop `head=`: a SCOPE line that cannot say WHICH commit was reviewed defeats the
+  // trailer's only purpose, and a clean exit alongside it would be unattested.
+  process.stdout.write(`SCOPE: ${scopeLabel} head=(unresolved)\n`);
+  die('could not resolve HEAD to attest what was reviewed', 2);
+}
+process.stdout.write(`SCOPE: ${scopeLabel} head=${head}\n`);
 // timeout and failed are deliberately the SAME exit code: both mean "no trustworthy review".
 process.exit(clean ? 0 : 2);

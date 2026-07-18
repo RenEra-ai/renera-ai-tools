@@ -360,15 +360,19 @@ function unitDaemon({ log = [], threadId = 'T-mine' } = {}) {
   return d;
 }
 
-test('a REJECTED turn/start is finalized (no resurrection) and does NOT quarantine the session', () => {
+test('a REJECTED turn/start is finalized (no resurrection) and does NOT quarantine the session', async () => {
   // The rejection arm used to set status='failed' without `finalized`, so the server's later
   // notifications walked it back to completed. And the quarantine must NOT fire here: an error
   // RESPONSE means no server turn was ever created, so a routine bad parameter must stay recoverable.
   const d = unitDaemon();
-  d._gen = 1;
-  d.turn = d._freshTurn({ status: 'running', awaitingResponse: true, isReview: true, gen: 1 });
-  d._finalizeTurn('review/start failed: simulated');       // what the rejection arm now calls
+  // Drive the REAL rejection arm: stub the RPC to reject and call _sendStart, rather than calling
+  // _finalizeTurn by hand — otherwise reverting the fix in _sendStart leaves this test green.
+  d.app.request = () => Promise.reject(new Error('simulated'));
+  d._beginTurn({ isReview: true });
+  d._sendStart('review/start', {}, 'review/start');
+  await new Promise((r) => setImmediate(r));               // let the rejection handler run
   assert.equal(d.turn.status, 'failed');
+  assert.equal(d.turn.finalized, true, 'the rejection arm must FINALIZE, not just set status');
   assert.equal(d.turn.finalized, true);
   d._onNotification('item/completed', { threadId: 'T-mine', turnId: 'x', item: { type: 'exitedReviewMode', review: 'LEAKED' } });
   d._onNotification('turn/completed', { threadId: 'T-mine', turn: { id: 'x', status: 'completed' } });
@@ -416,6 +420,9 @@ test('interrupt answers the parked request BEFORE it awaits turn/interrupt', asy
   const res = await d._interrupt();
   assert.deepEqual(res, { ok: true });
   assert.deepEqual(log, ['respond:5', 'turn/interrupt'], 'the response must precede the interrupt RPC');
+  assert.equal(d.turn.parked, null, 'the parked slot must be cleared, not just answered');
+  assert.notEqual(d.turn.status, 'awaiting_input', 'status must leave awaiting_input or _wait derefs null parked');
+  assert.equal(d.turn.cancelRequested, true, 'the cancel marker gates the late-response interrupt');
 });
 
 test('interrupt works on a turn whose start response never arrived, then quarantines the session', async () => {
@@ -506,16 +513,18 @@ test('replayed buffer entries go through the SAME guards as live traffic, in arr
   const d = unitDaemon();
   d._gen = 1;
   d.turn = d._freshTurn({ status: 'running', awaitingResponse: true, gen: 1 });
-  // Buffered while the id was unknown: a foreign-thread delta, a params-less entry, and two real ones.
-  d._onNotification('item/agentMessage/delta', { threadId: 'T-OTHER', turnId: 'x', delta: 'FOREIGN' });
-  d._onNotification('item/agentMessage/delta', undefined);
-  d._onNotification('item/agentMessage/delta', { threadId: 'T-mine', turnId: 'turn-1', delta: 'one ' });
-  d._onNotification('item/agentMessage/delta', { threadId: 'T-mine', turnId: 'turn-1', delta: 'two' });
+  // Inject DIRECTLY into the buffer: routing these through _onNotification would drop the foreign
+  // and malformed ones at the door, so the replay path would never see them and the test would pass
+  // even if replay bypassed those guards entirely (which is exactly what it used to do).
+  d.turn.buffered.push(['item/agentMessage/delta', { threadId: 'T-OTHER', turnId: 'x', delta: 'FOREIGN' }]);
+  d.turn.buffered.push(['item/agentMessage/delta', undefined]);
+  d.turn.buffered.push(['item/agentMessage/delta', { threadId: 'T-mine', turnId: 'turn-1', delta: 'one ' }]);
+  d.turn.buffered.push(['item/agentMessage/delta', { threadId: 'T-mine', turnId: 'turn-1', delta: 'two' }]);
   d._onStartResponse(1, { turn: { id: 'turn-1' } }, 'turn/start');   // triggers the replay
   assert.equal(d.turn.buffer, 'one two', 'order preserved, foreign + malformed dropped');
 });
 
-test('the generation token drops a superseded response on BOTH arms', () => {
+test('the generation token drops a superseded response on BOTH arms', async () => {
   // Without it a late response from a turn that has been superseded overwrites the live turn's id
   // and state — cross-turn corruption the whole buffering scheme exists to prevent.
   const d = unitDaemon();
@@ -525,11 +534,19 @@ test('the generation token drops a superseded response on BOTH arms', () => {
   d._onStartResponse(1, { turn: { id: 'turn-OLD' } }, 'turn/start');
   assert.equal(d.turn.id, null, 'a superseded response must not set the live turn\'s id');
   assert.equal(d.turn.status, 'running');
-  // The rejection arm carries the same guard: superseded rejections must not finalize a live turn.
-  const gen = d._gen;
-  d._beginTurn({});
-  d.turn.gen = gen + 1;
-  assert.equal(d.turn.status, 'running');
+  // ARM 2 — the REJECTION path. Start a turn whose RPC rejects, supersede it before the rejection
+  // lands, and assert the late rejection cannot finalize the new turn. Mutating turn.gen by hand
+  // (as this used to) never invoked the handler at all.
+  const d2 = unitDaemon();
+  let rejectStart;
+  d2.app.request = () => new Promise((_, rej) => { rejectStart = rej; });
+  d2._beginTurn({});
+  d2._sendStart('turn/start', {}, 'turn/start');
+  d2._beginTurn({});                                  // supersede BEFORE the rejection resolves
+  rejectStart(new Error('late rejection'));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(d2.turn.status, 'running', 'a superseded rejection must not finalize the live turn');
+  assert.equal(d2.turn.finalized, false);
 });
 
 test('END-TO-END: a turn that fails before its response no longer wedges the daemon', { timeout: 15000 }, async () => {
@@ -556,7 +573,9 @@ test('END-TO-END: git scope, app-server spawn cwd and thread/start cwd are ONE c
   // params and nothing observed the child's cwd, so dropping either would have shipped undetected —
   // live Codex resolving the review against the caller's directory while git-scope read another.
   const { dir } = repo();
-  const record = join(mkdtempSync(join(tmpdir(), 'cdx-rec-')), 'thread-start.json');
+  const recDir = mkdtempSync(join(tmpdir(), 'cdx-rec-'));
+  CREATED.push({ sockDir: recDir });                  // swept by the suite hook; it leaked per run
+  const record = join(recDir, 'thread-start.json');
   const { socketPath } = await startDaemon({ cwd: dir, appServerArgs: ['--record', record] });
   const started = await rpcCall(socketPath, { cmd: 'review' });
   assert.equal(started.ok, true, 'the git-scope leg resolved against the review repo');
@@ -564,4 +583,37 @@ test('END-TO-END: git scope, app-server spawn cwd and thread/start cwd are ONE c
   // realpath: macOS resolves /var -> /private/var, so the raw strings differ while the dirs match.
   assert.equal(realpathSync(rec.params.cwd), realpathSync(dir), 'thread/start cwd must be the review cwd');
   assert.equal(realpathSync(rec.cwd), realpathSync(dir), 'the app-server child must be spawned there too');
+});
+
+test('a NORMAL completion also answers a still-parked server request', () => {
+  // The happy path owes the same debt as the failure paths: if a request parks just before the turn
+  // completes, nothing else will ever answer it once the turn is finalized, and the app-server can
+  // sit blocked on it forever. The completion branch used to finalize inline without settling.
+  const log = [];
+  const d = unitDaemon({ log });
+  d._gen = 1;
+  d.turn = d._freshTurn({ status: 'awaiting_input', gen: 1, id: 'turn-1' });
+  d.turn.parked = { id: 9, kind: 'approval', method: 'item/commandExecution/requestApproval', params: {} };
+  d._onNotification('item/completed', { threadId: 'T-mine', turnId: 'turn-1', item: { type: 'exitedReviewMode', review: 'the review' } });
+  d.turn.isReview = true;
+  d._onNotification('turn/completed', { threadId: 'T-mine', turn: { id: 'turn-1', status: 'completed' } });
+  assert.equal(d.turn.status, 'completed');
+  assert.equal(d.turn.parked, null, 'the parked slot must be cleared by the completion');
+  assert.deepEqual(log, ['respond:9'], 'the parked request must be answered exactly once');
+});
+
+test('a SECOND concurrent server request is declined, never silently overwritten', () => {
+  // `parked` is a single slot and answer/approve address it implicitly, so a second request used to
+  // overwrite the first: its id became unreachable and got no response at all, while the client's
+  // next answer was applied to the wrong request.
+  const log = [];
+  const d = unitDaemon({ log });
+  d._gen = 1;
+  d.turn = d._freshTurn({ status: 'running', gen: 1, id: 'turn-1' });
+  const mk = (id) => ({ id, method: 'item/tool/requestUserInput', params: { threadId: 'T-mine', turnId: 'turn-1' } });
+  d._onServerRequest(mk(1));
+  assert.equal(d.turn.parked.id, 1, 'the first request parks');
+  d._onServerRequest(mk(2));
+  assert.equal(d.turn.parked.id, 1, 'the first must STILL be the parked one');
+  assert.equal(log.length, 1, 'the second must be answered immediately');
 });
