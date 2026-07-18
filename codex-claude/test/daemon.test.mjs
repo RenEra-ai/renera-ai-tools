@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -6,6 +6,18 @@ import { join } from 'node:path';
 import { connect } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { Daemon } from '../lib/daemon.mjs';
+import { rmDir } from './fixtures/helpers.mjs';
+
+// Sweep every daemon + temp dir this suite creates: the per-test teardown is skipped by a failed
+// assertion, which otherwise leaves a live daemon and leaks cdx-d-/cdx-home- dirs on every run.
+const CREATED = [];
+after(async () => {
+  for (const r of CREATED) {
+    try { await r.daemon?.stop(); } catch { /* best effort */ }
+    rmDir(r.dir);
+  }
+  CREATED.length = 0;
+});
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/mock-appserver.mjs', import.meta.url));
 
@@ -33,6 +45,7 @@ async function startDaemon(extra = {}) {
     clientInfo: { name: 'codex-drive', version: '0.1.0' },
     ...extra,
   });
+  CREATED.push({ daemon, dir });   // before start(): a boot that throws still leaves the dir behind
   await daemon.start();
   return { daemon, socketPath, dir };
 }
@@ -159,6 +172,7 @@ test('send --mode default sets collaborationMode default (exit plan mode) and co
 test('plan turn with no resolvable model errors instead of sending model:null', async () => {
   // codexHome points at an empty temp dir (no config.toml) and no --model → unresolvable.
   const emptyHome = mkdtempSync(join(tmpdir(), 'cdx-home-'));
+  CREATED.push({ dir: emptyHome });
   const { daemon, socketPath } = await startDaemon({ model: null, codexHome: emptyHome });
   const res = await rpcCall(socketPath, { cmd: 'plan', prompt: 'say OK' });
   assert.equal(res.error, 'no_model_for_mode');

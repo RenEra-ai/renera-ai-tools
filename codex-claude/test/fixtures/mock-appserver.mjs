@@ -28,8 +28,17 @@
 //   noresponse    -> notifications + turn/completed but NO response, ever (arms the daemon backstop)
 //   ask/approve   -> parks a question / an approval mid-review
 import readline from 'node:readline';
+import { writeFileSync } from 'node:fs';
 
-const REVIEW_MODES = new Set(['ok', 'burst', 'reject', 'wrongthread', 'blank', 'statusinbody', 'noresponse', 'ask', 'approve']);
+//   permissions   -> parks a permissions-shaped approval (the one protocol.mjs refuses to fake)
+//   failbeforeresponse -> notifications ending in turn/completed{status:'failed'}, response never sent
+const REVIEW_MODES = new Set(['ok', 'burst', 'reject', 'wrongthread', 'blank', 'statusinbody', 'noresponse', 'ask', 'approve', 'permissions', 'failbeforeresponse']);
+
+// --record <path>: on thread/start, persist the params we were sent AND our own cwd. Lets a test
+// observe two of the three cwd legs (spawn cwd + thread/start cwd) that the spec requires to agree,
+// and doubles as a "was the app-server ever spawned?" sentinel for no-boot assertions.
+const recIdx = process.argv.indexOf('--record');
+const RECORD_PATH = recIdx >= 0 ? process.argv[recIdx + 1] : null;
 const rmIdx = process.argv.indexOf('--review-mode');
 // Guard the indexOf: argv[-1 + 1] is argv[0], so an unguarded read silently turns the first
 // unrelated argument into the mode.
@@ -138,13 +147,26 @@ async function runReview(threadId, reqId) {
     writeBurst([enter, started, exit, done]);
     return;
   }
+  if (REVIEW_MODE === 'failbeforeresponse') {
+    // The turn ends FAILED while the start response is still outstanding. Nothing here is worth
+    // validating, so the daemon must finalise it immediately instead of buffering it forever
+    // (the successful-completion backstop deliberately does not arm for this status).
+    writeBurst([enter, started, { jsonrpc: '2.0', method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'failed', items: [] } } }]);
+    return;
+  }
   write(response);
   await new Promise((r) => setTimeout(r, 10));
   write(enter); write(started);
-  if (REVIEW_MODE === 'ask' || REVIEW_MODE === 'approve') {
+  if (REVIEW_MODE === 'ask' || REVIEW_MODE === 'approve' || REVIEW_MODE === 'permissions') {
     const rid = ++serverReqSeq;
     const answered = new Promise((res) => pendingServerReq.set(rid, res));
-    if (REVIEW_MODE === 'ask') {
+    if (REVIEW_MODE === 'permissions') {
+      // The shape protocol.mjs deliberately refuses to fake a response for ({permissions, scope,
+      // strictAutoReview}), so a driver must interrupt rather than answer it. Resolves on ANY
+      // response — including the error response the decline path sends.
+      write({ jsonrpc: '2.0', id: rid, method: 'item/permissions/requestApproval',
+        params: { threadId, turnId, itemId: 'i1', permissions: ['read'], scope: 'session', strictAutoReview: false } });
+    } else if (REVIEW_MODE === 'ask') {
       write({ jsonrpc: '2.0', id: rid, method: 'item/tool/requestUserInput',
         params: { threadId, turnId, itemId: 'i1',
           questions: [{ id: 'q1', header: 'Pick', question: 'Which?', isOther: false, isSecret: false,
@@ -163,9 +185,12 @@ rl.on('line', (line) => {
   if (!line.trim()) return;
   let msg;
   try { msg = JSON.parse(line); } catch { return; }
-  // Client response to one of our server-requests:
-  if (msg.id !== undefined && msg.result !== undefined && pendingServerReq.has(msg.id)) {
-    pendingServerReq.get(msg.id)(msg.result);
+  // Client response to one of our server-requests. An ERROR response is a FINAL answer too — the
+  // real server treats it as one. Accepting only `result` meant the daemon's respondError decline
+  // path never resolved this promise, so any test driving it hung at `await answered` instead of
+  // reproducing live behaviour.
+  if (msg.id !== undefined && pendingServerReq.has(msg.id) && (msg.result !== undefined || msg.error !== undefined)) {
+    pendingServerReq.get(msg.id)(msg.result !== undefined ? msg.result : { error: msg.error });
     pendingServerReq.delete(msg.id);
     return;
   }
@@ -175,6 +200,9 @@ rl.on('line', (line) => {
     // notification, no reply
   } else if (msg.method === 'thread/start' || msg.method === 'thread/resume') {
     const id = msg.params?.threadId || `thread-${++threadSeq}`;
+    if (RECORD_PATH) {
+      try { writeFileSync(RECORD_PATH, JSON.stringify({ method: msg.method, params: msg.params || null, cwd: process.cwd() })); } catch { /* best effort */ }
+    }
     result(msg.id, { thread: { id } });
     notify('thread/started', { thread: { id } });
   } else if (msg.method === 'turn/start') {
@@ -214,7 +242,10 @@ rl.on('line', (line) => {
     notify('turn/completed', { threadId: msg.params.threadId, turn: { id: msg.params.turnId, status: 'interrupted', items: [] } });
   } else if (msg.method === 'thread/unsubscribe') {
     result(msg.id, {});
-  } else if (msg.id !== undefined) {
+  } else if (msg.id !== undefined && msg.method !== undefined) {
+    // Catch-all for unknown REQUESTS only. It used to fire on any message carrying an id, which
+    // meant a RESPONSE to an id we no longer track got a bogus {result:{}} echoed back at it —
+    // traffic no real server ever emits, and enough to mask an id-collision bug in response matching.
     result(msg.id, {});
   }
 });
