@@ -83,6 +83,12 @@ export class Daemon {
   }
 
   _listen() {
+    // Unix socket paths are capped by the OS (104 bytes on macOS, 108 on Linux) and bind() reports a
+    // bare EINVAL/ENAMETOOLONG that says nothing about length. Check first so the cause is named.
+    if (this.socketPath.length > 100) {
+      return Promise.reject(new Error(
+        `socket path too long (${this.socketPath.length} bytes; the OS limit is ~104): ${this.socketPath}`));
+    }
     if (existsSync(this.socketPath)) { try { unlinkSync(this.socketPath); } catch {} }
     return new Promise((resolve, reject) => {
       this.server = createServer((sock) => this._onClient(sock));

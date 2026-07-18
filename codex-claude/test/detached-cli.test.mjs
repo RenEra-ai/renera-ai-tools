@@ -241,10 +241,68 @@ test('start FAILS CLOSED when the recorded session probes as busy rather than ab
   }
 });
 
-// KNOWN GAP — spec:763 (finding 15) is NOT closed. The absent/mismatched global-state cases need a
-// daemon booted under a redirected HOME, and `start` reliably reports "daemon did not come up" in
-// that setup even though the same child boots in ~2s when launched directly with the same env — an
-// unresolved interaction with the detached spawn, not with the code under test. A test that cannot
-// boot proves nothing, and a --socket variant would be vacuous by construction (bin sets
-// `state = socketFlag ? null : store.readState()`, so a decoy state.json is never even read).
-// Left open deliberately rather than papered over with coverage that asserts nothing.
+// spec:763 — the `read --out` precedence cases. These were impossible to write until the socket
+// name was shortened: a redirected HOME pushed the path past the OS's 104-byte cap, bind() failed
+// inside the stdio-ignored child, and `start` could only say "daemon did not come up".
+test('read --out prefers the DAEMON cwd over a STALE global state.cwd', { timeout: 40000 }, async () => {
+  // Deliberately NOT --socket: bin sets `state = socketFlag ? null : store.readState()`, so a
+  // --socket variant never reads state.json at all and cannot tell the two precedences apart (an
+  // earlier attempt at this test passed with the precedence reversed — vacuous by construction).
+  // Going through the state path means starting NON-private, then corrupting only state.cwd while
+  // leaving state.socket valid, so the daemon is still reachable but the record lies about where.
+  const dir = repo();
+  const home = mkdtempSync(join(tmpdir(), 'cdx-h-'));
+  DIRS.push(home);
+  const decoy = mkdtempSync(join(tmpdir(), 'cdx-decoy-'));
+  DIRS.push(decoy);
+  const e = { ...env('ok'), HOME: home };
+  const r0 = await cli(['start', '--cwd', dir, '--sandbox', 'read-only',
+    '--approval-policy', 'never', '--ephemeral'], { env: e });
+  assert.equal(r0.code, 0, `start failed: ${r0.stderr}`);
+  const { socket } = JSON.parse(r0.stdout);
+  SPAWNED.push(socket);
+
+  const statePath = join(home, '.codex-drive', 'state.json');
+  const state = JSON.parse(readFileSync(statePath, 'utf8'));
+  assert.equal(state.cwd, dir, 'a non-private start must record the real cwd');
+  writeFileSync(statePath, JSON.stringify({ ...state, cwd: decoy }));   // socket stays valid
+
+  await cli(['review'], { env: e });
+  await cli(['wait', '--timeout-ms', '15000'], { env: e });
+  const r = await cli(['read', '--out', 'artifacts/review.md'], { env: e });
+  assert.equal(r.code, 0, `read failed: ${r.stderr}`);
+  assert.ok(existsSync(join(dir, 'artifacts', 'review.md')),
+    'the artifact must follow the DAEMON-reported cwd');
+  assert.ok(!existsSync(join(decoy, 'artifacts')),
+    'and must NOT follow the stale state.cwd');
+  await cli(['stop'], { env: e });
+});
+
+test('read --out still resolves with NO global state at all (--socket path)', { timeout: 30000 }, async () => {
+  const dir = repo();
+  const home = mkdtempSync(join(tmpdir(), 'cdx-h-'));
+  DIRS.push(home);
+  const e = { ...env('ok'), HOME: home };
+  const { socket } = await startPrivate(dir);          // --private writes no state.json
+  assert.equal(existsSync(join(home, '.codex-drive', 'state.json')), false, 'no state may exist');
+  await cli(['review', '--socket', socket], { env: e });
+  await cli(['wait', '--socket', socket, '--timeout-ms', '15000'], { env: e });
+  const r = await cli(['read', '--out', 'artifacts/review.md', '--socket', socket], { env: e });
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(existsSync(join(dir, 'artifacts', 'review.md')), 'artifact lands in the daemon repo');
+  await cli(['stop', '--socket', socket], { env: e });
+});
+
+test('an over-long socket path fails LOUDLY, not as "daemon did not come up"', { timeout: 30000 }, async () => {
+  // The bug class this closes: the child boots with stdio:'ignore', so EVERY failure looked the
+  // same. A HOME deep enough to blow the OS's ~104-byte socket cap must now say exactly that.
+  const dir = repo();
+  let home = mkdtempSync(join(tmpdir(), 'cdx-h-'));
+  DIRS.push(home);
+  for (let i = 0; i < 4; i++) { home = join(home, 'nested-directory-padding'); }
+  mkdirSync(home, { recursive: true });
+  const r = await cli(['start', '--private', '--cwd', dir, '--sandbox', 'read-only',
+    '--approval-policy', 'never', '--ephemeral'], { env: { ...env('ok'), HOME: home } });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /socket path too long/, `expected a named cause, got: ${r.stderr}`);
+});

@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { parseArgs, toCommand, parseStartProfile, assertKnownFlags } from '../lib/verbs.mjs';
 import { sendCommand } from '../lib/client.mjs';
 import { StateStore } from '../lib/state.mjs';
@@ -32,7 +32,15 @@ async function main() {
       // offline at all.
       appServerOpts: testAppServerOpts(),
     });
-    await daemon.start();
+    try {
+      await daemon.start();
+    } catch (e) {
+      // Nothing reads this process's stderr (the parent spawns it with stdio:'ignore'), so leave the
+      // reason on disk beside the socket. Without this, a bind failure, a bad seam or a spawn error
+      // were all indistinguishable from "it was just slow".
+      try { writeFileSync(`${opts.socketPath}.err`, String((e && e.message) || e)); } catch { /* nothing left to try */ }
+      process.exit(1);
+    }
     process.on('SIGTERM', () => daemon.stop().then(() => process.exit(0)));
     return; // keep process alive via the listening socket
   }
@@ -200,7 +208,10 @@ async function startDaemon(parsed, store) {
   }
   // Spawn the detached daemon ONCE on a unique socket, then ask it for its real threadId.
   // (No probe: a probe spawned a throwaway thread whose id disagreed with the real daemon's.)
-  const socketPath = join(store.baseDir, `daemon-${process.pid}-${Date.now()}.sock`);
+  // SHORT on purpose: macOS caps Unix socket paths at 104 bytes, and the old
+  // `daemon-<pid>-<ms>.sock` (31 chars) pushed a temp-HOME path to 109 — bind() then failed inside
+  // the stdio-ignored child, surfacing only as "daemon did not come up". base36 keeps it unique.
+  const socketPath = join(store.baseDir, `d-${process.pid}-${Date.now().toString(36)}.sock`);
   const payload = JSON.stringify({ socketPath, resume: resumeId, model: parsed.flags.model, cwd, profile });
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '__daemon', payload], {
     detached: true, stdio: 'ignore', cwd,
@@ -211,7 +222,18 @@ async function startDaemon(parsed, store) {
   const abort = (msg) => { try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch { /* gone */ } } fail(msg); };
 
   for (let i = 0; i < 50 && !existsSync(socketPath); i++) await delay(100);
-  if (!existsSync(socketPath)) abort('daemon did not come up');
+  if (!existsSync(socketPath)) {
+    // The child's stdio is 'ignore', so its real failure was invisible and every boot problem looked
+    // identical. It now leaves the reason next to the socket path; read it before giving up.
+    let why = '';
+    try {
+      if (existsSync(`${socketPath}.err`)) {
+        why = `: ${readFileSync(`${socketPath}.err`, 'utf8').trim()}`;
+        unlinkSync(`${socketPath}.err`);
+      }
+    } catch { /* best effort — the generic message still gets through */ }
+    abort(`daemon did not come up${why}`);
+  }
 
   let status;
   try {
