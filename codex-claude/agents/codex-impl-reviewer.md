@@ -108,7 +108,7 @@ re-author it.
    node -e "console.log(JSON.parse(require('fs').readFileSync('/tmp/cdx-fallback-start.json','utf8')).socket)" > /tmp/cdx-fallback-sock.txt
 
    # 3. Send the turn.
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs send "$(cat /tmp/cdx-fallback-prompt.txt)" --effort max --socket "$(cat /tmp/cdx-fallback-sock.txt)"
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs send "$(cat /tmp/cdx-fallback-prompt.txt)" --effort ultra --socket "$(cat /tmp/cdx-fallback-sock.txt)"
 
    # 4. Then, in SEPARATE Bash calls, until the status is terminal — repeat as many times as needed:
    node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait --timeout-ms 300000 --socket "$(cat /tmp/cdx-fallback-sock.txt)"

@@ -23,7 +23,7 @@ see and decide on. Specifically:
 
 1. Run `doctor`; if Codex isn't installed or logged in, stop and tell me.
 2. `start --cwd "$PWD"`, then `plan "<the task above, asking it to inspect the relevant files and
-   produce a concrete file-by-file plan>"` with `--effort max`.
+   produce a concrete file-by-file plan>"` with `--effort ultra`.
 3. `wait`. On `status:"question"`, **show me the question and its options**, answer it (from
    context if unambiguous — and tell me what you chose — otherwise ask me), then `wait` again.
    Repeat until `status:"completed"`.

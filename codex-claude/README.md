@@ -99,7 +99,7 @@ object on stdout.
 |---|---|
 | `doctor` | Report Codex version, auth presence, thread count. |
 | `start [--cwd <p>] [--model <m>] [--resume-latest \| --resume <uuid>] [--private] [--sandbox <s>] [--approval-policy <p>] [--ephemeral]` | Boot the session daemon, open/resume a thread. `--private` keeps it out of the global state file. |
-| `plan "<prompt>" [--effort max] [--approval-policy untrusted]` | Plan-mode (read-only architect) turn. |
+| `plan "<prompt>" [--effort ultra] [--approval-policy untrusted]` | Plan-mode (read-only architect) turn. |
 | `send "<prompt>" [--effort <e>] [--mode default] [--approval-policy untrusted]` | Default/review turn (prompt-based). |
 | `review [--base <ref\|sha> \| --scope <auto\|working-tree\|branch>]` | **Native git-scoped commit review** (`review/start`) — the built-in reviewer, no prompt. Needs a `--sandbox read-only --approval-policy never --ephemeral` session. |
 | `wait [--timeout-ms <N>]` | Block until the turn completes or parks a question/approval. |
