@@ -90,6 +90,11 @@ async function runTurn(threadId, text, turnId) {
     });
     const answer = await answered;
     notify('item/agentMessage/delta', { threadId, turnId, itemId: 'i2', delta: `decision=${JSON.stringify(answer)}` });
+  } else if (text.includes('HANGTURN')) {
+    // Responds to turn/start, then never completes. The turn-level counterpart of the `noresponse`
+    // review mode: without it there is no way to observe a driver being killed MID-turn, which is
+    // exactly when an app-server gets orphaned.
+    return;
   } else if (text.includes('EMPTY')) {
     // Emit NO agent-message delta: models the gpt-5.5 build quirk where a turn ends
     // `completed` with an empty final message (no plan/verdict content).
