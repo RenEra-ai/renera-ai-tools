@@ -151,6 +151,7 @@ export class Daemon {
   }
 
   _startTurn(prompt, mode, effort, approvalPolicy) {
+    if (this._appExited) return { error: 'app_server_exited' };
     if (this.restartRequired) return { error: 'restart_required', reason: this.restartReason };
     if (this.turn.status === 'running' || this.turn.status === 'awaiting_input') return { error: 'busy' };
     // mode: 'plan' | 'default' | undefined. plan & default set collaborationMode (model required);
@@ -182,6 +183,9 @@ export class Daemon {
   // a daemon boot plus a full Codex turn that ends in an unexplained blank review.
   _startReview(base, scope) {
     if (this.turn.status === 'running' || this.turn.status === 'awaiting_input') return { error: 'busy' };
+    // The transport is gone: AppServer already rejected every pending RPC, so a new turn would be
+    // written into a dead pipe and then wait forever for a response nobody will send.
+    if (this._appExited) return { error: 'app_server_exited' };
     // Profile first: it is STRUCTURAL — a thread cannot be re-profiled, so restarting would not help.
     // Reporting restart_required here would send the caller off to do something that cannot work.
     if (!this._hasReviewProfile()) return { error: 'wrong_thread_profile' };
@@ -490,7 +494,15 @@ export class Daemon {
       });
       return { ok: true };
     }
-    await this.app.request(METHODS.TURN_INTERRUPT, { threadId: this.threadId, turnId: this.turn.id });
+    try {
+      await this.app.request(METHODS.TURN_INTERRUPT, { threadId: this.threadId, turnId: this.turn.id });
+    } catch (e) {
+      // The server refused (or the transport died). We have already settled the parked request and
+      // moved off awaiting_input, so leaving the turn `running` would strand `wait` forever and make
+      // every later turn answer `busy`. End it locally — we know the id, so no quarantine is needed.
+      this._finalizeTurn(`turn/interrupt failed: ${e.message}`, { status: 'interrupted' });
+      return { ok: true, interruptFailed: e.message };
+    }
     return { ok: true };
   }
 
@@ -611,6 +623,11 @@ export class Daemon {
       } else {
         this.turn.message = plan || this.turn.buffer;
       }
+      // A turn that COMPLETES is just as terminal as one that fails, so it owes the same debts: the
+      // server may still be blocked on a request we parked (or buffered), and nothing else will ever
+      // answer it once this turn is finalized. Settling here — not only on the failure paths — is
+      // what makes "every server request gets exactly one response" hold on the happy path too.
+      this._settleOutstandingRequests();
       this.turn.finalized = true;   // terminal: later notifications for this turn are noise
       this._clearBackstop();
       this._resolveWaiters();
@@ -651,14 +668,18 @@ export class Daemon {
     // reported no message and the finished review was lost — and on a failed id-less turn it left
     // the busy guard refusing every new turn while interrupt said there was none.
     const notOurs = this._isForeignThread(p.threadId) || this._isStaleTurn(p.turnId) || this.turn.finalized;
-    const c = classifyServerRequest(req.method, req.params);
-    if (notOurs) {
-      // Decline in the request's own shape when we know it; otherwise a deterministic JSON-RPC error.
-      if (c.kind === 'approval') {
-        try { return this.app.respond(req.id, buildApprovalResponse('deny', req.method)); } catch { /* fall through */ }
-      }
-      return this.app.respondError(req.id, -32600, 'request does not belong to this session');
+    // Only ONE request can be parked at a time — `parked` is a single slot and `answer`/`approve`
+    // address it implicitly. JSON-RPC allows concurrent requests, so a second one used to OVERWRITE
+    // the first: its id became unreachable and never got any response (and the client's next answer
+    // was applied to the wrong request). Decline the extra one instead of losing it. Same during
+    // cancellation: once an interrupt is in flight, re-parking would revive the turn we are ending.
+    if (notOurs || this.turn.parked || this.turn.cancelRequested) {
+      // Decline through the shared helper: it denies in the request's own shape when it can, falls
+      // back to a JSON-RPC error, and — unlike the old inline version, whose respondError was
+      // UNCAUGHT — cannot throw out of the stdout data handler and kill the daemon.
+      return this._answerServerRequest(req);
     }
+    const c = classifyServerRequest(req.method, req.params);
     this.turn.parked = { id: req.id, kind: c.kind, method: req.method, params: req.params };
     this.turn.status = 'awaiting_input';
     this._resolveWaiters();

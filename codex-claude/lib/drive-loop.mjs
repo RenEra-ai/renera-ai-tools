@@ -57,6 +57,15 @@ export async function driveTurn(socketPath, opts = {}) {
   const remaining = () => (deadlineMs == null ? waitTimeoutMs
     : Math.min(waitTimeoutMs, Math.ceil(deadlineMs - (performance.now() - startedAt))));
 
+  // Answering/approving must be bounded too — client.mjs reads a missing or <=0 timeout as NO
+  // timeout, so an unanswered action call hung the whole loop past its total budget. Never <=0:
+  // fall back to the interrupt cap so an exhausted budget still yields a bounded call rather than
+  // an unbounded one.
+  const actionBudget = () => {
+    const left = remaining();
+    return left > 0 ? Math.min(left, INTERRUPT_TIMEOUT_MS) : INTERRUPT_TIMEOUT_MS;
+  };
+
   async function interruptAndReturn(status, reason) {
     log(`${reason} — interrupting`);
     try { await sendCommand(socketPath, { cmd: 'interrupt' }, { timeoutMs: INTERRUPT_TIMEOUT_MS }); }
@@ -73,7 +82,11 @@ export async function driveTurn(socketPath, opts = {}) {
       return await sendCommand(socketPath, { cmd: 'wait' }, { timeoutMs: budget });
     } catch (e) {
       if (!/timeout/i.test(e.message)) throw e;
-      return interruptAndReturn('timeout', 'wait cap expired');
+      // Say WHICH limit ended it. The total budget clamps the per-wait cap, so a run that exhausts
+      // its budget usually expires inside a clamped wait rather than landing exactly on zero —
+      // reporting "wait cap expired" there would send the operator after the wrong knob.
+      const outOfBudget = deadlineMs != null && (performance.now() - startedAt) >= deadlineMs;
+      return interruptAndReturn('timeout', outOfBudget ? 'total wait budget exhausted' : 'wait cap expired');
     }
   }
 
@@ -87,7 +100,7 @@ export async function driveTurn(socketPath, opts = {}) {
         return interruptAndReturn('failed', `approval policy refuses ${request.method || '?'}`);
       }
       log(`${decision === 'allow' ? 'approving' : 'declining'} approval: ${request.method || '?'}`);
-      const r = await sendCommand(socketPath, { cmd: 'approve', decision });
+      const r = await sendCommand(socketPath, { cmd: 'approve', decision }, { timeoutMs: actionBudget() });
       // An {error} here means the daemon could not act on our decision (e.g. a shape protocol.mjs
       // refuses to fake). Looping would just re-park the same request until the drain guard ran out,
       // spraying misleading log lines on the way.
@@ -96,13 +109,16 @@ export async function driveTurn(socketPath, opts = {}) {
       const qs = res.question && res.question.questions;
       if (!Array.isArray(qs) || !qs.length) {
         if (onMalformedQuestion === 'fail') return interruptAndReturn('failed', 'malformed question payload');
+        // RETURN, not break: breaking leaves res.status === 'question', which the post-loop guard
+        // below then reads as drain exhaustion — so 'return' mode would interrupt the turn and
+        // report `failed`, the exact opposite of handing the parked shape back to the caller.
         log('malformed question payload — stopping');
-        break;
+        return res;
       }
       const q = qs[0];
       const answer = firstOptionAnswer(q);
       log(`answering question ${q.id} -> ${answer}`);
-      const r = await sendCommand(socketPath, { cmd: 'answer', id: q.id, answers: [answer] });
+      const r = await sendCommand(socketPath, { cmd: 'answer', id: q.id, answers: [answer] }, { timeoutMs: actionBudget() });
       if (r && r.error) return interruptAndReturn('failed', `answer rejected: ${r.error}`);
     }
     res = await waitOnce();
