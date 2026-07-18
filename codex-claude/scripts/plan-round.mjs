@@ -10,7 +10,7 @@ import { sendCommand } from '../lib/client.mjs';
 import { readConfiguredModel } from '../lib/config.mjs';
 import { CLIENT_INFO } from '../lib/protocol.mjs';
 import { driveTurn } from '../lib/drive-loop.mjs';
-import { testAppServerOpts } from '../lib/test-appserver.mjs';
+import { testAppServerOpts, testWaitMs } from '../lib/test-appserver.mjs';
 import { isSafeCommand } from '../lib/safe-command.mjs';
 import { looksLikeNoPlan, isUsablePlan } from '../lib/plan-output.mjs';
 
@@ -47,13 +47,20 @@ await daemon.start();
 
 // Bounded wait: a client-side cap (under the ~10-min Bash cap) so a wedged Codex turn can't hang the
 // driver forever; on timeout, interrupt the turn and surface status:'timeout'.
-const WAIT_TIMEOUT_MS = 540000;
+// testWaitMs() lets the offline suite shrink this cap so the re-wait path is reachable in a
+// test rather than only after nine real minutes.
+const WAIT_TIMEOUT_MS = testWaitMs() ?? 540000;
 // Drain any clarifying questions / command-approval prompts via the SHARED engine, declining
 // commands (Plan mode is read-only). Records into `flags.declinedExec` whether a command-exec
 // approval was denied — the classic Plan-mode stall (Codex wants to run pytest, can't, then stops
 // at a preamble). Only this policy is driver-specific; the loop mechanics are shared.
 const drive = (flags) => driveTurn(socketPath, {
   waitTimeoutMs: WAIT_TIMEOUT_MS,
+  // The cap is a POLL INTERVAL for this driver, not a verdict: a Codex turn that needs longer
+  // than the cap is slow, not dead, and interrupting it threw away real work (two healthy
+  // reviews died that way in one day). No total deadline here — the external bound is the
+  // caller's own lifetime, and the SIGTERM handler above tears the daemon down cleanly.
+  onWaitExpiry: 'rewait',
   log: (m) => process.stderr.write(`[plan] ${m}\n`),
   decideApproval: (request) => {
     const method = request.method || '';

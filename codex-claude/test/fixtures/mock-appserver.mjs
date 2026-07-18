@@ -69,7 +69,33 @@ async function runTurn(threadId, text, turnId) {
   // Live shape is {threadId, turn:{id}} — NOT {threadId, turnId}. The daemon reads both, but the
   // fixture should send what the server actually sends.
   notify('turn/started', { threadId, turn: { id: turnId } });
-  if (text.includes('ASK')) {
+  if (text.includes('read-only review session')) {
+    // review-round's STATIC RE-ASK, verbatim-matched. Without a branch here the re-ask fell through
+    // to the generic 'done' reply, so the driver's second turn produced no verdict and its test
+    // passed on PARSED_VERDICT: UNCLEAR — green while proving nothing.
+    notify('item/agentMessage/delta', { threadId, turnId, itemId: 'i2', delta: 'Static-only review.\nVERDICT: NO ISSUES' });
+  } else if (text.includes('read-only planning session')) {
+    // plan-round's static re-ask: it must yield a REAL plan item, since the whole point of the
+    // re-ask is recovering a plan after a denied command left only a preamble.
+    notify('item/completed', { threadId, turnId, item: { type: 'plan', id: 'p1', text: 'app.js\n- Add GET /healthz after the static re-ask.' } });
+  } else if (text.includes('APPROVESAFE')) {
+    // The ALLOW arm. `pytest -q` is the one family lib/safe-command.mjs auto-approves; the existing
+    // APPROVE branch's `echo hi` is correctly DENIED, so the two together cover both decisions.
+    const rid = ++serverReqSeq;
+    const answered = new Promise((res) => pendingServerReq.set(rid, res));
+    write({
+      jsonrpc: '2.0', id: rid, method: 'item/commandExecution/requestApproval',
+      params: { threadId, turnId, itemId: 'i1', command: 'pytest -q',
+        availableDecisions: ['accept', 'decline', 'cancel'] },
+    });
+    const answer = await answered;
+    notify('item/agentMessage/delta', { threadId, turnId, itemId: 'i2', delta: `safe-decision=${JSON.stringify(answer)}` });
+  } else if (text.includes('SLOWTURN')) {
+    // Completes only after several seconds, so a short CODEX_DRIVE_TEST_WAIT_MS cap expires MID-turn.
+    // Under the old interrupt-on-expiry behaviour this turn was killed; under rewait it completes.
+    await new Promise((r) => setTimeout(r, 1500));
+    notify('item/agentMessage/delta', { threadId, turnId, itemId: 'i2', delta: 'slow but finished\nVERDICT: NO ISSUES' });
+  } else if (text.includes('ASK')) {
     const reqId = ++serverReqSeq;
     const answered = new Promise((res) => pendingServerReq.set(reqId, res));
     write({

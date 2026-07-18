@@ -38,6 +38,12 @@ export function firstOptionAnswer(question) {
  *  - onMalformedQuestion 'fail' | 'return'  (default 'fail')
  *  - onUnsupported       'fail' | 'return'  (default 'return')
  *  - maxDrains       how many parked rounds to service before giving up (default 20)
+ *  - onWaitExpiry    'interrupt' | 'rewait' (default 'interrupt'). 'rewait' turns the per-wait cap
+ *                    into a POLL INTERVAL: expiry logs and waits again instead of killing the turn.
+ *                    A slow turn is not a dead turn — the fixed cap killed two healthy ~10-minute
+ *                    Codex reviews in one day, while a 21-minute one completed fine under manual
+ *                    re-waits. deadlineMs exhaustion STILL interrupts regardless of this mode, so
+ *                    an explicit total budget is never weakened.
  * @returns {Promise<{status:string, message?:string, empty?:boolean, reason?:string}>}
  */
 export async function driveTurn(socketPath, opts = {}) {
@@ -49,6 +55,7 @@ export async function driveTurn(socketPath, opts = {}) {
     onMalformedQuestion = 'fail',
     onUnsupported = 'return',
     maxDrains = 20,
+    onWaitExpiry = 'interrupt',
   } = opts;
 
   // Monotonic: a wall-clock source can jump backwards (NTP, DST) and hand out a budget that never
@@ -74,19 +81,28 @@ export async function driveTurn(socketPath, opts = {}) {
   }
 
   async function waitOnce() {
-    const budget = remaining();
-    // NEVER call sendCommand with <= 0: it reads that as "no timeout at all" (client.mjs), so an
-    // exhausted budget would become an unbounded wait instead of an immediate stop.
-    if (budget <= 0) return interruptAndReturn('timeout', 'total wait budget exhausted');
-    try {
-      return await sendCommand(socketPath, { cmd: 'wait' }, { timeoutMs: budget });
-    } catch (e) {
-      if (!/timeout/i.test(e.message)) throw e;
-      // Say WHICH limit ended it. The total budget clamps the per-wait cap, so a run that exhausts
-      // its budget usually expires inside a clamped wait rather than landing exactly on zero —
-      // reporting "wait cap expired" there would send the operator after the wrong knob.
-      const outOfBudget = deadlineMs != null && (performance.now() - startedAt) >= deadlineMs;
-      return interruptAndReturn('timeout', outOfBudget ? 'total wait budget exhausted' : 'wait cap expired');
+    for (;;) {
+      const budget = remaining();
+      // NEVER call sendCommand with <= 0: it reads that as "no timeout at all" (client.mjs), so an
+      // exhausted budget would become an unbounded wait instead of an immediate stop.
+      if (budget <= 0) return interruptAndReturn('timeout', 'total wait budget exhausted');
+      try {
+        return await sendCommand(socketPath, { cmd: 'wait' }, { timeoutMs: budget });
+      } catch (e) {
+        if (!/timeout/i.test(e.message)) throw e;
+        // Say WHICH limit ended it. The total budget clamps the per-wait cap, so a run that exhausts
+        // its budget usually expires inside a clamped wait rather than landing exactly on zero —
+        // reporting "wait cap expired" there would send the operator after the wrong knob.
+        const outOfBudget = deadlineMs != null && (performance.now() - startedAt) >= deadlineMs;
+        if (outOfBudget) return interruptAndReturn('timeout', 'total wait budget exhausted');
+        if (onWaitExpiry === 'rewait') {
+          // The cap is a poll interval here, not a verdict on the turn. The external bound is the
+          // caller's own lifetime (e.g. the Bash tool cap + the drivers' SIGTERM teardown).
+          log('wait cap expired — turn still running, re-waiting');
+          continue;
+        }
+        return interruptAndReturn('timeout', 'wait cap expired');
+      }
     }
   }
 
@@ -99,7 +115,12 @@ export async function driveTurn(socketPath, opts = {}) {
       if (decision === 'fail') {
         return interruptAndReturn('failed', `approval policy refuses ${request.method || '?'}`);
       }
-      log(`${decision === 'allow' ? 'approving' : 'declining'} approval: ${request.method || '?'}`);
+      // Name the COMMAND when allowing: "approving approval: <method>" tells an operator nothing
+      // about what was actually authorised, and the pre-migration drivers logged the command here.
+      const cmd = request.params && request.params.command;
+      log(decision === 'allow'
+        ? `approving safe command: ${cmd ? String(cmd).slice(0, 140) : (request.method || '?')}`
+        : `declining approval: ${request.method || '?'}`);
       const r = await sendCommand(socketPath, { cmd: 'approve', decision }, { timeoutMs: actionBudget() });
       // An {error} here means the daemon could not act on our decision (e.g. a shape protocol.mjs
       // refuses to fake). Looping would just re-park the same request until the drain guard ran out,
