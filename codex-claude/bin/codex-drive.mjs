@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, readdirSync, statSync } from 'node:fs';
 import { parseArgs, toCommand, parseStartProfile, assertKnownFlags } from '../lib/verbs.mjs';
 import { sendCommand } from '../lib/client.mjs';
 import { StateStore } from '../lib/state.mjs';
@@ -211,6 +211,16 @@ async function startDaemon(parsed, store) {
   // SHORT on purpose: macOS caps Unix socket paths at 104 bytes, and the old
   // `daemon-<pid>-<ms>.sock` (31 chars) pushed a temp-HOME path to 109 — bind() then failed inside
   // the stdio-ignored child, surfacing only as "daemon did not come up". base36 keeps it unique.
+  // Opportunistic prune: a `.err` file is normally removed by the parent that read it, but a parent
+  // killed mid-handshake leaves one behind forever. Anything older than an hour cannot belong to a
+  // live start, so drop it rather than accumulate.
+  try {
+    for (const f of readdirSync(store.baseDir)) {
+      if (!f.endsWith('.sock.err')) continue;
+      const p = join(store.baseDir, f);
+      if (Date.now() - statSync(p).mtimeMs > 3600_000) unlinkSync(p);
+    }
+  } catch { /* best effort — never block a start on housekeeping */ }
   const socketPath = join(store.baseDir, `d-${process.pid}-${Date.now().toString(36)}.sock`);
   const payload = JSON.stringify({ socketPath, resume: resumeId, model: parsed.flags.model, cwd, profile });
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '__daemon', payload], {

@@ -85,9 +85,12 @@ export class Daemon {
   _listen() {
     // Unix socket paths are capped by the OS (104 bytes on macOS, 108 on Linux) and bind() reports a
     // bare EINVAL/ENAMETOOLONG that says nothing about length. Check first so the cause is named.
-    if (this.socketPath.length > 100) {
+    // BYTES, not JS string length: the OS limit is on the encoded path, and a multi-byte path can be
+    // under 100 UTF-16 units while exceeding it — sailing past the check meant to name this failure.
+    const socketBytes = Buffer.byteLength(this.socketPath);
+    if (socketBytes > 100) {
       return Promise.reject(new Error(
-        `socket path too long (${this.socketPath.length} bytes; the OS limit is ~104): ${this.socketPath}`));
+        `socket path too long (${socketBytes} bytes; the OS limit is ~104): ${this.socketPath}`));
     }
     if (existsSync(this.socketPath)) { try { unlinkSync(this.socketPath); } catch {} }
     return new Promise((resolve, reject) => {
@@ -114,7 +117,7 @@ export class Daemon {
         let cmd;
         try { cmd = JSON.parse(line); } catch { sock.write(JSON.stringify({ error: 'bad_json' }) + '\n'); continue; }
         let res;
-        try { res = await this._handleCommand(cmd); } // never let a handler throw escape the socket
+        try { res = await this._handleCommand(cmd, sock); } // never let a handler throw escape the socket
         catch (e) { res = { error: e.message }; }
         sock.write(JSON.stringify(res) + '\n');
         // Tear down AFTER the response is flushed — doing it inside _handleCommand would await
@@ -125,13 +128,13 @@ export class Daemon {
     sock.on('error', () => {});
   }
 
-  async _handleCommand(cmd) {
+  async _handleCommand(cmd, sock = null) {
     switch (cmd.cmd) {
       case 'plan': return this._startTurn(cmd.prompt, 'plan', cmd.effort, cmd.approvalPolicy);
       // `send` is plain (no collaborationMode) unless --mode is given; `send --mode default` exits plan mode.
       case 'send': return this._startTurn(cmd.prompt, cmd.mode, cmd.effort, cmd.approvalPolicy);
       case 'review': return this._startReview(cmd.base, cmd.scope);
-      case 'wait': return this._wait();
+      case 'wait': return this._wait(sock);
       case 'answer': return this._answer(cmd.id, cmd.answers);
       case 'approve': return this._approve(cmd.decision);
       // `cwd` rides along on read/status so a --socket caller (which deliberately bypasses
@@ -403,12 +406,23 @@ export class Daemon {
     if (this.turn && this.turn.backstop) { clearTimeout(this.turn.backstop); this.turn.backstop = null; }
   }
 
-  _wait() {
+  _wait(sock = null) {
     if (this.turn.status === 'awaiting_input') return Promise.resolve(this._parkedResult());
     if (['completed', 'interrupted', 'failed', 'idle'].includes(this.turn.status)) {
       return Promise.resolve(this._terminalResult());
     }
-    return new Promise((resolve) => this._waiters.push(resolve));
+    return new Promise((resolve) => {
+      this._waiters.push(resolve);
+      // Drop the waiter when its client goes away. The re-wait poll (drive-loop's 'rewait' mode)
+      // destroys its socket on every expired cap and opens a new one, so without this a wedged turn
+      // retained one dead resolver — and its closure — per poll, forever.
+      if (sock) {
+        sock.once('close', () => {
+          const i = this._waiters.indexOf(resolve);
+          if (i >= 0) this._waiters.splice(i, 1);
+        });
+      }
+    });
   }
 
   _terminalResult() { return this._completedResult(); }

@@ -283,8 +283,15 @@ test('read --out still resolves with NO global state at all (--socket path)', { 
   const home = mkdtempSync(join(tmpdir(), 'cdx-h-'));
   DIRS.push(home);
   const e = { ...env('ok'), HOME: home };
-  const { socket } = await startPrivate(dir);          // --private writes no state.json
-  assert.equal(existsSync(join(home, '.codex-drive', 'state.json')), false, 'no state may exist');
+  // Start with the SAME redirected HOME the assertion inspects — startPrivate()'s own env() does not
+  // carry it, so asserting against `home` after that call proved nothing at all.
+  const r0 = await cli(['start', '--private', '--cwd', dir, '--sandbox', 'read-only',
+    '--approval-policy', 'never', '--ephemeral'], { env: e });
+  assert.equal(r0.code, 0, `start failed: ${r0.stderr}`);
+  const { socket } = JSON.parse(r0.stdout);
+  SPAWNED.push(socket);
+  assert.equal(existsSync(join(home, '.codex-drive', 'state.json')), false,
+    '--private must not write state.json into the HOME it actually ran under');
   await cli(['review', '--socket', socket], { env: e });
   await cli(['wait', '--socket', socket, '--timeout-ms', '15000'], { env: e });
   const r = await cli(['read', '--out', 'artifacts/review.md', '--socket', socket], { env: e });
