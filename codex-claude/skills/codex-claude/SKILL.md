@@ -267,6 +267,19 @@ the same review measured **36 s at `low`** vs **>560 s (never completed) at `max
   survives across calls; each call stays bounded; the timeout's activity fields decide
   working-vs-stuck. An orphaned daemon (agent died before `stop`) is closed manually with
   `stop --socket <the .sock sidecar>`.
+- **A Stage-2 commit-review gate** (a shell gate that branches on the result) uses the same detached
+  shape with the **native `review` verb**, which additionally requires the review profile —
+  `start --private --cwd <repo toplevel> --sandbox read-only --approval-policy never --ephemeral`,
+  or `review` returns `{error:"wrong_thread_profile"}`. Persist the socket, start HEAD, dirty flag
+  and scope as files in a unique `mktemp -d` run directory (never a shared path, and never inside
+  the repo), because shell variables do not survive between Bash calls. Finish with
+  `scripts/commit-review-collect.mjs --state-dir <run-dir> --outcome completed|timeout|failed`: it
+  is the ONE hook-visible call, cross-checks that the daemon is the one you started, stops it,
+  confirms teardown, and emits the raw review followed by exactly `STATUS:` then
+  `SCOPE: <label> head=<sha> dirty=<bool>`. Do **not** print those trailers from any intermediate
+  poll — poll JSON deliberately matches neither, so the enforcement hook ignores it.
+  `scripts/commit-review-round.mjs` remains for known-short reviews only: it keeps a hard total
+  deadline on purpose, and raising it cannot beat the outer Bash cap.
 - **After upgrading Codex** — the Plan-mode / question surfaces are experimental and may drift
   across Codex versions; re-run `doctor` and sanity-check a `plan` turn.
 

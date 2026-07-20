@@ -34,7 +34,23 @@ import { writeFileSync } from 'node:fs';
 
 //   permissions   -> parks a permissions-shaped approval (the one protocol.mjs refuses to fake)
 //   failbeforeresponse -> notifications ending in turn/completed{status:'failed'}, response never sent
-const REVIEW_MODES = new Set(['ok', 'burst', 'reject', 'wrongthread', 'blank', 'statusinbody', 'noresponse', 'ask', 'approve', 'permissions', 'failbeforeresponse']);
+//   ticks         -> response + entered/started, then a heartbeat every TICK_MS for TICK_COUNT
+//                    beats, then real review text + completion. The "slow but HEALTHY" signature
+//                    (eventCount climbs, lastEventAgoMs stays small) that must survive REPEATED
+//                    client-side wait expiries — a poller treating `timeout` as `dead` fails here.
+//   hang          -> response + entered/started, then SILENCE forever. The "stuck" signature
+//                    (eventCount frozen, lastEventAgoMs grows without bound) — the only one that
+//                    justifies interrupting a running turn. NOT interchangeable with `noresponse`,
+//                    which streams every notification and withholds only the JSON-RPC response, so
+//                    it exercises the daemon's completion backstop rather than liveness.
+const REVIEW_MODES = new Set(['ok', 'burst', 'reject', 'wrongthread', 'blank', 'statusinbody', 'noresponse', 'ask', 'approve', 'permissions', 'failbeforeresponse', 'ticks', 'hang']);
+
+// The heartbeat uses `item/reasoning/delta`, which is deliberately NOT in protocol.mjs's NOTIFY map:
+// _dispatchNotification stamps activity for EVERY method before its per-method branches, so an
+// unhandled method is pure liveness with no side effects. An agentMessage delta would also stamp,
+// but it feeds the message buffer and could contaminate the review body this fixture asserts on.
+const TICK_MS = 120;
+const TICK_COUNT = 25;   // ~3s of activity: several expiries at the sub-second caps tests use
 
 // --record <path>: on thread/start, persist the params we were sent AND our own cwd. Lets a test
 // observe two of the three cwd legs (spawn cwd + thread/start cwd) that the spec requires to agree,
@@ -205,6 +221,20 @@ async function runReview(threadId, reqId) {
     // validating, so the daemon must finalise it immediately instead of buffering it forever
     // (the successful-completion backstop deliberately does not arm for this status).
     writeBurst([enter, started, { jsonrpc: '2.0', method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'failed', items: [] } } }]);
+    return;
+  }
+  if (REVIEW_MODE === 'ticks' || REVIEW_MODE === 'hang') {
+    write(response);
+    await new Promise((r) => setTimeout(r, 10));
+    write(enter); write(started);
+    // `hang` stops here: the turn is legitimately running and will never end. The mock stays alive
+    // because readline holds stdin open, so the daemon keeps a live app-server with a frozen turn.
+    if (REVIEW_MODE === 'hang') return;
+    for (let i = 0; i < TICK_COUNT; i++) {
+      await new Promise((r) => setTimeout(r, TICK_MS));
+      notify('item/reasoning/delta', { threadId, turnId, itemId: 'rt', delta: '.' });
+    }
+    write(exit); write(done);
     return;
   }
   write(response);

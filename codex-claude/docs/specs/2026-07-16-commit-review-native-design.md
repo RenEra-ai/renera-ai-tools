@@ -420,8 +420,15 @@ now explicit:
   one-shot's daemon is private and self-cleaning (interrupt + teardown are
   internal). The global CLI verbs consult `~/.codex-drive/state.json`
   (state.mjs:6, codex-drive.mjs:32) and would interrupt an UNRELATED session.
-  Recovery from a one-shot failure is: retry the one-shot once; if it times out
-  again, switch to the fallback below.
+
+  **[rev 6 — SUPERSEDED] Do not retry the one-shot on a timeout.** This section's
+  "retry once, then fall back" advice assumed a transient failure. Measured in
+  production (boomi-mcp-server #137, plugin 1.8.8): the timeout is DETERMINISTIC —
+  two runs whose diffs differed ~6x timed out identically — so the retry burns a
+  second full budget and fails the same way, delaying the working path by ~18 min
+  per round. The detached session below is now the PRIMARY path, not a recovery
+  step; the one-shot is for known-short reviews only. See
+  `../plans/2026-07-20-detached-primary-stage2.md`.
 - The fallback runs on an explicitly OWNED session, and ownership is now
   ENFORCEABLE (round-2 partial 6): every non-start CLI verb gains a
   `--socket <path>` override that connects directly to the given daemon socket,
@@ -544,8 +551,10 @@ the uninstall) — see the enforcement-hook subsection below.
   **[rev 5]** Reword CLAUDE.md:50's "reviews only commits added since the previous review" →
   "reviews the delta since `<sha>` (commits **plus** the current working tree)": the reviewer
   runs `git diff <sha>`, which is worktree-inclusive.
-- Failure recovery: retry the one-shot once; second failure → the daemon-verbs
-  fallback above (never the shared-session interrupt/stop of earlier drafts).
+- **[rev 6]** Failure recovery: there is no one-shot retry. The detached daemon-verbs
+  recipe is the primary path and ends in `scripts/commit-review-collect.mjs`, which
+  emits the terminal contract itself (never the shared-session interrupt/stop of
+  earlier drafts, and never a hand-written `printf`).
 - Remove: the `find …codex-companion.mjs` invocations, `--wait`/`--background`
   prose, `/codex:status` / `/codex:result` references, and the cancel command.
 - **[rev 5] Delete the "or pipe to `tail`" advice (CLAUDE.md:28).** `tail` truncates from the

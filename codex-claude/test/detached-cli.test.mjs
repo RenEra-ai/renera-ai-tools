@@ -30,8 +30,8 @@ after(async () => {
   DIRS.length = 0;
 });
 
-function repo() {
-  const { dir } = makeRepo({ prefix: 'cdx-dcli-' });
+function repo(opts = {}) {
+  const { dir } = makeRepo({ prefix: 'cdx-dcli-', ...opts });
   DIRS.push(dir);
   return dir;
 }
@@ -331,6 +331,109 @@ test('read --out still resolves with NO global state at all (--socket path)', { 
   assert.equal(r.code, 0, r.stderr);
   assert.ok(existsSync(join(dir, 'artifacts', 'review.md')), 'artifact lands in the daemon repo');
   await cli(['stop', '--socket', socket], { env: e });
+});
+
+test('a slow-but-healthy native review survives REPEATED wait expiries and completes uninterrupted',
+  { timeout: 60000 }, async () => {
+  // The regression this file now owns end-to-end. `ticks` streams activity for ~3s while the cap is
+  // 400ms, so the client-side wait expires repeatedly mid-review. The old one-shot treated the first
+  // expiry as total-budget exhaustion and interrupted — killing a turn that was plainly alive. Here
+  // every expiry must be a POLL RESULT: eventCount climbs, lastEventAgoMs stays small, and the turn
+  // reaches `completed` with its real review text and zero interrupts.
+    const dir = repo();
+    const e = env('ticks');
+    const { socket } = await startPrivate(dir, 'ticks');
+    assert.equal((await cli(['review', '--socket', socket], { env: e })).code, 0);
+
+    let expiries = 0;
+    let last = null;
+    let prevCount = 0;
+    for (let i = 0; i < 40; i++) {
+      const r = await cli(['wait', '--timeout-ms', '400', '--socket', socket], { env: e });
+      const out = JSON.parse(r.stdout);
+      if (out.status !== 'timeout') { last = out; break; }
+      expiries++;
+      assert.equal(r.code, 2, 'a timed-out wait keeps exit 2');
+      assert.equal(out.turnStatus, 'running');
+      assert.ok(out.lastEventAgoMs < 400,
+        `a streaming turn must look recent, got ${out.lastEventAgoMs}ms`);
+      assert.ok(out.eventCount >= prevCount, `eventCount must not go backwards: ${prevCount} -> ${out.eventCount}`);
+      prevCount = out.eventCount;
+    }
+    assert.ok(expiries >= 2, `the cap must have expired repeatedly mid-review, got ${expiries}`);
+    assert.ok(last && last.status === 'completed', `expected completion, got ${JSON.stringify(last)}`);
+    assert.match(last.message, /Reviewed 1 file\./, 'the real review text must survive the polling');
+    assert.ok(prevCount > 2, `activity must have accumulated across the expiries, got ${prevCount}`);
+    await cli(['stop', '--socket', socket], { env: e });
+  });
+
+test('a genuinely stuck review is distinguishable: eventCount freezes while lastEventAgoMs grows',
+  { timeout: 30000 }, async () => {
+  // The other half of the decision table. `hang` starts the turn and then goes silent forever, which
+  // is the ONLY signature that justifies interrupting a running turn. It must not be confusable with
+  // the slow-but-healthy case above, or the poller either kills good work or waits on dead work.
+    const dir = repo();
+    const e = env('hang');
+    const { socket } = await startPrivate(dir, 'hang');
+    assert.equal((await cli(['review', '--socket', socket], { env: e })).code, 0);
+
+    const samples = [];
+    for (let i = 0; i < 3; i++) {
+      const r = await cli(['wait', '--timeout-ms', '400', '--socket', socket], { env: e });
+      assert.equal(r.code, 2);
+      samples.push(JSON.parse(r.stdout));
+    }
+    assert.ok(samples.every((s) => s.turnStatus === 'running'), 'the turn is running, just silent');
+    const counts = new Set(samples.map((s) => s.eventCount));
+    assert.equal(counts.size, 1, `a stuck turn emits nothing new: ${[...counts].join(',')}`);
+    assert.ok(samples[2].lastEventAgoMs > samples[0].lastEventAgoMs,
+      `silence must age: ${samples[0].lastEventAgoMs} -> ${samples[2].lastEventAgoMs}`);
+
+    // The graceful abort is protocol-level, never a process kill.
+    assert.equal((await cli(['interrupt', '--socket', socket], { env: e })).code, 0);
+    await cli(['wait', '--timeout-ms', '5000', '--socket', socket], { env: e });
+    await cli(['stop', '--socket', socket], { env: e });
+  });
+
+test('two concurrent private review sessions are fully isolated', { timeout: 60000 }, async () => {
+  // A shared sidecar path once meant one agent stopping the OTHER's daemon and orphaning its own.
+  // Stopping one session must leave the other responsive and its repo untouched.
+  const dirA = repo();
+  const dirB = repo();
+  const e = env('ok');
+  const a = await startPrivate(dirA, 'ok');
+  const b = await startPrivate(dirB, 'ok');
+  assert.notEqual(a.socket, b.socket, 'each private session owns a distinct socket');
+
+  assert.equal((await cli(['review', '--socket', a.socket], { env: e })).code, 0);
+  assert.equal((await cli(['review', '--socket', b.socket], { env: e })).code, 0);
+  await cli(['wait', '--timeout-ms', '15000', '--socket', a.socket], { env: e });
+  await cli(['stop', '--socket', a.socket], { env: e });
+
+  // B must be untouched by A's teardown.
+  const stB = await cli(['status', '--socket', b.socket], { env: e });
+  assert.equal(stB.code, 0, `the sibling session died with its neighbour: ${stB.stderr}`);
+  assert.equal(JSON.parse(stB.stdout).cwd, dirB);
+  const readB = await cli(['wait', '--timeout-ms', '15000', '--socket', b.socket], { env: e });
+  assert.equal(JSON.parse(readB.stdout).status, 'completed');
+  await cli(['stop', '--socket', b.socket], { env: e });
+});
+
+test('running a detached review leaves the reviewed repository git-status unchanged', async () => {
+  // Session state lives in a /tmp run directory, never in the repo. If it ever moved into the tree,
+  // a consumer whose .gitignore lacks that path would have its working tree dirtied by the act of
+  // reviewing it — and every later `--scope auto` review would then see the reviewer's own droppings.
+  for (const dirty of [false, true]) {
+    const dir = repo({ dirty });
+    const e = env('ok');
+    const before = git(dir, 'status', '--porcelain', '--untracked-files=normal');
+    const { socket } = await startPrivate(dir, 'ok');
+    await cli(['review', '--socket', socket], { env: e });
+    await cli(['wait', '--timeout-ms', '15000', '--socket', socket], { env: e });
+    await cli(['stop', '--socket', socket], { env: e });
+    assert.equal(git(dir, 'status', '--porcelain', '--untracked-files=normal'), before,
+      `reviewing a ${dirty ? 'dirty' : 'clean'} repo must not change its git status`);
+  }
 });
 
 test('an over-long socket path fails LOUDLY, not as "daemon did not come up"', { timeout: 30000 }, async () => {

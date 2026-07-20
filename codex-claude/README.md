@@ -113,9 +113,44 @@ object on stdout.
 Every verb except `start`/`doctor` accepts `--socket <path>` to address a specific daemon instead of
 the global `~/.codex-drive/state.json`. `--flag=value` is not supported (hard error).
 
-For a one-shot review that a shell gate can branch on, use
-`scripts/commit-review-round.mjs [--base <sha>]`: it prints the review verbatim, then `STATUS:` and
-`SCOPE:` trailer lines, and exits 0 only for a real, non-empty review.
+### Stage-2 commit review (shell gate)
+
+**Primary path — a detached session, polled across Bash calls.** A real review routinely outlives a
+single ~10-minute Bash call, and an in-process driver dies with that call, taking a healthy Codex
+turn with it. So the gate starts a detached private daemon, sends one native `review`, and polls it
+in *separate* Bash calls:
+
+```bash
+node bin/codex-drive.mjs start --private --cwd "$REPO_TOPLEVEL" \
+  --sandbox read-only --approval-policy never --ephemeral   # the review profile is REQUIRED
+node bin/codex-drive.mjs review --base "$BASELINE" --socket "$S"
+node bin/codex-drive.mjs wait --timeout-ms 300000 --socket "$S"   # repeat, one Bash call each
+node scripts/commit-review-collect.mjs --state-dir "$RUN_DIR" --outcome completed
+```
+
+A timed-out `wait` is a **poll result, not a verdict**: it exits 2 while the turn keeps running, and
+reports `turnStatus` / `lastEventAgoMs` / `eventCount` so a poller can tell a slow turn from a stuck
+one. Poll while activity is recent (< 15 min) and elapsed < 60 min; a turn silent for 15 minutes is
+stuck and gets a graceful `interrupt`. The full decision table lives in the skill.
+
+`scripts/commit-review-collect.mjs` is the **only** hook-visible call. It proves the daemon is the
+one the recipe started (socket, thread and cwd all cross-checked), reads the result, stops the
+daemon, *confirms* teardown, and prints the review verbatim followed by exactly:
+
+```
+STATUS: completed|timeout|failed
+SCOPE: <label> head=<sha> dirty=<true|false>
+```
+
+Exit 0 means, and only means, a completed non-empty review whose daemon is confirmed stopped. Exit 1
+is preflight (no session was ever started); exit 2 is everything else. `--outcome` is a ceiling — a
+turn that finishes during an abort is never laundered into a clean review.
+
+**Short-turn compatibility tool.** `scripts/commit-review-round.mjs [--base <sha>]` runs the same
+review in-process as a single one-shot, with the same trailers minus `dirty=`. It keeps a hard total
+deadline and interrupts on expiry — deliberately, because a one-shot gate must fail fast. Use it
+only when the review is known to be short; raising its cap cannot help, since the outer Bash ceiling
+is lower than any useful increase.
 
 ## Development
 
