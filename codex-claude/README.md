@@ -31,11 +31,11 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs doctor
 | **command** `/codex-review [scope]` | Dispatches the `codex-impl-reviewer` subagent for an independent review of your changes (defaults to the current diff). |
 | **command** `/codex-issue <#\|task>` | **Fully autonomous** end-to-end loop: architect → approve → implement (via the repo's own workflow) → review-until-clean → push + PR (issue closes on merge). Add `--dry-run` to stop before integration. |
 | **command** `/codex-doctor` | Read-only preflight: which mode (`/codex-issue` will use composition vs subagent) and why, `noLand` seam integrity, resolved PR base + auto-close, and Codex daemon health. |
-| **agent** `codex-impl-reviewer` | Autonomous, isolated read-only review on its own **ephemeral** Codex session; returns a clean findings report. |
+| **agent** `codex-impl-reviewer` | Autonomous, isolated read-only review on its own **detached private** Codex session (polled across Bash calls, always stopped); returns a clean findings report. |
 | **runtime** `bin/` + `lib/` | The `codex-drive` CLI + session daemon (JSON-RPC client, turn state machine, question/approval parking). |
-| `scripts/review-round.mjs` | One-shot ephemeral-daemon review used by the `codex-impl-reviewer` agent. |
+| `scripts/review-round.mjs` | Short-turn one-shot review on an in-process ephemeral daemon (lives and dies inside one Bash call — not for ultra; the `codex-impl-reviewer` agent drives an owned detached session instead). |
 | **workflow** `workflows/codex-wrap.js` | **Workflow-mode** composition: brackets a repo's own no-land Workflow with a Codex architect plan + review, then lands. Invoked by `/codex-issue` when a composable `.claude/workflows/*.js` or `.mjs` file is detected. |
-| `scripts/plan-round.mjs` | Ephemeral Plan-mode Codex session used by the wrapper's architect-plan phase. |
+| `scripts/plan-round.mjs` | Short-turn one-shot Plan-mode driver on an in-process ephemeral daemon (same one-Bash-call lifetime — not for ultra; the `codex-architect` agent drives an owned detached session instead). |
 | **command** `/codex-compose-setup` | Makes a repo composition-ready: adds the `noLand` seam to its workflow (diff + approval) **in place**, or scaffolds a starter workflow if none exists. |
 | `templates/implement-issue.template.js` | Repo-agnostic starter workflow (already `noLand`-aware; discovers the repo's test command) used by `/codex-compose-setup` scaffolding. |
 

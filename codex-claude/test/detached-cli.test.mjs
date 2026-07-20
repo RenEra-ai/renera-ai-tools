@@ -144,6 +144,25 @@ test('a valueless --out fails instead of writing a file literally named "true"',
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('a timed-out wait reports the turn activity signal (working-vs-stuck in one call)', async () => {
+  // The owned-session poll contract: a client-side wait timeout is a POLL RESULT, and for `wait`
+  // the CLI enriches it with a follow-up status probe so an unattended poller can tell a working
+  // turn (events streaming) from a stuck one without a second Bash call.
+  const dir = repo();
+  const { socket } = await startPrivate(dir);
+  const s = await cli(['send', 'HANGTURN now', '--socket', socket], { env: env() });
+  assert.equal(s.code, 0, s.stderr);
+  const r = await cli(['wait', '--timeout-ms', '500', '--socket', socket], { env: env() });
+  assert.equal(r.code, 2, 'timeout keeps its exit code');
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.status, 'timeout');
+  assert.equal(out.turnStatus, 'running');
+  assert.equal(typeof out.lastEventAgoMs, 'number');
+  assert.ok(out.eventCount >= 1, `turn/started must have counted: ${out.eventCount}`);
+  await cli(['stop', '--socket', socket], { env: env() });
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test('a valueless --timeout-ms fails instead of becoming a 1ms cap (Number(true) === 1)', async () => {
   const dir = repo();
   const { socket } = await startPrivate(dir);
