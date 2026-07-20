@@ -19,8 +19,23 @@ import { isAbsolute } from 'node:path';
 export const TEST_MODE_ENV = 'CODEX_DRIVE_TEST_MODE';
 export const TEST_APPSERVER_ENV = 'CODEX_DRIVE_TEST_APPSERVER';
 export const TEST_WAIT_MS_ENV = 'CODEX_DRIVE_TEST_WAIT_MS';
+export const TEST_TEARDOWN_MS_ENV = 'CODEX_DRIVE_TEST_TEARDOWN_MS';
 
 const inTestMode = (env) => env[TEST_MODE_ENV] === '1';
+
+/**
+ * Shared gate + validation for the millisecond overrides. Integer, not merely finite-and-positive:
+ * `0.5` passed an old n<=0 guard and Math.floor turned it into 0 — which sendCommand reads as NO
+ * timeout (client.mjs:8), making the very bound the harness exists to enforce unbounded.
+ */
+function testMs(env, name, refusal) {
+  const raw = env[name];
+  if (raw === undefined) return null;
+  if (!inTestMode(env)) throw new Error(`${name} is set but ${TEST_MODE_ENV}=1 is not; ${refusal}`);
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) throw new Error(`${name} must be a positive integer (got '${raw}')`);
+  return n;
+}
 
 /** @returns {{command:string,args:string[]}|{}} appServerOpts overrides, or {} for the real binary. */
 export function testAppServerOpts(env = process.env) {
@@ -47,15 +62,16 @@ export function testAppServerOpts(env = process.env) {
 
 /** Override a driver's client-side wait cap. @returns {number|null} */
 export function testWaitMs(env = process.env) {
-  const raw = env[TEST_WAIT_MS_ENV];
-  if (raw === undefined) return null;
-  if (!inTestMode(env)) {
-    throw new Error(`${TEST_WAIT_MS_ENV} is set but ${TEST_MODE_ENV}=1 is not; refusing to shorten the wait cap`);
-  }
-  const n = Number(raw);
-  // Integer, not merely finite-and-positive: `0.5` passed the old n<=0 guard and Math.floor turned
-  // it into 0 — which sendCommand reads as NO timeout (client.mjs:8), making the wait unbounded in
-  // the very harness that exists to bound it.
-  if (!Number.isInteger(n) || n <= 0) throw new Error(`${TEST_WAIT_MS_ENV} must be a positive integer (got '${raw}')`);
-  return n;
+  return testMs(env, TEST_WAIT_MS_ENV, 'refusing to shorten the wait cap');
+}
+
+/**
+ * Override the collector's teardown-confirmation window. Exists so the stop-failure DOWNGRADE (an
+ * unconfirmed teardown must never report a clean review) is testable in about a second instead of
+ * the production 30s — otherwise that guard is the one path nobody covers, which is exactly how an
+ * orphaned app-server goes unnoticed.
+ * @returns {number|null}
+ */
+export function testTeardownMs(env = process.env) {
+  return testMs(env, TEST_TEARDOWN_MS_ENV, 'refusing to shorten the teardown confirmation window');
 }

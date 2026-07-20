@@ -83,14 +83,26 @@ test('a foreign reviewThreadId is exit 2', async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('the wait cap expiring interrupts and reports timeout (exit 2)', async () => {
+test('the wait cap expiring interrupts and reports EXACTLY timeout (exit 2)', async () => {
   // Reachable in ~2s only because CODEX_DRIVE_TEST_WAIT_MS can shorten the 540s constant; without
   // that seam this path would be a ~9-minute test, and "all paths tested offline" would be a lie.
+  //
+  // This is the DELIBERATE hard-deadline behaviour of the one-shot, retained as a short-turn tool
+  // when the detached recipe became the primary Stage-2 path in 1.8.9 — not a bug to be "aligned"
+  // with the sibling drivers' rewait. It is also bug-report acceptance criterion 2: a genuinely
+  // wedged turn must still terminate on a bounded, honest timeout.
+  //
+  // `hang`, not `noresponse`: noresponse streams every notification and withholds only the JSON-RPC
+  // response, so the daemon's completion backstop races the client cap and the status was
+  // nondeterministic — which is why this assertion used to accept `timeout || failed` and therefore
+  // could not detect a regression either way. `hang` never completes, so the cap is unambiguously
+  // what ends it.
   const { dir } = repo();
-  const r = await script(['--cwd', dir], { env: env('noresponse', { CODEX_DRIVE_TEST_WAIT_MS: '2000' }) });
+  const r = await script(['--cwd', dir], { env: env('hang', { CODEX_DRIVE_TEST_WAIT_MS: '2000' }) });
   assert.equal(r.code, 2);
   const [status] = lastTwo(r.stdout);
-  assert.ok(status === 'STATUS: timeout' || status === 'STATUS: failed', `got ${status}`);
+  assert.equal(status, 'STATUS: timeout');
+  assert.match(r.stderr, /total wait budget exhausted/, 'the TOTAL budget is what fires, not a per-wait cap');
   rmSync(dir, { recursive: true, force: true });
 });
 
