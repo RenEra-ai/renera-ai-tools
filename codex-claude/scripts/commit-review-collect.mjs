@@ -207,6 +207,14 @@ let terminal = unhappy;
 // deliberately stop NOTHING: tearing down a session we cannot identify is how one agent kills
 // another agent's review and orphans its own. Everything past the ownership gate is ours to stop.
 let refusal = null;
+// Ownership rests on the threadId (unique per session); certification additionally rests on cwd
+// (which repo) and turn kind (a review, not a later chat turn). These flags are set ONLY on a
+// positive match, so a missing record leaves them false and the attestation gate below blocks —
+// "absence is a mismatch", enforced by construction rather than by remembering to test each field.
+let st = null;
+let threadVerified = false;
+let cwdVerified = false;
+let readKind = null;
 
 try {
   if (socketFile && socketFile !== socket) {
@@ -219,7 +227,6 @@ try {
     refusal = 'start.json records no threadId; this is not a session record we can identify';
   }
 
-  let st = null;
   if (!refusal) {
     try {
       st = await call({ cmd: 'status' });
@@ -229,17 +236,27 @@ try {
   }
   if (!refusal && st && st.error) refusal = `status probe returned an error (${st.error})`;
   if (!refusal && st) {
-    // Absence is a mismatch. Treating a missing field as "nothing to compare" turned every one of
-    // these checks off exactly when the evidence was weakest.
     if (st.threadId !== startThread) {
+      // A different (or missing) thread means this is not our daemon. Do not stop it.
       refusal = `thread mismatch: daemon reports ${st.threadId ?? '(none)'}, start.json recorded ${startThread}`;
-    // The daemon's OWN cwd, not ours: `--socket` bypasses the global state file, so this is the only
-    // authority on WHICH repository was reviewed. A mismatch means we attached to a daemon serving a
-    // different tree, and the head= attestation would be a lie.
-    } else if (startCwd && st.cwd !== startCwd) {
-      refusal = `cwd mismatch: daemon serves ${st.cwd ?? '(none)'}, start.json recorded ${startCwd}`;
-    } else if (persistedCwd && st.cwd !== persistedCwd) {
-      refusal = `cwd mismatch: daemon serves ${st.cwd ?? '(none)'}, state recorded ${persistedCwd}`;
+    } else {
+      threadVerified = true;
+      // The daemon's OWN cwd, not ours: `--socket` bypasses the global state file, so this is the
+      // only authority on WHICH repository was reviewed. EVERY recorded cwd must match it; a
+      // disagreement with matching threadId means tampered state, so refuse rather than attest a lie.
+      const recorded = [];
+      if (startCwd) recorded.push(['start.json', startCwd]);
+      if (persistedCwd) recorded.push(['cwd sidecar', persistedCwd]);
+      for (const [src, val] of recorded) {
+        if (st.cwd !== val) {
+          refusal = `cwd mismatch: daemon serves ${st.cwd ?? '(none)'}, ${src} recorded ${val}`;
+          break;
+        }
+      }
+      // Positively verified only when a recorded cwd EXISTED and the live daemon matched it. No
+      // recorded cwd at all leaves this false — the head= attestation would describe an unverified
+      // repository — and the gate blocks certification.
+      if (!refusal && recorded.length > 0 && st.cwd) cwdVerified = true;
     }
   }
 
@@ -247,6 +264,7 @@ try {
     const readRes = await call({ cmd: 'read' });
     if (readRes && readRes.error) throw new Error(`read returned an error (${readRes.error})`);
     reviewText = (readRes && readRes.message) || '';
+    readKind = (readRes && readRes.kind) || null;
     if (outcome === 'completed') {
       if (readRes.status === 'completed' && reviewText.trim().length > 0) {
         terminal = 'completed';
@@ -300,10 +318,28 @@ if (stopError) warn(`stop reported '${stopError}' but teardown was confirmed`);
 // directory is not a completed run of it.
 if (terminal === 'completed') {
   const gaps = [];
+  // What the trailer claims about the reviewed tree.
   if (startHead === UNRESOLVED) gaps.push('no start HEAD recorded');
   if (dirty === UNRESOLVED) gaps.push('no readable dirty flag — cannot attest what was reviewed');
   if (scopeLabel === UNRESOLVED) gaps.push('no review scope recorded');
-  if (pid === null) gaps.push('no daemon pid recorded — teardown could not be proven by pid');
+  // A complete, self-consistent run directory: the recipe writes all of these in one strict-mode
+  // block, so a missing one means this is not a completed run of it. start.json is the authority;
+  // the sidecars are the cross-checks, and both must be present — a deleted sidecar is not a pass.
+  if (!startCwd) gaps.push('start.json records no cwd — the reviewed repo was never established');
+  if (startPid === null) gaps.push('start.json records no pid — teardown could not be bound to a known process');
+  if (!socketFile) gaps.push('no socket sidecar to cross-check start.json');
+  if (sidecarPid === null) gaps.push('no pid sidecar to cross-check start.json');
+  if (!persistedCwd) gaps.push('no cwd sidecar to cross-check start.json');
+  // Positive proof, from the LIVE daemon, that this is the right session and the right repo. Both
+  // stay false unless a matching record existed AND the daemon agreed.
+  if (!threadVerified) gaps.push('daemon threadId was not positively matched');
+  if (!cwdVerified) gaps.push('daemon cwd was not positively matched against a recorded cwd');
+  // The turn we actually READ must itself be a review. review.json alone proves only that a review
+  // was once STARTED on this session; a plain `send` afterward completes a chat turn that a stale
+  // review.json would otherwise launder into a certified review. `kind` reflects the current turn.
+  if (readKind !== 'review') {
+    gaps.push(`the collected turn is a '${readKind ?? 'unknown'}', not a review — a stale review.json cannot certify a later turn`);
+  }
   if (!reviewScope) {
     gaps.push('no usable review.json — cannot prove a native review (rather than a plain send) ran on this session');
   } else if (scopeLabel !== UNRESOLVED && scopeLabel !== reviewScope) {

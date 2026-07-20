@@ -471,6 +471,12 @@ export class Daemon {
     const res = { status: this.turn.status, message: this.turn.message };
     const blank = !(this.turn.message && String(this.turn.message).trim());
     if (this.turn.status === 'completed' && blank) res.empty = true;
+    // `isReview`/`isPlan` describe the turn being READ, not any earlier one on this thread. A
+    // collector that trusts a persisted review.json alone would certify a plain chat turn that
+    // happened to follow a real review on the same session; this lets it demand that the turn it is
+    // actually reading is the review. The flags reflect the current (possibly reset) turn, so once a
+    // later `send` overwrites `this.turn`, `read` reports isReview:false.
+    res.kind = this.turn.isReview ? 'review' : this.turn.isPlan ? 'plan' : 'turn';
     return res;
   }
   _parkedResult() {
