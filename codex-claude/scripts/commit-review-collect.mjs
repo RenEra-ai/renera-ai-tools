@@ -42,6 +42,9 @@ const ALLOWED_FLAGS = ['state-dir', 'outcome'];
 // the detached path exists to remove, one layer up.
 const CALL_TIMEOUT_MS = 10000;
 const TEARDOWN_POLL_MS = 100;
+// Bounded for the same reason every other wait here is: if the reader is gone the write can never
+// complete, and hanging forever is worse than the truncation it guards against.
+const FLUSH_TIMEOUT_MS = 60000;
 const UNRESOLVED = '(unresolved)';
 
 const warn = (msg) => process.stderr.write(`[collect] ${msg}\n`);
@@ -114,18 +117,54 @@ const dirty = dirtyRaw === 'true' || dirtyRaw === 'false' ? dirtyRaw : UNRESOLVE
 const persistedCwd = readState('cwd');
 const socketFile = readState('socket');
 const pidRaw = readState('pid');
-const pid = pidRaw !== null && /^\d+$/.test(pidRaw) ? Number(pidRaw) : null;
+
+// start.json is written by `codex-drive start` ITSELF and always carries threadId/pid/cwd (the verb
+// aborts rather than print a record without a threadId). The sidecars are jq-extracted COPIES of it,
+// so they are cross-checks, never the authority — reading identity out of them meant a deleted
+// sidecar silently skipped the check it existed to perform.
 const socket = start.socket;
+const startCwd = typeof start.cwd === 'string' && start.cwd.trim() ? start.cwd.trim() : null;
+const startThread = typeof start.threadId === 'string' && start.threadId.trim() ? start.threadId.trim() : null;
+const startPid = Number.isInteger(start.pid) && start.pid > 0 ? start.pid : null;
+const sidecarPid = pidRaw !== null && /^\d+$/.test(pidRaw) ? Number(pidRaw) : null;
+const pid = startPid ?? sidecarPid;
+
+// The recipe's `review` call, persisted. Its presence is the only evidence the collector has that a
+// NATIVE review was started on this session at all: a plain `send` leaves no review.json, and
+// without this check the collector would happily certify an ordinary chat turn as a code review.
+let reviewRecord = null;
+try { reviewRecord = JSON.parse(readFileSync(join(stateDir, 'review.json'), 'utf8')); } catch { /* attested below */ }
+const reviewScope = reviewRecord && reviewRecord.ok === true
+  && typeof reviewRecord.scope === 'string' && reviewRecord.scope.trim()
+  ? reviewRecord.scope.trim() : null;
 
 // --- helpers ---
+// process.stdout is a PIPE under the Bash tool, and pipe writes are ASYNCHRONOUS: process.exit()
+// discards whatever has not yet reached the OS. A 1 MiB review empirically emitted 65536 bytes —
+// exactly one pipe buffer — and lost BOTH trailers while still exiting 0. That is the worst
+// reachable outcome: truncated findings AND a silently disabled enforcement hook. So the payload is
+// written as ONE chunk and the process is not allowed to end until that write has completed.
+function flushWrite(text) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => { if (!settled) { settled = true; clearTimeout(timer); resolve(); } };
+    const timer = setTimeout(() => {
+      warn(`stdout did not drain within ${FLUSH_TIMEOUT_MS}ms; output may be truncated`);
+      done();
+    }, FLUSH_TIMEOUT_MS);
+    // An EPIPE resolves like a success: the reader is gone, so there is no output left to preserve
+    // and the exit code still has to be delivered.
+    process.stdout.write(text, done);
+  });
+}
+
 // Output is BUFFERED until after the stop attempt: printing the review first would let a cleanup
 // failure arrive after a body the gate has already accepted, and the trailers must be the last two
 // lines of THIS call's stdout.
-function emit(status, reviewText, code) {
+async function emit(status, reviewText, code) {
   const text = reviewText || '';
-  if (text) process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);
-  process.stdout.write(`STATUS: ${status}\n`);
-  process.stdout.write(`SCOPE: ${scopeLabel} head=${startHead} dirty=${dirty}\n`);
+  const body = text ? (text.endsWith('\n') ? text : `${text}\n`) : '';
+  await flushWrite(`${body}STATUS: ${status}\nSCOPE: ${scopeLabel} head=${startHead} dirty=${dirty}\n`);
   process.exit(code);
 }
 
@@ -172,6 +211,12 @@ let refusal = null;
 try {
   if (socketFile && socketFile !== socket) {
     refusal = `socket sidecar (${socketFile}) disagrees with start.json (${socket})`;
+  } else if (sidecarPid !== null && startPid !== null && sidecarPid !== startPid) {
+    refusal = `pid sidecar (${sidecarPid}) disagrees with start.json (${startPid})`;
+  } else if (!startThread) {
+    // `start` aborts rather than emit a record without one, so a start.json missing threadId was not
+    // written by the verb — there is nothing here to bind a daemon to.
+    refusal = 'start.json records no threadId; this is not a session record we can identify';
   }
 
   let st = null;
@@ -184,13 +229,17 @@ try {
   }
   if (!refusal && st && st.error) refusal = `status probe returned an error (${st.error})`;
   if (!refusal && st) {
-    if (start.threadId && st.threadId && st.threadId !== start.threadId) {
-      refusal = `thread mismatch: daemon reports ${st.threadId}, start.json recorded ${start.threadId}`;
+    // Absence is a mismatch. Treating a missing field as "nothing to compare" turned every one of
+    // these checks off exactly when the evidence was weakest.
+    if (st.threadId !== startThread) {
+      refusal = `thread mismatch: daemon reports ${st.threadId ?? '(none)'}, start.json recorded ${startThread}`;
     // The daemon's OWN cwd, not ours: `--socket` bypasses the global state file, so this is the only
     // authority on WHICH repository was reviewed. A mismatch means we attached to a daemon serving a
     // different tree, and the head= attestation would be a lie.
-    } else if (persistedCwd && st.cwd && st.cwd !== persistedCwd) {
-      refusal = `cwd mismatch: daemon serves ${st.cwd}, state recorded ${persistedCwd}`;
+    } else if (startCwd && st.cwd !== startCwd) {
+      refusal = `cwd mismatch: daemon serves ${st.cwd ?? '(none)'}, start.json recorded ${startCwd}`;
+    } else if (persistedCwd && st.cwd !== persistedCwd) {
+      refusal = `cwd mismatch: daemon serves ${st.cwd ?? '(none)'}, state recorded ${persistedCwd}`;
     }
   }
 
@@ -220,7 +269,7 @@ if (refusal) {
   warn(refusal);
   warn('refusing to stop a session that is not provably ours');
   recovery();
-  emit(unhappy, '', 2);
+  await emit(unhappy, '', 2);
 }
 
 // --- always stop, then confirm ---
@@ -239,13 +288,32 @@ if (!(await confirmStopped())) {
     : `teardown was not confirmed within ${TEARDOWN_TIMEOUT_MS}ms`);
   // A cleanup failure DOWNGRADES a would-be completion: an orphaned app-server is a real cost, and
   // reporting success over it is how the orphan goes unnoticed until someone finds it days later.
-  emit(unhappy, reviewText, 2);
+  await emit(unhappy, reviewText, 2);
 }
 if (stopError) warn(`stop reported '${stopError}' but teardown was confirmed`);
 
-if (terminal === 'completed' && startHead === UNRESOLVED) {
-  warn('no start HEAD recorded — a clean exit here would be unattested');
-  emit(unhappy, reviewText, 2);
+// --- attestation ---
+// Exit 0 is a claim the enforcement gate trusts: "a native review of THIS scope, at THIS head, on
+// THIS tree, completed and cleaned up". Every field of that claim must be provable, or the claim is
+// not available — an `(unresolved)` trailer exiting 0 is the gate accepting a review nobody can
+// place. Each of these is written by the recipe in the same block, so a missing one means the state
+// directory is not a completed run of it.
+if (terminal === 'completed') {
+  const gaps = [];
+  if (startHead === UNRESOLVED) gaps.push('no start HEAD recorded');
+  if (dirty === UNRESOLVED) gaps.push('no readable dirty flag — cannot attest what was reviewed');
+  if (scopeLabel === UNRESOLVED) gaps.push('no review scope recorded');
+  if (pid === null) gaps.push('no daemon pid recorded — teardown could not be proven by pid');
+  if (!reviewScope) {
+    gaps.push('no usable review.json — cannot prove a native review (rather than a plain send) ran on this session');
+  } else if (scopeLabel !== UNRESOLVED && scopeLabel !== reviewScope) {
+    gaps.push(`scope sidecar (${scopeLabel}) disagrees with review.json (${reviewScope})`);
+  }
+  if (gaps.length) {
+    for (const g of gaps) warn(g);
+    warn('refusing to certify an unattested review');
+    await emit(unhappy, reviewText, 2);
+  }
 }
 
 // Only a confirmed-clean, completed review advances the round marker. Writing it earlier would let a
@@ -255,10 +323,10 @@ if (terminal === 'completed') {
     writeFileSync(join(stateDir, 'last-reviewed-sha'), `${startHead}\n`);
   } catch (e) {
     warn(`could not record last-reviewed-sha (${e.message})`);
-    emit(unhappy, reviewText, 2);
+    await emit(unhappy, reviewText, 2);
   }
 }
 
 // The state directory is deliberately NOT removed: it holds the baseline, the round marker and the
 // cleanup evidence the enclosing task still needs. The recipe removes it when the task ends.
-emit(terminal, reviewText, terminal === 'completed' ? 0 : 2);
+await emit(terminal, reviewText, terminal === 'completed' ? 0 : 2);
