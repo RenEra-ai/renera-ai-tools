@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { existsSync, readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeRepo, seamEnv, rmDir, pidAlive, git } from './fixtures/helpers.mjs';
@@ -50,8 +50,11 @@ async function cli(args, opts = {}) {
 
 async function collect(runDir, outcome, extra = {}) {
   try {
+    // maxBuffer is raised well past the default 1 MiB: the truncation regression below deliberately
+    // emits a review larger than that, and the DEFAULT would fail it for the wrong reason.
     const { stdout, stderr } = await run(process.execPath,
-      [COLLECT, '--state-dir', runDir, '--outcome', outcome], { env: { ...process.env, ...extra } });
+      [COLLECT, '--state-dir', runDir, '--outcome', outcome],
+      { env: { ...process.env, ...extra }, maxBuffer: 64 * 1024 * 1024 });
     return { code: 0, stdout, stderr };
   } catch (e) {
     return { code: e.code, stdout: e.stdout || '', stderr: e.stderr || '' };
@@ -100,9 +103,12 @@ async function liveSession(mode = 'ok', { dirty = false, drive = true } = {}) {
   writeFileSync(join(runDir, 'socket'), `${out.socket}\n`);
   writeFileSync(join(runDir, 'pid'), `${out.pid}\n`);
 
+  // review.json is persisted verbatim, exactly as the recipe does: it is the collector's only
+  // evidence that a NATIVE review — rather than a plain `send` — ran on this session.
   const rev = await cli(['review', '--base', first, '--socket', out.socket], { env: e });
   assert.equal(rev.code, 0, `review failed: ${rev.stderr}`);
   const revOut = JSON.parse(rev.stdout);
+  writeFileSync(join(runDir, 'review.json'), rev.stdout);
   writeFileSync(join(runDir, 'scope'), `${revOut.scope || ''}\n`);
 
   if (drive) await driveToTerminal(out.socket, e);
@@ -225,7 +231,12 @@ test('an unconfirmed teardown downgrades a completed review and prints recovery'
   // `stop` responds BEFORE the daemon finishes tearing down, so trusting the response alone would
   // report success over a live app-server. Here the recorded PID never dies (it is this test
   // process), so confirmation must fail and the clean review must be downgraded.
+  //
+  // Both records are rewritten, not just the sidecar: start.json is the AUTHORITY on pid, and
+  // leaving them disagreeing would trip the ownership refusal below instead of the teardown check.
   const s = await liveSession('ok');
+  const st = JSON.parse(readFileSync(join(s.runDir, 'start.json'), 'utf8'));
+  writeFileSync(join(s.runDir, 'start.json'), JSON.stringify({ ...st, pid: process.pid }));
   writeFileSync(join(s.runDir, 'pid'), `${process.pid}\n`);
   const r = await collect(s.runDir, 'completed', {
     CODEX_DRIVE_TEST_MODE: '1', CODEX_DRIVE_TEST_TEARDOWN_MS: '300',
@@ -246,6 +257,97 @@ test('the teardown override is refused without CODEX_DRIVE_TEST_MODE=1', async (
   const r = await collect(runDir, 'completed', { CODEX_DRIVE_TEST_TEARDOWN_MS: '300' });
   assert.equal(r.code, 1);
   assert.match(r.stderr, /CODEX_DRIVE_TEST_MODE=1 is not/);
+});
+
+test('a review far larger than one pipe buffer survives intact, trailers included', async () => {
+  // THE regression: process.stdout is a pipe here, pipe writes are async, and process.exit()
+  // discards whatever has not reached the OS. This exact shape emitted 65536 bytes of a 1 MiB body
+  // and lost BOTH trailers while still exiting 0 — truncated findings AND a silently disabled
+  // enforcement hook, the worst reachable combination.
+  const s = await liveSession('huge');
+  const r = await collect(s.runDir, 'completed');
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(r.stdout.length > 512 * 1024, `body was truncated: only ${r.stdout.length} bytes survived`);
+  assert.match(r.stdout, /^Reviewed a very large delta\.$/m, 'the head of the body must survive');
+  assert.match(r.stdout, /^- \[P2\] finding 20000 — a\.txt:20000$/m, 'the last finding must survive');
+  const [status, scope] = lastTwo(r.stdout);
+  assert.equal(status, 'STATUS: completed');
+  assert.match(scope, /^SCOPE: .* head=[0-9a-f]{40} dirty=false$/);
+});
+
+test('a session with no review.json is not certifiable — a plain send is not a review', async () => {
+  // `send` leaves no review.json, so its absence is the only signal separating an ordinary chat turn
+  // from a native git-scoped review. Without this the collector would stamp any completed turn with
+  // the contract the gate trusts.
+  const s = await liveSession('ok');
+  rmSync(join(s.runDir, 'review.json'));
+  const r = await collect(s.runDir, 'completed');
+  assert.equal(r.code, 2);
+  assert.equal(lastTwo(r.stdout)[0], 'STATUS: failed');
+  assert.match(r.stderr, /cannot prove a native review/);
+  assert.ok(!existsSync(join(s.runDir, 'last-reviewed-sha')));
+});
+
+test('an unreadable dirty flag blocks certification instead of shipping an (unresolved) attestation', async () => {
+  // `SCOPE: … dirty=(unresolved)` exiting 0 is the gate accepting a review nobody can place. Exit 0
+  // claims the scope is known; when it is not, the claim is simply unavailable.
+  const s = await liveSession('ok');
+  writeFileSync(join(s.runDir, 'dirty'), 'perhaps\n');
+  const r = await collect(s.runDir, 'completed');
+  assert.equal(r.code, 2);
+  const [status, scope] = lastTwo(r.stdout);
+  assert.equal(status, 'STATUS: failed');
+  assert.match(scope, /dirty=\(unresolved\)$/, 'the trailer must still say plainly what it could not resolve');
+  assert.match(r.stderr, /refusing to certify an unattested review/);
+});
+
+test('a scope sidecar disagreeing with review.json blocks certification', async () => {
+  const s = await liveSession('ok');
+  writeFileSync(join(s.runDir, 'scope'), 'some other scope entirely\n');
+  const r = await collect(s.runDir, 'completed');
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /scope sidecar .* disagrees with review\.json/);
+});
+
+test('a pid sidecar disagreeing with start.json refuses, and leaves the daemon alone', async () => {
+  // start.json is the authority; a sidecar that has drifted from it means this state directory no
+  // longer describes one session, so nothing here may be stopped.
+  const s = await liveSession('ok');
+  writeFileSync(join(s.runDir, 'pid'), `${process.pid}\n`);
+  const r = await collect(s.runDir, 'completed');
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /pid sidecar .* disagrees with start\.json/);
+  assert.match(r.stderr, /refusing to stop a session that is not provably ours/);
+  assert.ok(pidAlive(s.pid), 'the unidentified daemon must still be running');
+});
+
+test('a start.json with no threadId is refused before any daemon is contacted', async () => {
+  const s = await liveSession('ok');
+  const st = JSON.parse(readFileSync(join(s.runDir, 'start.json'), 'utf8'));
+  delete st.threadId;
+  writeFileSync(join(s.runDir, 'start.json'), JSON.stringify(st));
+  const r = await collect(s.runDir, 'completed');
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /records no threadId/);
+  assert.ok(pidAlive(s.pid));
+});
+
+test('two collectors running concurrently do not cross-talk', { timeout: 60000 }, async () => {
+  // Nothing in the collector is global — it is addressed entirely by --state-dir and --socket — and
+  // this pins that. A shared session file or a stray `--force` would show up here as one collector
+  // stopping the other's daemon, which is precisely the fix-loop hazard (a repo can have a review
+  // and a re-review in flight from different agents).
+  const [a, b] = await Promise.all([liveSession('ok'), liveSession('statusinbody')]);
+  assert.notEqual(a.socket, b.socket, 'private sessions must not share a socket');
+
+  const [ra, rb] = await Promise.all([collect(a.runDir, 'completed'), collect(b.runDir, 'completed')]);
+  assert.equal(ra.code, 0, ra.stderr);
+  assert.equal(rb.code, 0, rb.stderr);
+  assert.match(ra.stdout, /Reviewed 1 file\./);
+  assert.match(rb.stdout, /a trap for naive trailer parsing/);
+  assert.equal(lastTwo(ra.stdout)[1], `SCOPE: ${readFileSync(join(a.runDir, 'scope'), 'utf8').trim()} head=${a.head} dirty=false`);
+  assert.equal(lastTwo(rb.stdout)[1], `SCOPE: ${readFileSync(join(b.runDir, 'scope'), 'utf8').trim()} head=${b.head} dirty=false`);
+  assert.ok(!pidAlive(a.pid) && !pidAlive(b.pid), 'both daemons must be torn down');
 });
 
 test('usage errors exit 1 without touching anything', async () => {

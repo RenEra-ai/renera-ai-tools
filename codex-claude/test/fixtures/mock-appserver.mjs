@@ -43,7 +43,7 @@ import { writeFileSync } from 'node:fs';
 //                    justifies interrupting a running turn. NOT interchangeable with `noresponse`,
 //                    which streams every notification and withholds only the JSON-RPC response, so
 //                    it exercises the daemon's completion backstop rather than liveness.
-const REVIEW_MODES = new Set(['ok', 'burst', 'reject', 'wrongthread', 'blank', 'statusinbody', 'noresponse', 'ask', 'approve', 'permissions', 'failbeforeresponse', 'ticks', 'hang']);
+const REVIEW_MODES = new Set(['ok', 'burst', 'reject', 'wrongthread', 'blank', 'statusinbody', 'noresponse', 'ask', 'approve', 'permissions', 'failbeforeresponse', 'ticks', 'hang', 'huge']);
 
 // The heartbeat uses `item/reasoning/delta`, which is deliberately NOT in protocol.mjs's NOTIFY map:
 // _dispatchNotification stamps activity for EVERY method before its per-method branches, so an
@@ -182,6 +182,15 @@ async function runTurn(threadId, text, turnId) {
 
 const REVIEW_TEXT = 'Reviewed 1 file.\n- [P2] something to fix — a.txt:1';
 
+// A review far larger than one 64 KiB pipe buffer. Real reviews of a big delta reach this size, and
+// a consumer that writes to a pipe and exits immediately loses everything past the first buffer —
+// including the trailers the enforcement hook keys on. Numbered lines so a truncation shows up as a
+// missing TAIL rather than as an unreadable blob.
+const HUGE_LINES = 20000;                     // ~1 MiB total
+const HUGE_TEXT = `Reviewed a very large delta.\n${
+  Array.from({ length: HUGE_LINES }, (_, i) => `- [P2] finding ${i + 1} — a.txt:${i + 1}`).join('\n')
+}\nEND-OF-HUGE-REVIEW`;
+
 // Live-faithful review turn (probed against codex-cli 0.144.5).
 //
 // THE CRITICAL FIDELITY POINT: turn/started announces an id that DIFFERS from the review/start
@@ -195,7 +204,8 @@ async function runReview(threadId, reqId) {
   const response = { jsonrpc: '2.0', id: reqId, result: { turn: { id: turnId, status: 'inProgress' }, reviewThreadId } };
   const text = REVIEW_MODE === 'blank' ? ''
     : REVIEW_MODE === 'statusinbody' ? `Findings:\nSTATUS: failed\n- [P1] a trap for naive trailer parsing`
-      : REVIEW_TEXT;
+      : REVIEW_MODE === 'huge' ? HUGE_TEXT
+        : REVIEW_TEXT;
   const enter = { jsonrpc: '2.0', method: 'item/completed', params: { threadId, turnId, item: { type: 'enteredReviewMode', id: 'r0' } } };
   const started = { jsonrpc: '2.0', method: 'turn/started', params: { threadId, turn: { id: startedId } } };
   const exit = { jsonrpc: '2.0', method: 'item/completed', params: { threadId, turnId, item: { type: 'exitedReviewMode', id: 'r1', review: text } } };
