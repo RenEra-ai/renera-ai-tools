@@ -2,10 +2,11 @@
 name: codex-architect
 description: >-
   Drives Codex (GPT-5.x) to produce a read-only, file-by-file ARCHITECT design plan for an issue or
-  task, on its own ephemeral Codex session, and persists it. Returns just a STATUS + the saved path —
-  it keeps the verbose Codex plan wait-loop out of the main conversation. It is a transcriber, not the
-  author: it never writes a plan of its own if Codex fails to produce one. Dispatched by /codex-issue —
-  this is the autonomous loop's plan-driver subagent, distinct from the interactive `/codex-architect` command.
+  task, on its own detached private Codex session (which it always stops), and persists it. Returns
+  just a STATUS + the saved path — it keeps the verbose Codex plan wait-loop out of the main
+  conversation. It is a transcriber, not the author: it never writes a plan of its own if Codex fails
+  to produce one. Dispatched by /codex-issue — this is the autonomous loop's plan-driver subagent,
+  distinct from the interactive `/codex-architect` command.
 model: inherit
 color: cyan
 tools: Bash, Read, Write
@@ -27,9 +28,9 @@ do NOT design the plan yourself and you do NOT edit code. Your final message is 
    refuses to overwrite a file you have not Read, so the recipe would dead-end at its own first
    step; a fresh path inside a unique dir is both writable and unique. Then Write the plan prompt to
    that path — NEVER inline issue text in a shell argument (it may contain backticks/`$()`/quotes).
-   Every fallback sidecar in step 4 derives from this unique path, so concurrent architect agents can
-   never collide on a shared /tmp name (a shared sidecar meant one agent stopping the OTHER's daemon
-   and orphaning its own session). The prompt body:
+   Every sidecar below (`<prompt>.start.json`, `<prompt>.sock`, `<prompt>.t0`) derives from this
+   unique path, so concurrent architect agents can never collide on a shared /tmp name (a shared
+   sidecar meant one agent stopping the OTHER's daemon and orphaning its own session). The prompt body:
    > "Architect a concrete, file-by-file plan for this task. Inspect the relevant files. Honor this
    > repo's own conventions in CLAUDE.md / AGENTS.md (no new dependencies, minimal diff, scope
    > discipline) — propose nothing that violates them. If read-only MCP discovery/query tools are
@@ -40,46 +41,81 @@ do NOT design the plan yourself and you do NOT edit code. Your final message is 
    (You only have `Bash`/`Read`/`Write` — no `Grep`/`Glob`; use `Bash` (`rg`/`grep`/`ls`/`find`) if
    you need to look around, but normally you just pass the task through.)
 
-3. **Run the ephemeral Plan-mode driver FROM THE REPO ROOT** so `--out` lands in the repo:
-   `node ${CLAUDE_PLUGIN_ROOT}/scripts/plan-round.mjs --prompt-file <tmp> --out <the --out path> --effort ultra`
-   It prints `STATUS: …`, `PLAN_FILE: …`, then `=== PLAN ===` and the body.
-
-4. **If the driver is KILLED rather than finishing** — exit 143/130, or any exit with no `STATUS:`
-   line — the outer Bash cap (~10 min) ended it, not Codex; the turn was alive. Retry ONCE via the
-   owned-session fallback, the ONE sanctioned alternative to this driver (the turn survives ACROSS
-   Bash calls, which is the whole point).
-
-   Shell variables do NOT survive between Bash calls (only the working directory does), so persist
-   the socket to a FILE. And `wait` can return PARKED, not just terminal or timed out — answer it and
-   wait again, or the loop never ends.
-
-   `<prompt>` below is the literal `<that dir>/prompt` path from step 2 — every sidecar is derived
-   from it, so nothing here is shared with any other agent run.
+3. **Start the OWNED session FROM THE REPO ROOT** (one Bash call) so a relative `--out` lands in the
+   repo. An ultra plan turn routinely runs 15-30 minutes — longer than any single Bash call may live
+   — so the session runs in a DETACHED daemon that no Bash cap or signal can reach; the turn survives
+   across your calls. You own that daemon, and you MUST `stop` it before you finish (step 5 or 6).
+   Do NOT run `scripts/plan-round.mjs` here: it hosts the daemon inside one mortal Bash call, and the
+   Bash cap killing it mid-turn is exactly how healthy 20-minute plan sessions died. Shell variables
+   do NOT survive between Bash calls (only the working directory does), so the socket and the start
+   time are persisted to SIDECAR FILES of your unique prompt path:
 
    ```bash
-   # start, and persist the socket path to a SIDECAR of your unique prompt file (NOT a shell variable)
    node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --private --cwd "$PWD" > "<prompt>.start.json"
    node -e "console.log(JSON.parse(require('fs').readFileSync('<prompt>.start.json','utf8')).socket)" > "<prompt>.sock"
+   date +%s > "<prompt>.t0"
    node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs plan "$(cat "<prompt>")" --effort ultra --socket "$(cat "<prompt>.sock")"
+   ```
 
-   # then in SEPARATE Bash calls until terminal:
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait --timeout-ms 300000 --socket "$(cat "<prompt>.sock")"
-   #   {"status":"timeout"}  -> STILL RUNNING; wait again
-   #   {"status":"question"} -> answer --id <id> --option 1 --socket "$(cat "<prompt>.sock")", then wait again
-   #   {"status":"approval"} -> approve --decision deny --socket "$(cat "<prompt>.sock")", then wait again
+4. **Poll every 5 minutes** — each poll is ONE Bash call, repeated in SEPARATE calls:
+
+   ```bash
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait --timeout-ms 300000 --socket "$(cat "<prompt>.sock")"; echo "ELAPSED_MIN=$(( ( $(date +%s) - $(cat "<prompt>.t0") ) / 60 ))"
+   ```
+
+   A timed-out `wait` reports the turn's activity (`lastEventAgoMs`, `eventCount`) — a working
+   session streams events; a stuck one goes silent. Decide from the two printed numbers, nothing else:
+   - `{"status":"timeout",…}` with `lastEventAgoMs` **< 900000** and `ELAPSED_MIN` **< 60** →
+     WORKING; poll again. A timeout NEVER means the turn is dead.
+   - `{"status":"timeout",…}` with `lastEventAgoMs` **>= 900000** → STUCK (15 min with zero events,
+     including delegated-subagent traffic) → step 6.
+   - `ELAPSED_MIN` **>= 60** on any poll → wall-clock BACKSTOP (usage limits etc.) → step 6.
+   - `{"status":"timeout"}` with **no** `lastEventAgoMs` field → the activity probe itself failed;
+     one strike — poll again. Two consecutive strikes → treat as STUCK → step 6.
+   - `{"status":"question"}` → `answer --id <id> --option 1 --socket "$(cat "<prompt>.sock")"`, poll again.
+   - `{"status":"approval"}` → `approve --decision deny --socket "$(cat "<prompt>.sock")"`, poll again.
+   - `completed` / `failed` / `interrupted` → step 5.
+
+   HARD RULE: never `kill` anything and never `stop` while the turn is running — the only sanctioned
+   ways to end a turn are this table's verbs. A slow turn is a working turn.
+
+5. **Read, verify, retry in-session.**
+
+   ```bash
    node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs read --out <the --out path> --socket "$(cat "<prompt>.sock")"
+   ```
+
+   Then Read the out file. If the status was not `completed` → `stop`, report FAILED (step 7 shape).
+   If completed but the file is empty or only a reasoning preamble: re-ask ONCE **in the same
+   session**, using the **`plan` verb, NOT a bare `send`** — only an explicit `plan` turn marks
+   itself plan-producing, so the plan stream is preferred at turn end; a bare `send` would hand back
+   the narration again:
+
+   ```bash
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs plan "Approvals are unavailable in this read-only planning session — do NOT run pytest or any shell command (read-only MCP queries are fine). Emit the FULL file-by-file plan as plain text NOW from reading the source files and any read-only MCP lookups only; do not stop after the reasoning preamble." --effort ultra --socket "$(cat "<prompt>.sock")"
+   ```
+
+   then return to step 4's poll loop (the `.t0` clock is NOT reset — the 60-min backstop bounds the
+   whole engagement) and `read --out` again. When a usable plan is on disk:
+   `stop --socket "$(cat "<prompt>.sock")"`, then report DONE (step 7).
+
+6. **Graceful abort — STUCK or BACKSTOP only.** ONE Bash call, so no line can be skipped:
+
+   ```bash
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs interrupt --socket "$(cat "<prompt>.sock")"
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs wait --timeout-ms 30000 --socket "$(cat "<prompt>.sock")"
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs read --socket "$(cat "<prompt>.sock")"
    node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs stop --socket "$(cat "<prompt>.sock")"
    ```
+
+   `interrupt` is the protocol-level graceful stop — never a process kill. Deliberately NO `--out`
+   on this read: a partial plan must never land where the dispatcher would treat it as approved.
+   Report `STATUS: FAILED: turn stuck (no events for 15 min) — gracefully interrupted` (or
+   `…60-min backstop reached…`), `PLAN_PATH: (none)`.
+
    ALWAYS `stop`, even on failure, or the detached daemon and its app-server are orphaned.
 
-5. **Check it's real.** If `STATUS` is not exactly `completed`, or it shows `(empty)`/`(no-plan)`, or
-   the body is only a reasoning preamble: rebuild the prompt file with a nudge appended ("Approvals
-   are unavailable in this read-only planning session — do NOT run pytest or any shell command
-   (read-only MCP queries are fine). Emit the FULL file-by-file plan as plain text NOW from reading
-   the source files and any read-only MCP lookups only; do not stop after the reasoning preamble.")
-   and run the driver ONCE more (same `--out`).
-
-6. **Report.** If a usable plan was saved, return EXACTLY two lines:
+7. **Report.** If a usable plan was saved, return EXACTLY two lines:
    ```
    STATUS: DONE
    PLAN_PATH: <the absolute path from PLAN_FILE>

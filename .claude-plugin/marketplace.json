@@ -32,7 +32,7 @@
       "name": "codex-claude",
       "source": "./codex-claude",
       "description": "Use Codex (GPT-5.x) as an architect and reviewer inside the Claude Code dev loop — drives a headless codex app-server over JSON-RPC for a native architect → implement → review loop. Codex plans and reviews; Claude implements. /codex-issue runs a fully autonomous loop that wraps the repo's OWN internal workflow (architect → approve → implement via the repo's full workflow → review-until-clean → push + PR); for repos whose lifecycle is a Claude Code Workflow it COMPOSES with that workflow (workflow-mode); /codex-compose-setup makes any repo composition-ready (adds the noLand seam or scaffolds a starter workflow).",
-      "version": "1.8.7",
+      "version": "1.8.8",
       "author": {
         "name": "Gleb"
       }

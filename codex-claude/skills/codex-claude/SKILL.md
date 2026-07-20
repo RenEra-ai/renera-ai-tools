@@ -161,23 +161,26 @@ Requires the `gh` CLI (authenticated) for issue intake + push/PR. Unlike the man
 agents) and **auto-approves** the implementation plan, then integrates the result.
 
 Codex is driven by thin, `Task`-free helper subagents (they isolate the verbose Codex wait-loop):
-- **codex-architect** (agent) — drives an *ephemeral* Codex Plan-mode session to produce the
-  file-by-file **design plan**; persists it to `.codex/plans/issue-<#>.md` and returns the path.
+- **codex-architect** (agent) — drives an owned, *detached private* Codex Plan-mode session (an
+  ultra plan turn outlives any single Bash call; the agent polls it and always stops it) to produce
+  the file-by-file **design plan**; persists it to `.codex/plans/issue-<#>.md` and returns the path.
 - **codex-planner** (agent, dispatched `mode:"plan"`, **read-only**) — **Claude** authoring its own
   concrete **implementation plan** from the design plan (Codex is not involved in this step); returns
   the text, which the main thread persists to `.codex/plans/issue-<#>.claude.md`.
-- **codex-impl-reviewer** (agent) — drives an *ephemeral* Codex review of impl-vs-**design-plan** and
-  returns a structured last-line `VERDICT:`.
+- **codex-impl-reviewer** (agent) — drives an owned, *detached private* Codex review session
+  (same poll-and-always-stop discipline) for impl-vs-**design-plan** and returns a structured
+  last-line `VERDICT:`.
 
 The main thread does the rest itself: it **develops** (running the repo's own workflow — its real
 QA/review gates, dispatched subagents **and** command gates it names like its own
 Codex review, which the §6 plan review never substitutes for), then **addresses** each review round's findings via the
 **receiving-code-review** skill (verify, fix genuine issues, push back on false positives — never blind
 compliance), re-running the repo's gates (its own Codex review gate included) on each fix delta, until the verdict is `VERDICT: NO ISSUES` or the max rounds
-(default 6) is hit. All Codex sessions are **ephemeral**; the saved design-plan **file** is inlined
-**verbatim** into each review (the driver appends it byte-for-byte via `--plan-file`, so the gate always
-judges against the exact approved plan — never a paraphrase), so there is **no persistent daemon** to
-manage. Finish: `git push` + `gh pr create` (`Closes #N`
+(default 6) is hit. Every Codex session is **owned and short-lived** — a detached private daemon the
+driving agent starts, polls, and always stops (never the shared global session); the saved design-plan
+**file** is concatenated **verbatim** into each review prompt (byte-for-byte via `cat`, so the gate
+always judges against the exact approved plan — never a paraphrase), so nothing outlives its run.
+Finish: `git push` + `gh pr create` (`Closes #N`
 closes the issue on a merge **into the default branch**; a non-default base like `dev` is flagged for a
 manual close). The loop never auto-merges and never closes the issue itself.
 
@@ -207,12 +210,12 @@ repo's workflow must read it), and **`/codex-doctor`** to preflight which mode a
 | `plan` | `"<prompt>" [--effort <e>] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"restart_required"}` · `{error:"no_model_for_mode"}` |
 | `send` | `"<prompt>" [--effort <e>] [--mode default] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"restart_required"}` · `{error:"no_model_for_mode"}` (only with `--mode`) |
 | `review` | `[--base <ref\|sha> \| --scope <auto\|working-tree\|branch>]` | `{ ok, status:"running", scope }` · `{error:"busy"}` · `{error:"wrong_thread_profile"}` · `{error:"restart_required"}` · `{error:"<validation>"}`. **Native git-scoped commit review** (`review/start`) — distinct from a prompt-based `send` review: it takes no prompt, inherits the config's effort, and returns the built-in reviewer's findings. Requires a session started with `--sandbox read-only --approval-policy never --ephemeral`. Scope is validated synchronously: an unresolvable/non-ancestor/empty-delta base is an error, never a silent fallback |
-| `wait` | `[--timeout-ms <N>]` | `{status:"completed",message[,empty:true]}` · `{status:"question",question}` · `{status:"approval",request}` · `{status:"interrupted"\|"failed",message}` · `{status:"unsupported",request}` · `{status:"timeout"}` (exit 2) |
+| `wait` | `[--timeout-ms <N>]` | `{status:"completed",message[,empty:true]}` · `{status:"question",question}` · `{status:"approval",request}` · `{status:"interrupted"\|"failed",message}` · `{status:"unsupported",request}` · `{status:"timeout"[,turnStatus,lastEventAgoMs,eventCount]}` (exit 2) — on a client-side timeout the CLI probes the daemon's `status` (bounded, best-effort) and inlines the activity fields, so working-vs-stuck is decidable from the one call; missing fields mean the probe itself failed |
 | `answer` | `--id <qid> (--option <n> \| --text "<s>")` | `{ ok }` · `{error:"no_pending_question"}` (`--option` is 1-based; one selection per call — answering resumes the turn). Exactly one of `--option`/`--text` is required and both need a real value: a valueless flag used to answer the live question with the literal text `__option:true` / `true` |
 | `approve` | `--decision allow\|deny` | `{ ok }` · `{error:"no_pending_approval"}` |
 | `read` | `[--out <path>]` | `{ status, message[, empty:true], cwd }` (last assistant message; `empty:true` flags a completed turn that produced no content). `--out` writes a non-empty message to a file; a RELATIVE path resolves against the daemon's reported `cwd`, not the caller's |
 | `interrupt` | — | `{ ok }` · `{error:"no_active_turn"}` (only when nothing is running or awaiting input). A turn whose `turn/start` response has not arrived yet is **also** interruptible: it is ended locally as `interrupted` and the session is marked `restartRequired` (that turn's id never reached us, so its later traffic can no longer be told apart from a new turn's) |
-| `status` | — | `{ threadId, turnStatus, parked, cwd, restartRequired[, restartReason] }` — `restartRequired:true` means the session refuses new turns until `stop` + `start` |
+| `status` | — | `{ threadId, turnStatus, parked, cwd, lastEventAgoMs, eventCount, restartRequired[, restartReason] }` — `restartRequired:true` means the session refuses new turns until `stop` + `start`. `lastEventAgoMs`/`eventCount`: ms since ANY app-server traffic this turn (own thread, delegated subagent threads, server requests) + how many such events — a running turn whose ago keeps growing while the count stands still is stuck; one that streams is merely slow |
 | `stop` | — | `{ ok }` (tears down the daemon, kills the app-server, removes the socket; the `~/.codex-drive/state.json` record is left behind as a stale entry — `start`'s liveness probe replaces it) |
 
 Every verb except `start` and `doctor` also accepts **`--socket <path>`**, which talks to that daemon
@@ -228,9 +231,10 @@ current mode (a `send` after a `plan` reviews read-only — exactly what you wan
 default` explicitly leaves Plan mode (only needed if you ever want Codex to edit). `--effort` ∈
 `{minimal, low, medium, high, xhigh, max, ultra, none}` (max/ultra are GPT-5.6 Sol values). **Use
 `max` for hard architecture problems** — it is the maximum reasoning depth. `ultra` is `max` PLUS
-automatic task delegation, which makes it markedly slower and is the documented cause of drivers
-blowing their 540 s wait cap; opt into it deliberately, never as a default. Effort dominates
-wall-clock: the same review measured **36 s at `low`** vs **>560 s (never completed) at `max`**.
+automatic task delegation, which makes it markedly slower: an ultra turn is EXPECTED to outlive any
+single Bash call, so drive it on an owned `--private` session polled across separate calls (the
+bundled agents do this by default) — never inside a one-shot driver. Effort dominates wall-clock:
+the same review measured **36 s at `low`** vs **>560 s (never completed) at `max`**.
 
 ## Troubleshooting
 
@@ -250,14 +254,19 @@ wall-clock: the same review measured **36 s at `low`** vs **>560 s (never comple
 - **Permissions approval** — `item/permissions/requestApproval` comes back from `wait` as
   `{status:"approval"}`, but `approve` then fails with `{error:"permissions approval not supported…"}`
   (its response shape differs from exec/file approvals). `interrupt` the turn rather than approving it.
-- **Stuck `wait`** — pass `--timeout-ms <N>`; on timeout you get `{status:"timeout"}` (exit 2).
-  A timeout does **not** stop the turn — it is a poll result, so waiting again is usually right.
-  `interrupt` only when you actually want the turn cancelled.
-- **A long turn killed by the Bash cap** — `review-round`/`plan-round` now treat their own wait cap
-  as a poll interval (they re-wait instead of interrupting), but a single Bash call still cannot
-  outlive its ~10-minute cap. For a genuinely long review/plan, drive an owned session instead:
-  `start --private` → `send`/`plan` → repeated `wait --timeout-ms 300000 --socket S` in SEPARATE
-  Bash calls → `read --out` → `stop`. The turn survives across calls; each call stays bounded.
+- **Stuck `wait`** — pass `--timeout-ms <N>`; on timeout you get
+  `{status:"timeout"[,turnStatus,lastEventAgoMs,eventCount]}` (exit 2). A timeout does **not** stop
+  the turn — it is a poll result carrying the activity signal: small/shrinking `lastEventAgoMs` and
+  a rising `eventCount` mean the turn is WORKING (wait again); `lastEventAgoMs` past ~15 min means
+  it is genuinely stuck (`interrupt` → `read` → `stop`, gracefully — never a process kill).
+- **Any long/ultra turn** — the owned session is the PRIMARY path, not a fallback: a single Bash
+  call cannot outlive its ~10-minute cap, and hosting the daemon inside one (as the short-turn
+  one-shots `review-round.mjs`/`plan-round.mjs` do) means the cap killing the process kills the
+  healthy session with it. Drive long turns detached: `start --private` → `send`/`plan` → repeated
+  `wait --timeout-ms 300000 --socket S` in SEPARATE Bash calls → `read --out` → `stop`. The turn
+  survives across calls; each call stays bounded; the timeout's activity fields decide
+  working-vs-stuck. An orphaned daemon (agent died before `stop`) is closed manually with
+  `stop --socket <the .sock sidecar>`.
 - **After upgrading Codex** — the Plan-mode / question surfaces are experimental and may drift
   across Codex versions; re-run `doctor` and sanity-check a `plan` turn.
 
@@ -265,7 +274,8 @@ wall-clock: the same review measured **36 s at `low`** vs **>560 s (never comple
 
 - The daemon is a **single global session** (`~/.codex-drive/state.json`); one in-flight turn at a
   time. Don't run two architect sessions concurrently from the main thread. The `codex-impl-reviewer`
-  subagent sidesteps this by running its own **ephemeral** daemon on a private socket.
+  subagent sidesteps this by running its own **detached private** daemon on its own socket (and
+  always stopping it).
 - This plugin complements the separate `codex` plugin (rescue/setup, one-shot `codex exec`). They
   can coexist; this one adds the native Plan-mode architect + interactive review loop.
 - Design rationale and protocol details: `${CLAUDE_PLUGIN_ROOT}/docs/specs/2026-05-31-codex-drive-design.md`.

@@ -5,6 +5,8 @@
 //   "ASK"         -> emits a server-request item/tool/requestUserInput, waits for the
 //                    client's response, then emits delta + turn/completed
 //   "BADTURN"     -> rejects turn/start with a JSON-RPC error (models a server-side rejection)
+//   "TICKS"       -> streams a delta every 150ms (x8) before completing: the "working, not stuck"
+//                    activity signature (eventCount climbs while lastEventAgoMs stays small)
 //   "PLANSTREAM"  -> emits preamble chat plus Plan-mode item/plan/delta and completed plan text
 //   "PLANITEM"    -> emits preamble chat plus only completed plan item text
 //   "REVIEWPLAN"  -> emits incidental item/plan/delta plus agent-message verdict text
@@ -134,6 +136,13 @@ async function runTurn(threadId, text, turnId) {
     // review mode: without it there is no way to observe a driver being killed MID-turn, which is
     // exactly when an app-server gets orphaned.
     return;
+  } else if (text.includes('TICKS')) {
+    // Steady heartbeat of deltas: lets a test observe the WORKING signature across two status
+    // polls (count rises, ago stays small) — no existing mode streams periodically.
+    for (let i = 0; i < 8; i++) {
+      await new Promise((r) => setTimeout(r, 150));
+      notify('item/agentMessage/delta', { threadId, turnId, itemId: 'i2', delta: `tick${i} ` });
+    }
   } else if (text.includes('EMPTY')) {
     // Emit NO agent-message delta: models the gpt-5.5 build quirk where a turn ends
     // `completed` with an empty final message (no plan/verdict content).

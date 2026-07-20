@@ -356,6 +356,83 @@ test('repeated fresh-socket disconnects leave _waiters empty', () => {
   }
 });
 
+// ---- turn activity signal (lastEventAgoMs / eventCount) ----
+
+test('a hung turn shows the STUCK signature: ago grows while the count stands still', async () => {
+  const { daemon, socketPath } = await startDaemon();
+  await rpcCall(socketPath, { cmd: 'send', prompt: 'HANGTURN now' });
+  await new Promise((r) => setTimeout(r, 100));           // let turn/started land
+  const a = await rpcCall(socketPath, { cmd: 'status' });
+  assert.equal(a.turnStatus, 'running');
+  assert.equal(typeof a.lastEventAgoMs, 'number');
+  assert.ok(a.eventCount >= 1, `turn/started must count: ${a.eventCount}`);
+  await new Promise((r) => setTimeout(r, 300));
+  const b = await rpcCall(socketPath, { cmd: 'status' });
+  assert.ok(b.lastEventAgoMs > a.lastEventAgoMs, 'silence must age the last event');
+  assert.equal(b.eventCount, a.eventCount, 'silence must not add events');
+  await daemon.stop();
+});
+
+test('a streaming turn shows the WORKING signature: count rises, ago stays small', async () => {
+  const { daemon, socketPath } = await startDaemon();
+  await rpcCall(socketPath, { cmd: 'send', prompt: 'TICKS now' });
+  await new Promise((r) => setTimeout(r, 250));
+  const a = await rpcCall(socketPath, { cmd: 'status' });
+  await new Promise((r) => setTimeout(r, 400));
+  const b = await rpcCall(socketPath, { cmd: 'status' });
+  assert.ok(b.eventCount > a.eventCount, `deltas must keep counting (${a.eventCount} -> ${b.eventCount})`);
+  assert.ok(b.lastEventAgoMs < 500, `a streaming turn must read as recent: ${b.lastEventAgoMs}`);
+  const done = await rpcCall(socketPath, { cmd: 'wait' });
+  assert.equal(done.status, 'completed');
+  await daemon.stop();
+});
+
+test('activity counters reset per turn, not cumulative across turns', async () => {
+  const { daemon, socketPath } = await startDaemon();
+  await rpcCall(socketPath, { cmd: 'send', prompt: 'say OK' });
+  await rpcCall(socketPath, { cmd: 'wait' });
+  const first = await rpcCall(socketPath, { cmd: 'status' });
+  await rpcCall(socketPath, { cmd: 'send', prompt: 'say OK' });
+  await rpcCall(socketPath, { cmd: 'wait' });
+  const second = await rpcCall(socketPath, { cmd: 'status' });
+  assert.ok(first.eventCount >= 3, `started+delta+completed: ${first.eventCount}`);
+  assert.equal(second.eventCount, first.eventCount, 'the second turn must start its own count');
+  await daemon.stop();
+});
+
+test('REGRESSION: buffered-then-replayed notifications stamp activity exactly once', async () => {
+  // BURSTTURN delivers the response + every notification in ONE chunk, so all three notifications
+  // (started, delta, completed) are buffered and then replayed. A stamp in _onNotification would
+  // fire twice per buffered event (6); the dispatch-side stamp counts each exactly once.
+  const { daemon, socketPath } = await startDaemon();
+  await rpcCall(socketPath, { cmd: 'send', prompt: 'BURSTTURN now' });
+  await rpcCall(socketPath, { cmd: 'wait' });
+  assert.equal(daemon.turn.eventCount, 3, 'each buffered event must count exactly once');
+  await daemon.stop();
+});
+
+test('a parked question counts as activity', async () => {
+  const { daemon, socketPath } = await startDaemon();
+  await rpcCall(socketPath, { cmd: 'send', prompt: 'ASK please' });
+  const q = await rpcCall(socketPath, { cmd: 'wait' });
+  assert.equal(q.status, 'question');
+  const st = await rpcCall(socketPath, { cmd: 'status' });
+  assert.ok(st.eventCount >= 2, `turn/started + the question must both count: ${st.eventCount}`);
+  await rpcCall(socketPath, { cmd: 'answer', id: 'q1', answers: ['A'] });
+  await rpcCall(socketPath, { cmd: 'wait' });
+  await daemon.stop();
+});
+
+test('foreign-thread traffic (ultra delegated subagents) stamps activity but nothing else', () => {
+  const d = new Daemon({ socketPath: '/tmp/cdx-unit-none.sock', clientInfo: {} });
+  d.threadId = 'T-mine';
+  d.turn = { id: 'T1', status: 'running', buffer: '', parked: null, message: null, finalized: false };
+  d._onNotification('item/agentMessage/delta', { threadId: 'T-other', turnId: 'X', delta: 'FOREIGN' });
+  assert.equal(d.turn.buffer, '', 'a foreign delta must not touch the buffer');
+  assert.equal(d.turn.eventCount, 1, 'but it must stamp activity — a delegating ultra turn is not stuck');
+  assert.equal(typeof d.turn.lastEventAt, 'number');
+});
+
 test('12 resolved waits on ONE persistent socket leave zero armed close listeners', async () => {
   // The protocol-surface pin: _onClient accepts many commands per connection, so a pipelining
   // client's socket must not accumulate one armed close-listener per already-resolved wait.

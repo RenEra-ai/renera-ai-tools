@@ -55,9 +55,19 @@ export class Daemon {
       id: null, status: 'idle', buffer: '', planBuffer: '', planText: null, parked: null,
       message: null, isPlan: false, isReview: false, reviewText: null,
       gen: this._gen, awaitingResponse: false, buffered: [], backstop: null, finalized: false,
-      cancelRequested: false,
+      cancelRequested: false, lastEventAt: null, eventCount: 0,
       ...extra,
     };
+  }
+
+  // Turn activity signal for unattended pollers (`status` / the CLI's enriched wait-timeout): a
+  // running turn that streams is merely slow; one whose last event keeps ageing while the count
+  // stands still is stuck. Date.now(), not performance.now(): the derived AGO value crosses the
+  // socket to another process, and performance.now()'s origin is per-process. `|| 0` tolerates
+  // hand-built turn objects in unit tests that predate these fields.
+  _stampActivity() {
+    this.turn.lastEventAt = Date.now();
+    this.turn.eventCount = (this.turn.eventCount || 0) + 1;
   }
 
   async start() {
@@ -145,6 +155,11 @@ export class Daemon {
       case 'status': return {
         threadId: this.threadId, turnStatus: this.turn.status,
         parked: this.turn.parked ? this.turn.parked.kind : null, cwd: this.cwd,
+        // Activity for pollers: ms since ANY app-server traffic this turn (own thread, delegated
+        // subagent threads, server requests) + how many such events. Computed daemon-side because
+        // the raw timestamp is not comparable across processes. Math.max guards an NTP step back.
+        lastEventAgoMs: this.turn.lastEventAt == null ? null : Math.max(0, Date.now() - this.turn.lastEventAt),
+        eventCount: this.turn.eventCount || 0,
         restartRequired: this.restartRequired,
         ...(this.restartRequired ? { restartReason: this.restartReason } : {}),
       };
@@ -232,7 +247,9 @@ export class Daemon {
     this._gen += 1;
     // awaitingResponse gates the notification path: everything that arrives before the response is
     // buffered, so nothing can be attributed to (or finalise) a turn whose id we don't yet know.
-    this.turn = this._freshTurn({ status: 'running', awaitingResponse: true, ...extra });
+    // lastEventAt is seeded HERE so a turn that never streams anything is still measurable from its
+    // birth — otherwise its silence would read as "nothing to measure" instead of "stuck".
+    this.turn = this._freshTurn({ status: 'running', awaitingResponse: true, lastEventAt: Date.now(), ...extra });
   }
 
   // Send a turn-starting RPC and wire up its response WITHOUT awaiting it.
@@ -579,7 +596,12 @@ export class Daemon {
     if (!params || typeof params !== 'object') return;
     // Drop foreign traffic at the door, before it can be buffered or arm anything. THE single
     // authoritative filter: replay routes back through here rather than round it.
-    if (this._isForeignThread(params.threadId)) return;
+    // Foreign traffic still STAMPS activity first: `ultra` delegates work to subagent threads whose
+    // notifications arrive on this transport but never reach _dispatchNotification. During a long
+    // delegation phase the parent turn is legitimately silent — without this stamp a stall detector
+    // would read a healthy ultra turn as stuck and gracefully kill exactly the turns ultra is for.
+    // (Never buffered, so it cannot double-stamp on replay.)
+    if (this._isForeignThread(params.threadId)) { this._stampActivity(); return; }
     if (this.turn.awaitingResponse) {
       if (method === NOTIFY.TURN_COMPLETED && params.turn) {
         // A completion carrying the PREVIOUS turn's id belongs to that turn. While our own id is
@@ -614,6 +636,11 @@ export class Daemon {
     // A finalized turn is OVER. The server keeps streaming after we reject a turn, and without this
     // a failed turn walks back to `completed` carrying the text we just refused.
     if (this.turn.finalized) return;
+    // Stamp HERE, not in _onNotification: buffered events replay through _onNotification, so a
+    // stamp there fires twice per buffered event; every path — live or replayed — reaches this
+    // method exactly once. Above the per-method stale filters on purpose: a prior-turn straggler is
+    // still app-server traffic, and the stall threshold is minutes, not events.
+    this._stampActivity();
     // No foreign-thread re-check here: _onNotification is the ONE place that filter lives, and every
     // path into this method — live traffic and replayed buffer entries alike — comes through it.
     // Maintaining a second copy invited a future edit to delete whichever one looked redundant.
@@ -704,6 +731,9 @@ export class Daemon {
       this.turn.buffered.push(['__serverRequest', req]);
       return;
     }
+    // A question/approval is activity too. Stamped BELOW the buffer branch: a buffered request
+    // replays back through this method, so a stamp above it would count that request twice.
+    this._stampActivity();
     // `finalized` belongs in this test: a turn that has ended must never be re-opened by a late
     // request. Without it, parking one walked a completed turn back to `awaiting_input` — the read
     // reported no message and the finished review was lost — and on a failed id-less turn it left

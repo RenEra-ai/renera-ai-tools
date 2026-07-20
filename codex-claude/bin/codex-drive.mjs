@@ -107,7 +107,23 @@ async function main() {
   try {
     res = await sendCommand(socket, cmd, { timeoutMs });
   } catch (e) {
-    if (/timeout/i.test(e.message)) { process.stdout.write(JSON.stringify({ status: 'timeout' }) + '\n'); process.exit(2); }
+    if (/timeout/i.test(e.message)) {
+      // A wait timeout is a POLL RESULT, not a verdict on the turn: the daemon never saw the
+      // client-side cap and the turn keeps running. Enrich it (for `wait` only) with the daemon's
+      // activity counters so an unattended poller can tell WORKING (events still streaming) from
+      // STUCK in the same call. Bounded and best-effort: a daemon too wedged to answer a 10s
+      // status probe still yields the bare timeout, which is still truthful — the caller treats
+      // the missing fields as a strike, not as health.
+      let extra = {};
+      if (parsed.verb === 'wait') {
+        try {
+          const st = await sendCommand(socket, { cmd: 'status' }, { timeoutMs: 10000 });
+          if (st && !st.error) extra = { turnStatus: st.turnStatus, lastEventAgoMs: st.lastEventAgoMs, eventCount: st.eventCount };
+        } catch { /* bare timeout below */ }
+      }
+      process.stdout.write(JSON.stringify({ status: 'timeout', ...extra }) + '\n');
+      process.exit(2);
+    }
     throw e;
   }
   // Subagent-mode plan persistence: `read --out <path>` writes the completed turn's verbatim message to
