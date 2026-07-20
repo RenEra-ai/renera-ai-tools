@@ -288,6 +288,55 @@ test('a session with no review.json is not certifiable — a plain send is not a
   assert.ok(!existsSync(join(s.runDir, 'last-reviewed-sha')));
 });
 
+test('a plain send AFTER the review cannot be certified by the stale review.json', async () => {
+  // The attack: a real review completes (review.json is written and valid), then an ordinary chat
+  // turn runs on the same session. `read` now returns the CHAT turn. review.json existence alone
+  // would launder that chat turn into a certified review; binding on the collected turn's kind is
+  // what refuses it.
+  const s = await liveSession('ok');                 // review completes, review.json persisted
+  const send = await cli(['send', 'say OK', '--socket', s.socket], { env: env('ok') });
+  assert.equal(send.code, 0, `send failed: ${send.stderr}`);
+  await driveToTerminal(s.socket, env('ok'));        // the chat turn is now the current turn
+  const r = await collect(s.runDir, 'completed');
+  assert.equal(r.code, 2, 'a chat turn must never certify as a review');
+  assert.equal(lastTwo(r.stdout)[0], 'STATUS: failed');
+  assert.match(r.stderr, /the collected turn is a 'turn', not a review/);
+  assert.ok(!existsSync(join(s.runDir, 'last-reviewed-sha')));
+});
+
+test('a missing cwd sidecar blocks certification even though the daemon cwd still matches start.json', async () => {
+  // start.json still carries cwd, so ownership and the head= attestation are provable — but the
+  // recipe writes the cwd sidecar in the same block as everything else, so its absence means the run
+  // directory is not a complete run and must not be certified.
+  const s = await liveSession('ok');
+  rmSync(join(s.runDir, 'cwd'));
+  const r = await collect(s.runDir, 'completed');
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /no cwd sidecar/);
+  assert.ok(pidAlive(s.pid) === false, 'the daemon is ours by threadId, so it is still stopped');
+});
+
+test('a start.json stripped of cwd blocks certification (the daemon repo is unverifiable)', async () => {
+  const s = await liveSession('ok');
+  const st = JSON.parse(readFileSync(join(s.runDir, 'start.json'), 'utf8'));
+  delete st.cwd;
+  writeFileSync(join(s.runDir, 'start.json'), JSON.stringify(st));
+  rmSync(join(s.runDir, 'cwd'));           // remove the sidecar too: now NO cwd exists anywhere
+  const r = await collect(s.runDir, 'completed');
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /cwd was not positively matched|records no cwd/);
+});
+
+test('a start.json stripped of pid blocks certification', async () => {
+  const s = await liveSession('ok');
+  const st = JSON.parse(readFileSync(join(s.runDir, 'start.json'), 'utf8'));
+  delete st.pid;
+  writeFileSync(join(s.runDir, 'start.json'), JSON.stringify(st));
+  const r = await collect(s.runDir, 'completed');
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /records no pid/);
+});
+
 test('an unreadable dirty flag blocks certification instead of shipping an (unresolved) attestation', async () => {
   // `SCOPE: … dirty=(unresolved)` exiting 0 is the gate accepting a review nobody can place. Exit 0
   // claims the scope is known; when it is not, the claim is simply unavailable.

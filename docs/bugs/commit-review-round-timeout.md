@@ -3,7 +3,7 @@
 **Component:** `codex-claude` plugin — `scripts/commit-review-round.mjs`
 **Version observed:** codex-claude **1.8.8**, Codex CLI **0.144.5**
 **Severity:** High — the documented primary Stage-2 review path never succeeds
-**Status:** Fix shipped in codex-claude **1.8.9** — pending live verification (see [Resolution](#resolution))
+**Status:** Fix shipped in codex-claude **1.8.11** (structural fix landed 1.8.9; hardened through 1.8.10–1.8.11 over two review rounds) — pending live verification (see [Resolution](#resolution))
 **Reported:** 2026-07-20
 **Reporter:** observed during `boomi-mcp-server` issue #137
 
@@ -367,9 +367,11 @@ Notes:
 
 ## Resolution
 
-Shipped in codex-claude **1.8.9** (`docs/plans/2026-07-20-detached-primary-stage2.md`). The reported
-symptom is real and reproduced, but **two central claims of this report are wrong**, and the fix took a
-different shape as a result:
+Shipped in codex-claude **1.8.9** (`docs/plans/2026-07-20-detached-primary-stage2.md`) and hardened
+through **1.8.11** over two follow-up Codex review rounds
+(`docs/plans/2026-07-20-detached-review-hardening-1811.md`). The reported symptom is real and
+reproduced, but **two central claims of this report are wrong**, and the fix took a different shape as
+a result:
 
 - **Not a two-line divergence from the sibling drivers.** `commit-review-round.mjs:141-155` passes
   `deadlineMs: WAIT_TIMEOUT_MS` — the *same* 540000 as `waitTimeoutMs` — and omits `onWaitExpiry`, so
