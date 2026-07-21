@@ -46,6 +46,10 @@ const TEARDOWN_POLL_MS = 100;
 // complete, and hanging forever is worse than the truncation it guards against.
 const FLUSH_TIMEOUT_MS = 60000;
 const UNRESOLVED = '(unresolved)';
+// A canonical git object name: 40 hex (SHA-1) or 64 hex (SHA-256). The completion marker
+// (last-reviewed-sha) is written from `start-head`, and the recovery reader validates this exact shape,
+// so a start-head that is not a real SHA must never certify — the marker would be unverifiable provenance.
+const SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 const warn = (msg) => process.stderr.write(`[collect] ${msg}\n`);
 
@@ -400,6 +404,9 @@ if (terminal === 'completed') {
   const gaps = [];
   // What the trailer claims about the reviewed tree.
   if (startHead === UNRESOLVED) gaps.push('no start HEAD recorded');
+  // The marker written on success IS start-head; if it is not a canonical SHA the completion record
+  // would be unverifiable, so refuse rather than write garbage the recovery reader must then reject.
+  else if (!SHA_RE.test(startHead)) gaps.push(`start HEAD '${startHead}' is not a canonical git SHA`);
   if (dirty === UNRESOLVED) gaps.push('no readable dirty flag — cannot attest what was reviewed');
   if (scopeLabel === UNRESOLVED) gaps.push('no review scope recorded');
   // A complete, self-consistent run directory: the recipe writes all of these in one strict-mode
