@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeRepo, seamEnv, rmDir, pidAlive, git } from './fixtures/helpers.mjs';
@@ -304,6 +304,22 @@ test('the final verdict is persisted to `phase`, matching the STATUS trailer, so
   assert.equal(lastTwo(rb.stdout)[0], 'STATUS: failed');
   assert.equal(readFileSync(join(bad.runDir, 'phase'), 'utf8').trim(), 'failed',
     'phase must record the final verdict emitted, not the read-as-completed state');
+});
+
+test('a phase-write failure fails CLOSED: no exit-0 success, no round-marker advance', async () => {
+  // The durable verdict is part of the exit-0 claim, so it must not fail open. Here `phase` is a
+  // pre-existing directory, so writeFileSync throws EISDIR — exactly the reported repro. The collector
+  // must NOT report a clean review and must NOT advance last-reviewed-sha (a marker moved past a round
+  // whose verdict could not be recorded would silently shrink the next review's scope).
+  const s = await liveSession('ok');
+  mkdirSync(join(s.runDir, 'phase'));                  // force EISDIR on the phase write
+  const r = await collect(s.runDir, 'completed');
+  assert.equal(r.code, 2, 'an unrecordable verdict must never exit 0');
+  assert.equal(lastTwo(r.stdout)[0], 'STATUS: failed');
+  assert.match(r.stderr, /could not record final phase/);
+  assert.match(r.stderr, /durable verdict could not be persisted/);
+  assert.ok(!existsSync(join(s.runDir, 'last-reviewed-sha')),
+    'the round marker must not advance when the verdict could not be persisted');
 });
 
 test('the teardown override is refused without CODEX_DRIVE_TEST_MODE=1', async () => {

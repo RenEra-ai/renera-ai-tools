@@ -178,12 +178,40 @@ async function emit(status, reviewText, code) {
   // through, so the durable phase and the STATUS line can never diverge; and written BEFORE the flush,
   // so it is on disk even when the flush is the very thing that is lost. `teardown` records only
   // daemon liveness (orthogonal to the verdict); `phase` records the verdict itself.
-  try { writeFileSync(join(stateDir, 'phase'), `${status}\n`); }
-  catch (e) { warn(`could not record final phase (${e.message})`); }
+  //
+  // The verdict is part of the exit-0 claim, so this write FAILS CLOSED: exit 0 promises the retained
+  // directory can establish the result, and a completion whose durable verdict could not be written
+  // breaks that promise. Downgrade 0 -> 2 rather than certify a success whose evidence is missing. On
+  // a path already exiting non-zero there is nothing to protect — warn and keep the failing code.
+  let outStatus = status;
+  let outCode = code;
+  try {
+    writeFileSync(join(stateDir, 'phase'), `${status}\n`);
+  } catch (e) {
+    warn(`could not record final phase (${e.message})`);
+    if (code === 0) {
+      warn('refusing to certify a completed review whose durable verdict could not be persisted');
+      outStatus = unhappy;
+      outCode = 2;
+    }
+  }
+  // Advance the round marker ONLY for a certified success, and ONLY after `phase` is durably on disk —
+  // never before. Ordering it here means a phase failure can't leave last-reviewed-sha advanced past an
+  // uncertifiable round, which would silently shrink the NEXT review's scope. A marker write that
+  // itself fails is the same downgrade: a completion we could not record is not one we may certify.
+  if (outCode === 0 && outStatus === 'completed') {
+    try {
+      writeFileSync(join(stateDir, 'last-reviewed-sha'), `${startHead}\n`);
+    } catch (e) {
+      warn(`could not record last-reviewed-sha (${e.message})`);
+      outStatus = unhappy;
+      outCode = 2;
+    }
+  }
   const text = reviewText || '';
   const body = text ? (text.endsWith('\n') ? text : `${text}\n`) : '';
-  await flushWrite(`${body}STATUS: ${status}\nSCOPE: ${scopeLabel} head=${startHead} dirty=${dirty}\n`);
-  process.exit(code);
+  await flushWrite(`${body}STATUS: ${outStatus}\nSCOPE: ${scopeLabel} head=${startHead} dirty=${dirty}\n`);
+  process.exit(outCode);
 }
 
 const call = (cmd) => sendCommand(socket, cmd, { timeoutMs: CALL_TIMEOUT_MS });
@@ -402,16 +430,9 @@ if (terminal === 'completed') {
   }
 }
 
-// Only a confirmed-clean, completed review advances the round marker. Writing it earlier would let a
-// failed round move the baseline and silently shrink the NEXT review's scope.
-if (terminal === 'completed') {
-  try {
-    writeFileSync(join(stateDir, 'last-reviewed-sha'), `${startHead}\n`);
-  } catch (e) {
-    warn(`could not record last-reviewed-sha (${e.message})`);
-    await emit(unhappy, reviewText, 2);
-  }
-}
+// The round marker is advanced inside emit(), AFTER the durable `phase` verdict is written and only
+// for a certified exit-0 completion — so a failed round, or one whose verdict could not be persisted,
+// never moves the baseline and silently shrinks the NEXT review's scope.
 
 // The state directory is deliberately NOT removed: it holds the baseline, the round marker and the
 // cleanup evidence the enclosing task still needs. The recipe removes it when the task ends.
