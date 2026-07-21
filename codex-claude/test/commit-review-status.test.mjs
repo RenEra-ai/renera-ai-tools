@@ -9,23 +9,27 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { writeFileSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const run = promisify(execFile);
 const STATUS = fileURLToPath(new URL('../scripts/commit-review-status.mjs', import.meta.url));
 const SHA = '0123456789abcdef0123456789abcdef01234567';
+// The provenance a genuine completed run always carries; completion now requires it alongside the marker.
+const TEARDOWN = 'confirmed stopped\n';
 
 const DIRS = [];
 after(() => { for (const d of DIRS) { try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } } DIRS.length = 0; });
 
-// `<dir>` as a value means "create this entry as a directory" — the correlated-failure shape.
+// A value of `<dir>` creates the entry as a directory (the correlated-failure shape); `<symlink:target>`
+// creates it as a symlink to `target`; anything else is written as file content.
 function makeRunDir(files) {
   const d = mkdtempSync(join(tmpdir(), 'cdx-status-'));
   DIRS.push(d);
   for (const [name, val] of Object.entries(files)) {
     if (val === '<dir>') mkdirSync(join(d, name));
+    else if (typeof val === 'string' && val.startsWith('<symlink:')) symlinkSync(val.slice(9, -1), join(d, name));
     else writeFileSync(join(d, name), val);
   }
   return d;
@@ -36,8 +40,26 @@ async function status(dir) {
   return stdout.trim();
 }
 
-test('a regular last-reviewed-sha whose content equals start-head reads as completed', async () => {
-  assert.equal(await status(makeRunDir({ 'start-head': `${SHA}\n`, 'last-reviewed-sha': `${SHA}\n` })), 'completed');
+test('a regular SHA marker equal to start-head, with teardown evidence, reads as completed', async () => {
+  assert.equal(await status(makeRunDir({ 'start-head': `${SHA}\n`, 'last-reviewed-sha': `${SHA}\n`, teardown: TEARDOWN })), 'completed');
+});
+
+test('a matching marker WITHOUT teardown evidence is not completed', async () => {
+  // Provenance: the collector writes teardown (proving the daemon was torn down) before the marker, so
+  // a marker with no teardown is not a genuine finished run.
+  assert.equal(await status(makeRunDir({ 'start-head': `${SHA}\n`, 'last-reviewed-sha': `${SHA}\n` })), 'unknown');
+});
+
+test('a non-SHA marker equal to a non-SHA start-head is not completed', async () => {
+  // Equality is not enough: a matching not-a-sha (or non-hex placeholder) must be rejected.
+  assert.equal(await status(makeRunDir({ 'start-head': 'not-a-sha\n', 'last-reviewed-sha': 'not-a-sha\n', teardown: TEARDOWN })), 'unknown');
+});
+
+test('a SYMLINKED marker pointing at a valid SHA file is not completed', async () => {
+  // A symlinked record has no provenance — lstatSync must reject it even though it resolves to a
+  // regular file holding the exact SHA.
+  const d = makeRunDir({ 'start-head': `${SHA}\n`, 'real-sha': `${SHA}\n`, 'last-reviewed-sha': '<symlink:real-sha>', teardown: TEARDOWN });
+  assert.equal(await status(d), 'unknown');
 });
 
 test('a last-reviewed-sha DIRECTORY is NEVER completion — the correlated-failure shape reads unknown', async () => {
@@ -80,7 +102,7 @@ test('a run directory with no records reads unknown', async () => {
 
 test('a valid completion marker is authoritative even if a stale phase also exists', async () => {
   // Completion is checked first; a leftover phase cannot override a marker that holds the exact SHA.
-  assert.equal(await status(makeRunDir({ 'start-head': `${SHA}\n`, 'last-reviewed-sha': `${SHA}\n`, phase: 'failed\n' })), 'completed');
+  assert.equal(await status(makeRunDir({ 'start-head': `${SHA}\n`, 'last-reviewed-sha': `${SHA}\n`, teardown: TEARDOWN, phase: 'failed\n' })), 'completed');
 });
 
 test('usage error without --state-dir exits 1', async () => {

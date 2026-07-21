@@ -11,9 +11,13 @@
 //
 // Prints exactly one line — completed | failed | timeout | unknown — and exits 0 (it is a pure read of a
 // retained directory; the daemon is already gone). Exit 1 is usage only.
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseArgs, assertOnlyFlags } from '../lib/verbs.mjs';
+
+// A canonical git object name: 40 hex (SHA-1) or 64 hex (SHA-256). Equality to start-head is not
+// enough — both must be real SHAs, or a matching not-a-sha / non-hex placeholder would read as success.
+const SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 const USAGE = 'usage: commit-review-status.mjs --state-dir <dir>';
 
@@ -38,12 +42,13 @@ if (parsed.positional !== undefined) die(`unexpected argument '${parsed.position
 const stateDir = parsed.flags['state-dir'];
 if (typeof stateDir !== 'string' || !stateDir.trim()) die('--state-dir requires a non-blank value', 1);
 
-// The load-bearing distinction: a REGULAR file only. statSync().isFile() rejects a directory (the exact
-// shape the correlated-double-failure path leaves behind when the atomic write could not replace it),
-// and a caught error rejects a missing/unreadable path. Mere existence never counts.
+// The load-bearing distinction: a REGULAR file only, checked with lstatSync — NOT statSync — so a
+// SYMLINK is rejected even when it points at a regular file (a symlinked record has no provenance; it
+// can aim anywhere). isFile() also rejects a directory (the shape the correlated-double-failure path
+// leaves behind), and a caught error rejects a missing/unreadable path. Mere existence never counts.
 function readRegularFile(dir, name) {
   try {
-    if (!statSync(join(dir, name)).isFile()) return null;
+    if (!lstatSync(join(dir, name)).isFile()) return null;
     const raw = readFileSync(join(dir, name), 'utf8').trim();
     return raw.length ? raw : null;
   } catch {
@@ -54,10 +59,15 @@ function readRegularFile(dir, name) {
 const dir = stateDir.trim();
 const startHead = readRegularFile(dir, 'start-head');
 const marker = readRegularFile(dir, 'last-reviewed-sha');
+const teardown = readRegularFile(dir, 'teardown');
 
-// Completed IFF the marker is a regular readable file AND holds the exact reviewed SHA. Requiring the
-// content to equal start-head rejects a directory, an empty file, and a stale placeholder alike.
-if (startHead && marker && marker === startHead) {
+// Completed requires the FULL provenance of a genuine finished run, not just a matching string:
+//   - `start-head` is a canonical SHA and the marker holds that exact value (rejects a directory, an
+//     empty file, a stale placeholder, a matching not-a-sha, and — via readRegularFile — a symlink), and
+//   - teardown evidence is present (`confirmed stopped`). The collector writes that only after proving
+//     the daemon was torn down, and always BEFORE the marker — so a marker without it is not a real
+//     completed run.
+if (startHead && SHA_RE.test(startHead) && marker === startHead && teardown === 'confirmed stopped') {
   process.stdout.write('completed\n');
   process.exit(0);
 }

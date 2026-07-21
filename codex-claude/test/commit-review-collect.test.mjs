@@ -489,6 +489,19 @@ test('a start.json stripped of cwd blocks certification (the daemon repo is unve
   assert.match(r.stderr, /cwd was not positively matched|records no cwd/);
 });
 
+test('a start-head that is not a canonical git SHA blocks certification', async () => {
+  // The marker written on success IS start-head. If it is not a real SHA (tampered or garbage) the
+  // completion record would be unverifiable provenance, so the collector must refuse rather than write
+  // it and leave the recovery reader to reject it.
+  const s = await liveSession('ok');
+  writeFileSync(join(s.runDir, 'start-head'), 'not-a-real-sha\n');
+  const r = await collect(s.runDir, 'completed');
+  assert.equal(r.code, 2);
+  assert.equal(lastTwo(r.stdout)[0], 'STATUS: failed');
+  assert.match(r.stderr, /not a canonical git SHA/);
+  assert.ok(!existsSync(join(s.runDir, 'last-reviewed-sha')));
+});
+
 test('a start.json stripped of pid blocks certification', async () => {
   const s = await liveSession('ok');
   const st = JSON.parse(readFileSync(join(s.runDir, 'start.json'), 'utf8'));
