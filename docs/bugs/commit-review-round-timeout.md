@@ -3,7 +3,7 @@
 **Component:** `codex-claude` plugin — `scripts/commit-review-round.mjs`
 **Version observed:** codex-claude **1.8.8**, Codex CLI **0.144.5**
 **Severity:** High — the documented primary Stage-2 review path never succeeds
-**Status:** Fix shipped in codex-claude **1.8.15** (structural fix landed 1.8.9; hardened through 1.8.10–1.8.15 over six review rounds) — pending live verification (see [Resolution](#resolution))
+**Status:** Fix shipped in codex-claude **1.8.16** (structural fix landed 1.8.9; hardened through 1.8.10–1.8.16 over seven review rounds) — pending live verification (see [Resolution](#resolution))
 **Reported:** 2026-07-20
 **Reporter:** observed during `boomi-mcp-server` issue #137
 
@@ -368,12 +368,13 @@ Notes:
 ## Resolution
 
 Shipped in codex-claude **1.8.9** (`docs/plans/2026-07-20-detached-primary-stage2.md`) and hardened
-through **1.8.15** over six follow-up Codex review rounds
+through **1.8.16** over seven follow-up Codex review rounds
 (`docs/plans/2026-07-20-detached-review-hardening-1811.md`,
 `docs/plans/2026-07-20-detached-review-hardening-1812.md`,
 `docs/plans/2026-07-20-detached-review-hardening-1813.md`,
 `docs/plans/2026-07-20-detached-review-hardening-1814.md`,
-`docs/plans/2026-07-20-detached-review-hardening-1815.md`). The reported symptom is real and
+`docs/plans/2026-07-20-detached-review-hardening-1815.md`,
+`docs/plans/2026-07-20-detached-review-hardening-1816.md`). The reported symptom is real and
 reproduced, but **two central claims of this report are wrong**, and the fix took a different shape as
 a result:
 

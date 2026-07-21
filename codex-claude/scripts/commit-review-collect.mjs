@@ -28,7 +28,7 @@
 // Exit 0 means, and ONLY means: a completed, non-empty, attested review whose daemon is confirmed
 // stopped. Exit 1 is usage/preflight — no session was ever started, so there is nothing to attest.
 // Exit 2 is everything else, and always carries the trailer pair.
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { sendCommand } from '../lib/client.mjs';
 import { parseArgs, assertOnlyFlags } from '../lib/verbs.mjs';
@@ -170,44 +170,65 @@ function flushWrite(text) {
 // Output is BUFFERED until after the stop attempt: printing the review first would let a cleanup
 // failure arrive after a body the gate has already accepted, and the trailers must be the last two
 // lines of THIS call's stdout.
+// Durable write via a sibling temp + rename. rename(2) is atomic on a POSIX filesystem, so a reader
+// (recovery) never sees a torn file, and a failed write leaves only the temp — which we remove — never
+// a partial target. This is why the marker path needs no separate "clean up a partial marker" step:
+// there is never a partial marker to clean. THROWS on failure so the caller can fail closed.
+function atomicWrite(name, contents) {
+  const target = join(stateDir, name);
+  const tmp = `${target}.tmp`;
+  try {
+    writeFileSync(tmp, contents);
+    renameSync(tmp, target);
+  } catch (e) {
+    try { rmSync(tmp, { force: true }); } catch { /* nothing to clean up */ }
+    throw e;
+  }
+}
+
 async function emit(status, reviewText, code) {
   // Persist the FINAL verdict durably before the flush. stdout is the primary channel, but it is a
   // pipe a dropped turn or a truncated capture can lose; the retained run directory must still be able
-  // to establish the collection result — this is the `phase` file the design contract names. Written
-  // from the SAME `status` that goes to the trailer, at the single choke point every exit funnels
-  // through, so the durable phase and the STATUS line can never diverge; and written BEFORE the flush,
-  // so it is on disk even when the flush is the very thing that is lost. `teardown` records only
-  // daemon liveness (orthogonal to the verdict); `phase` records the verdict itself.
+  // to establish the collection result — this is the `phase` file the design contract names. `phase`
+  // is written from the FINAL emitted verdict, so the durable record and the STATUS line can never
+  // diverge; and before the flush, so it is on disk even when the flush is the very thing lost.
+  // `teardown` records only daemon liveness (orthogonal); `phase` records the verdict.
   //
-  // The verdict is part of the exit-0 claim, so this write FAILS CLOSED: exit 0 promises the retained
-  // directory can establish the result, and a completion whose durable verdict could not be written
-  // breaks that promise. Downgrade 0 -> 2 rather than certify a success whose evidence is missing. On
-  // a path already exiting non-zero there is nothing to protect — warn and keep the failing code.
+  // A would-be exit-0 completion is certified only if BOTH the verdict AND the round marker reach disk
+  // (exit 0 promises the directory can establish the result AND that the round advanced). If EITHER
+  // write fails, downgrade 0 -> 2 and REWRITE `phase` to the final verdict — otherwise a marker failure
+  // would leave `phase` claiming `completed` next to a `STATUS: failed` trailer. The marker is the LAST
+  // write, so a marker success implies nothing after it can fail: the marker never outlives its
+  // certification, and no marker ever needs undoing.
   let outStatus = status;
   let outCode = code;
-  try {
-    writeFileSync(join(stateDir, 'phase'), `${status}\n`);
-  } catch (e) {
-    warn(`could not record final phase (${e.message})`);
-    if (code === 0) {
+  const writePhase = (v) => {
+    try { atomicWrite('phase', `${v}\n`); return true; }
+    catch (e) { warn(`could not record final phase (${e.message})`); return false; }
+  };
+
+  if (code === 0) {
+    let certified = writePhase('completed');
+    if (!certified) {
       warn('refusing to certify a completed review whose durable verdict could not be persisted');
+    } else {
+      try {
+        atomicWrite('last-reviewed-sha', `${startHead}\n`);
+      } catch (e) {
+        warn(`could not record last-reviewed-sha (${e.message})`);
+        warn('refusing to certify a completed review whose round marker could not be persisted');
+        certified = false;
+      }
+    }
+    if (!certified) {
       outStatus = unhappy;
       outCode = 2;
+      writePhase(unhappy);   // reconcile: `phase` must equal the FINAL verdict, never the tentative one
     }
+  } else {
+    writePhase(status);      // best-effort durable record of failed/timeout for recovery
   }
-  // Advance the round marker ONLY for a certified success, and ONLY after `phase` is durably on disk —
-  // never before. Ordering it here means a phase failure can't leave last-reviewed-sha advanced past an
-  // uncertifiable round, which would silently shrink the NEXT review's scope. A marker write that
-  // itself fails is the same downgrade: a completion we could not record is not one we may certify.
-  if (outCode === 0 && outStatus === 'completed') {
-    try {
-      writeFileSync(join(stateDir, 'last-reviewed-sha'), `${startHead}\n`);
-    } catch (e) {
-      warn(`could not record last-reviewed-sha (${e.message})`);
-      outStatus = unhappy;
-      outCode = 2;
-    }
-  }
+
   const text = reviewText || '';
   const body = text ? (text.endsWith('\n') ? text : `${text}\n`) : '';
   await flushWrite(`${body}STATUS: ${outStatus}\nSCOPE: ${scopeLabel} head=${startHead} dirty=${dirty}\n`);
