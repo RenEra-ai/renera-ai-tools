@@ -223,7 +223,12 @@ export class Daemon {
     }
     this._beginTurn({ isReview: true });
     this._sendStart(METHODS.REVIEW_START, params, 'review/start');
-    return { ok: true, status: 'running', scope: resolved.label };
+    // `turnToken` is this turn's `gen` — a per-daemon monotonic id assigned synchronously in
+    // _beginTurn (unlike turn.id, which the app-server assigns asynchronously and is null here). It
+    // lets the collector bind its collected turn to THIS exact review invocation: any later turn
+    // (another review, or a plain send) gets a higher gen, so a stale review.json no longer matches
+    // what `read` returns. `kind:'review'` proves only the category; the token proves the instance.
+    return { ok: true, status: 'running', scope: resolved.label, turnToken: this.turn.gen };
   }
 
   // A review may only run on a thread we STARTED with the review profile. A resumed thread carries
@@ -477,6 +482,10 @@ export class Daemon {
     // actually reading is the review. The flags reflect the current (possibly reset) turn, so once a
     // later `send` overwrites `this.turn`, `read` reports isReview:false.
     res.kind = this.turn.isReview ? 'review' : this.turn.isPlan ? 'plan' : 'turn';
+    // The per-turn token (see _startReview). `kind` alone cannot tell review A from a later review B
+    // — both are 'review'. The collector matches this against review.json's turnToken so it binds to
+    // the exact invocation, not merely to "some review ran on this session".
+    res.turnToken = this.turn.gen;
     return res;
   }
   _parkedResult() {

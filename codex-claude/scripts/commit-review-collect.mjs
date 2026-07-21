@@ -132,11 +132,20 @@ const pid = startPid ?? sidecarPid;
 // The recipe's `review` call, persisted. Its presence is the only evidence the collector has that a
 // NATIVE review was started on this session at all: a plain `send` leaves no review.json, and
 // without this check the collector would happily certify an ordinary chat turn as a code review.
+// EVERY field the `review` verb emits must be well-formed — `ok:true`, `status:'running'`, a scope,
+// and the per-turn `turnToken` — because a record missing any of them is not the output of a real
+// review start, and a half-validated one (e.g. `status` dropped) was still being accepted.
 let reviewRecord = null;
 try { reviewRecord = JSON.parse(readFileSync(join(stateDir, 'review.json'), 'utf8')); } catch { /* attested below */ }
-const reviewScope = reviewRecord && reviewRecord.ok === true
-  && typeof reviewRecord.scope === 'string' && reviewRecord.scope.trim()
-  ? reviewRecord.scope.trim() : null;
+const reviewWellFormed = reviewRecord
+  && reviewRecord.ok === true
+  && reviewRecord.status === 'running'
+  && typeof reviewRecord.scope === 'string' && reviewRecord.scope.trim().length > 0
+  && Number.isInteger(reviewRecord.turnToken);
+const reviewScope = reviewWellFormed ? reviewRecord.scope.trim() : null;
+// The token that binds review.json to the turn `read` returns. Null unless the record is fully
+// well-formed, so a malformed review.json can never accidentally match the daemon's token.
+const reviewToken = reviewWellFormed ? reviewRecord.turnToken : null;
 
 // --- helpers ---
 // process.stdout is a PIPE under the Bash tool, and pipe writes are ASYNCHRONOUS: process.exit()
@@ -215,6 +224,7 @@ let st = null;
 let threadVerified = false;
 let cwdVerified = false;
 let readKind = null;
+let readToken = null;
 
 try {
   if (socketFile && socketFile !== socket) {
@@ -265,6 +275,7 @@ try {
     if (readRes && readRes.error) throw new Error(`read returned an error (${readRes.error})`);
     reviewText = (readRes && readRes.message) || '';
     readKind = (readRes && readRes.kind) || null;
+    readToken = readRes && Number.isInteger(readRes.turnToken) ? readRes.turnToken : null;
     if (outcome === 'completed') {
       if (readRes.status === 'completed' && reviewText.trim().length > 0) {
         terminal = 'completed';
@@ -310,6 +321,16 @@ if (!(await confirmStopped())) {
 }
 if (stopError) warn(`stop reported '${stopError}' but teardown was confirmed`);
 
+// Persist the proof of teardown. The recipe gates deletion of the run directory on THIS file, not on
+// "the collector ran": a downgraded review whose daemon was nonetheless confirmed gone is safe to
+// delete, while an ownership refusal or an unconfirmed teardown never reaches here — so the file's
+// absence is exactly the set of run directories that still own a live (or unaccounted-for) daemon.
+try {
+  writeFileSync(join(stateDir, 'teardown'), `confirmed ${terminal}\n`);
+} catch (e) {
+  warn(`could not record teardown evidence (${e.message}); leave the run directory in place`);
+}
+
 // --- attestation ---
 // Exit 0 is a claim the enforcement gate trusts: "a native review of THIS scope, at THIS head, on
 // THIS tree, completed and cleaned up". Every field of that claim must be provable, or the claim is
@@ -344,6 +365,13 @@ if (terminal === 'completed') {
     gaps.push('no usable review.json — cannot prove a native review (rather than a plain send) ran on this session');
   } else if (scopeLabel !== UNRESOLVED && scopeLabel !== reviewScope) {
     gaps.push(`scope sidecar (${scopeLabel}) disagrees with review.json (${reviewScope})`);
+  }
+  // Bind to the EXACT invocation, not merely to "a review". review A then review B both read as
+  // kind:'review', but B carries a higher per-turn token than review.json captured for A. Without
+  // this, B's body would be certified under A's scope and dirty= trailer. Both tokens must be known
+  // and equal — a missing token on either side is a mismatch, never a pass.
+  if (reviewToken === null || readToken === null || reviewToken !== readToken) {
+    gaps.push(`turn token mismatch: review.json=${reviewToken ?? '(none)'}, collected turn=${readToken ?? '(none)'} — the collected turn is not the one this review.json describes`);
   }
   if (gaps.length) {
     for (const g of gaps) warn(g);

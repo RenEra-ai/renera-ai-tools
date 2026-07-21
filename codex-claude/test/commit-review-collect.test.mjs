@@ -304,6 +304,50 @@ test('a plain send AFTER the review cannot be certified by the stale review.json
   assert.ok(!existsSync(join(s.runDir, 'last-reviewed-sha')));
 });
 
+test('a SECOND review on the same session cannot be certified under the first review.json', async () => {
+  // The subtle attack `kind` alone misses: review A completes (review.json + scope describe A), then
+  // review B runs on the same socket. `read` returns B — kind:'review', so the kind check passes —
+  // but B's body would be labeled with A's scope/dirty. The per-turn token binds review.json to A's
+  // exact invocation, so B (a higher token) is refused rather than mislabeled.
+  const s = await liveSession('ok');                       // review A; review.json captured for A
+  const base = readFileSync(join(s.runDir, 'baseline'), 'utf8').trim();
+  const tokenA = JSON.parse(readFileSync(join(s.runDir, 'review.json'), 'utf8')).turnToken;
+  assert.ok(Number.isInteger(tokenA), 'review.json must carry a per-turn token');
+  const revB = await cli(['review', '--base', base, '--socket', s.socket], { env: env('ok') });
+  assert.equal(revB.code, 0, `review B failed to start: ${revB.stderr}`);
+  const tokenB = JSON.parse(revB.stdout).turnToken;
+  assert.notEqual(tokenB, tokenA, 'a second review must get a distinct token');
+  await driveToTerminal(s.socket, env('ok'));              // B is now the current turn
+  const r = await collect(s.runDir, 'completed');
+  assert.equal(r.code, 2, "review B must not certify under review A's review.json");
+  assert.equal(lastTwo(r.stdout)[0], 'STATUS: failed');
+  assert.match(r.stderr, /turn token mismatch/);
+  assert.ok(!existsSync(join(s.runDir, 'last-reviewed-sha')));
+});
+
+test('a review.json stripped of status:"running" is not well-formed and blocks certification', async () => {
+  // Only ok + scope used to be checked; a record missing the status field still certified. Every
+  // field the `review` verb emits must be present, or it is not the output of a real review start.
+  const s = await liveSession('ok');
+  const rec = JSON.parse(readFileSync(join(s.runDir, 'review.json'), 'utf8'));
+  delete rec.status;
+  writeFileSync(join(s.runDir, 'review.json'), JSON.stringify(rec));
+  const r = await collect(s.runDir, 'completed');
+  assert.equal(r.code, 2);
+  assert.equal(lastTwo(r.stdout)[0], 'STATUS: failed');
+  assert.match(r.stderr, /cannot prove a native review|turn token mismatch/);
+});
+
+test('a review.json stripped of its turnToken cannot bind to the collected turn', async () => {
+  const s = await liveSession('ok');
+  const rec = JSON.parse(readFileSync(join(s.runDir, 'review.json'), 'utf8'));
+  delete rec.turnToken;
+  writeFileSync(join(s.runDir, 'review.json'), JSON.stringify(rec));
+  const r = await collect(s.runDir, 'completed');
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /turn token mismatch|cannot prove a native review/);
+});
+
 test('a missing cwd sidecar blocks certification even though the daemon cwd still matches start.json', async () => {
   // start.json still carries cwd, so ownership and the head= attestation are provable — but the
   // recipe writes the cwd sidecar in the same block as everything else, so its absence means the run
