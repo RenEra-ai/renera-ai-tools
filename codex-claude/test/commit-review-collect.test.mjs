@@ -322,6 +322,24 @@ test('a phase-write failure fails CLOSED: no exit-0 success, no round-marker adv
     'the round marker must not advance when the verdict could not be persisted');
 });
 
+test('a round-marker write failure rewrites phase to failed — no completed verdict survives a failed exit', async () => {
+  // The ordering trap: `phase` is written 'completed' first, then the marker. If the marker write then
+  // fails, stdout downgrades to STATUS: failed / exit 2 — but the durable `phase` must be rewritten to
+  // match, or recovery reads a `completed` verdict for a round that actually exited 2. Here
+  // last-reviewed-sha is a pre-existing directory, so the marker write throws (the reported repro).
+  const s = await liveSession('ok');
+  mkdirSync(join(s.runDir, 'last-reviewed-sha'));    // force the round-marker write to fail
+  const r = await collect(s.runDir, 'completed');
+  assert.equal(r.code, 2, 'a review whose round marker could not be recorded must not exit 0');
+  assert.equal(lastTwo(r.stdout)[0], 'STATUS: failed');
+  assert.match(r.stderr, /could not record last-reviewed-sha/);
+  assert.equal(readFileSync(join(s.runDir, 'phase'), 'utf8').trim(), 'failed',
+    'the durable phase must equal the emitted STATUS, never remain completed');
+  // The atomic writer leaves no torn temp behind on a failed write.
+  assert.ok(!existsSync(join(s.runDir, 'last-reviewed-sha.tmp')), 'no partial marker temp may survive');
+  assert.ok(!existsSync(join(s.runDir, 'phase.tmp')), 'no partial phase temp may survive');
+});
+
 test('the teardown override is refused without CODEX_DRIVE_TEST_MODE=1', async () => {
   // Same fail-closed rule as the app-server seam: an ambient env collision must not be able to
   // quietly shorten the window that exists to catch orphans.
