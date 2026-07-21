@@ -249,6 +249,41 @@ test('an unconfirmed teardown downgrades a completed review and prints recovery'
   assert.ok(!existsSync(join(s.runDir, 'last-reviewed-sha')));
 });
 
+test('with NO pid on either record, teardown cannot be confirmed and no deletion marker is written', async () => {
+  // confirmStopped falls back to socket-absence when there is no PID, and pidAlive(null) is false —
+  // so a swept /tmp (socket gone, daemon alive) would masquerade as teardown and let the recipe
+  // delete a directory whose app-server still lives. With both pid records gone, teardown must be
+  // UNconfirmed and the `teardown` marker (which alone gates deletion) must never appear.
+  const s = await liveSession('ok');
+  const st = JSON.parse(readFileSync(join(s.runDir, 'start.json'), 'utf8'));
+  delete st.pid;
+  writeFileSync(join(s.runDir, 'start.json'), JSON.stringify(st));
+  rmSync(join(s.runDir, 'pid'));                       // no pid anywhere → pid === null
+  const r = await collect(s.runDir, 'completed');
+  assert.equal(r.code, 2);
+  assert.equal(lastTwo(r.stdout)[0], 'STATUS: failed');
+  assert.match(r.stderr, /no PID|teardown could not be confirmed/);
+  assert.ok(!existsSync(join(s.runDir, 'teardown')),
+    'without a PID to check, teardown is unprovable and its marker must not be written');
+  assert.ok(!existsSync(join(s.runDir, 'last-reviewed-sha')));
+});
+
+test('the teardown marker records the DAEMON fact, not a verdict that attestation later downgrades', async () => {
+  // The marker is written the instant teardown is confirmed — BEFORE the attestation gate can
+  // downgrade a read-as-completed turn to failed. Stamping the review verdict there left the file
+  // claiming `completed` next to a `STATUS: failed` trailer. Here an unreadable dirty flag forces the
+  // downgrade, yet the daemon IS gone, so the marker must exist and say only that the daemon stopped.
+  const s = await liveSession('ok');
+  writeFileSync(join(s.runDir, 'dirty'), 'perhaps\n');  // forces an attestation downgrade to failed
+  const r = await collect(s.runDir, 'completed');
+  assert.equal(r.code, 2);
+  assert.equal(lastTwo(r.stdout)[0], 'STATUS: failed', 'the trailer verdict is failed');
+  const marker = join(s.runDir, 'teardown');
+  assert.ok(existsSync(marker), 'the daemon WAS confirmed gone, so the run is safe to delete');
+  assert.equal(readFileSync(marker, 'utf8'), 'confirmed stopped\n',
+    'the marker must not claim the review completed when the emitted verdict was failed');
+});
+
 test('the teardown override is refused without CODEX_DRIVE_TEST_MODE=1', async () => {
   // Same fail-closed rule as the app-server seam: an ambient env collision must not be able to
   // quietly shorten the window that exists to catch orphans.
