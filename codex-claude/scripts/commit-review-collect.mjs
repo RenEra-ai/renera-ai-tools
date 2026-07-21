@@ -187,46 +187,34 @@ function atomicWrite(name, contents) {
 }
 
 async function emit(status, reviewText, code) {
-  // Persist the FINAL verdict durably before the flush. stdout is the primary channel, but it is a
-  // pipe a dropped turn or a truncated capture can lose; the retained run directory must still be able
-  // to establish the collection result — this is the `phase` file the design contract names. `phase`
-  // is written from the FINAL emitted verdict, so the durable record and the STATUS line can never
-  // diverge; and before the flush, so it is on disk even when the flush is the very thing lost.
-  // `teardown` records only daemon liveness (orthogonal); `phase` records the verdict.
+  // Persist the outcome durably before the flush, so the retained run directory can still establish the
+  // result when stdout — a pipe a dropped turn or a truncated capture can lose — never arrives. The
+  // record is built so a reader can NEVER infer a false success, even under a correlated double write
+  // failure (read-only fs, ENOSPC, EIO hitting every write):
   //
-  // A would-be exit-0 completion is certified only if BOTH the verdict AND the round marker reach disk
-  // (exit 0 promises the directory can establish the result AND that the round advanced). If EITHER
-  // write fails, downgrade 0 -> 2 and REWRITE `phase` to the final verdict — otherwise a marker failure
-  // would leave `phase` claiming `completed` next to a `STATUS: failed` trailer. The marker is the LAST
-  // write, so a marker success implies nothing after it can fail: the marker never outlives its
-  // certification, and no marker ever needs undoing.
+  //   - A COMPLETED round is certified by a SINGLE atomic write, `last-reviewed-sha`: its content is the
+  //     reviewed SHA (the next round's baseline) and its very EXISTENCE is the `completed` verdict. One
+  //     write means the verdict and the SHA can never disagree — and, decisively, there is NO separate
+  //     `completed` token anywhere that a later failure could leave behind as a lie. If this write
+  //     fails, nothing on disk claims completion; downgrade to failed / exit 2.
+  //   - An UNHAPPY outcome (failed/timeout, including a downgrade) writes `phase`, which records ONLY
+  //     `failed` or `timeout`, never `completed`. So if BOTH the completion write AND this write fail,
+  //     the directory holds no `last-reviewed-sha` and no `completed` — recovery reads not-completed,
+  //     which is the truth. `teardown` still records only daemon liveness (orthogonal to the verdict).
   let outStatus = status;
   let outCode = code;
-  const writePhase = (v) => {
-    try { atomicWrite('phase', `${v}\n`); return true; }
-    catch (e) { warn(`could not record final phase (${e.message})`); return false; }
-  };
-
   if (code === 0) {
-    let certified = writePhase('completed');
-    if (!certified) {
-      warn('refusing to certify a completed review whose durable verdict could not be persisted');
-    } else {
-      try {
-        atomicWrite('last-reviewed-sha', `${startHead}\n`);
-      } catch (e) {
-        warn(`could not record last-reviewed-sha (${e.message})`);
-        warn('refusing to certify a completed review whose round marker could not be persisted');
-        certified = false;
-      }
-    }
-    if (!certified) {
+    try {
+      atomicWrite('last-reviewed-sha', `${startHead}\n`);
+    } catch (e) {
+      warn(`could not record the completion result (${e.message}); refusing to certify`);
       outStatus = unhappy;
       outCode = 2;
-      writePhase(unhappy);   // reconcile: `phase` must equal the FINAL verdict, never the tentative one
     }
-  } else {
-    writePhase(status);      // best-effort durable record of failed/timeout for recovery
+  }
+  if (outCode !== 0) {
+    try { atomicWrite('phase', `${outStatus}\n`); }
+    catch (e) { warn(`could not record final phase (${e.message})`); }
   }
 
   const text = reviewText || '';
@@ -451,9 +439,11 @@ if (terminal === 'completed') {
   }
 }
 
-// The round marker is advanced inside emit(), AFTER the durable `phase` verdict is written and only
-// for a certified exit-0 completion — so a failed round, or one whose verdict could not be persisted,
-// never moves the baseline and silently shrinks the NEXT review's scope.
+// The round marker (`last-reviewed-sha`) is written inside emit(), and ONLY on a certified exit-0
+// completion — its single atomic write IS the completion record. A failed round, or one whose
+// completion could not be recorded, never writes it, so the baseline never moves for an uncertified
+// round (which would silently shrink the NEXT review's scope). `phase` carries the failed/timeout
+// verdict for those rounds.
 
 // The state directory is deliberately NOT removed: it holds the baseline, the round marker and the
 // cleanup evidence the enclosing task still needs. The recipe removes it when the task ends.
