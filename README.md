@@ -24,7 +24,7 @@ Then browse and install plugins:
 |--------|-------------|---------|
 | `immigration-guide` | DIY U.S. immigration guidance — visas, green cards, asylum, naturalization, work permits | 1.0.3 |
 | `sound-studio` | Music production with Python audio processing — mixing, mastering, stem separation, voice synthesis, composition | 1.0.0 |
-| `codex-claude` | Use Codex (GPT-5.x) as an architect & reviewer in the Claude Code dev loop; `/codex-issue` wraps the repo's own workflow in a fully autonomous architect → implement → review → PR loop, composing with a Claude Code Workflow when present (`/codex-compose-setup` makes any repo composition-ready) | 1.8.13 |
+| `codex-claude` | Use Codex (GPT-5.x) as an architect & reviewer in the Claude Code dev loop; `/codex-issue` wraps the repo's own workflow in a fully autonomous architect → implement → review → PR loop, composing with a Claude Code Workflow when present (`/codex-compose-setup` makes any repo composition-ready) | 1.8.14 |
 
 ## Structure
 

@@ -284,6 +284,28 @@ test('the teardown marker records the DAEMON fact, not a verdict that attestatio
     'the marker must not claim the review completed when the emitted verdict was failed');
 });
 
+test('the final verdict is persisted to `phase`, matching the STATUS trailer, so a lost stdout still establishes the result', async () => {
+  // stdout is a pipe a dropped turn or truncated capture can lose; the retained directory must still
+  // record what happened. `phase` is written from the same value as the STATUS line, at the single
+  // emit choke point, so the two cannot disagree. Completed first...
+  const done = await liveSession('ok');
+  const rc = await collect(done.runDir, 'completed');
+  assert.equal(rc.code, 0, rc.stderr);
+  assert.equal(lastTwo(rc.stdout)[0], 'STATUS: completed');
+  assert.equal(readFileSync(join(done.runDir, 'phase'), 'utf8').trim(), 'completed');
+
+  // ...then a downgrade: an unreadable dirty flag forces the verdict to failed AFTER the turn read as
+  // completed. `phase` must record the FINAL downgraded verdict, not the optimistic pre-attestation
+  // state — proving it is written from emit(), past every downgrade, not at read time.
+  const bad = await liveSession('ok');
+  writeFileSync(join(bad.runDir, 'dirty'), 'perhaps\n');
+  const rb = await collect(bad.runDir, 'completed');
+  assert.equal(rb.code, 2);
+  assert.equal(lastTwo(rb.stdout)[0], 'STATUS: failed');
+  assert.equal(readFileSync(join(bad.runDir, 'phase'), 'utf8').trim(), 'failed',
+    'phase must record the final verdict emitted, not the read-as-completed state');
+});
+
 test('the teardown override is refused without CODEX_DRIVE_TEST_MODE=1', async () => {
   // Same fail-closed rule as the app-server seam: an ambient env collision must not be able to
   // quietly shorten the window that exists to catch orphans.
