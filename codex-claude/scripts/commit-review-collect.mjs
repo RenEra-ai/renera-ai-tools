@@ -196,6 +196,12 @@ const recovery = () => {
 // A stop we could not confirm is the orphan case: a detached daemon plus its codex app-server left
 // running with nobody holding the socket. Never report success over it.
 async function confirmStopped() {
+  // Socket absence alone does NOT prove the process died: a swept /tmp, or a crash that unlinks the
+  // socket mid-shutdown, removes the file while the app-server lives on. Confirmation therefore needs
+  // a PID to check — and pidAlive(null) is false, so without one the socket check below would pass on
+  // its own and masquerade as teardown, letting the recipe delete a run directory that still owns a
+  // live daemon. No PID means teardown is UNprovable, so fail closed rather than assume death.
+  if (pid === null) return false;
   const deadline = Date.now() + TEARDOWN_TIMEOUT_MS;
   for (;;) {
     if (!existsSync(socket) && !pidAlive(pid)) return true;
@@ -312,9 +318,11 @@ try {
 
 if (!(await confirmStopped())) {
   recovery();
-  warn(stopError
-    ? `daemon stop failed (${stopError}) and teardown was not confirmed within ${TEARDOWN_TIMEOUT_MS}ms`
-    : `teardown was not confirmed within ${TEARDOWN_TIMEOUT_MS}ms`);
+  warn(pid === null
+    ? 'teardown could not be confirmed: no PID was recorded, and socket absence alone does not prove the daemon died'
+    : stopError
+      ? `daemon stop failed (${stopError}) and teardown was not confirmed within ${TEARDOWN_TIMEOUT_MS}ms`
+      : `teardown was not confirmed within ${TEARDOWN_TIMEOUT_MS}ms`);
   // A cleanup failure DOWNGRADES a would-be completion: an orphaned app-server is a real cost, and
   // reporting success over it is how the orphan goes unnoticed until someone finds it days later.
   await emit(unhappy, reviewText, 2);
@@ -325,8 +333,13 @@ if (stopError) warn(`stop reported '${stopError}' but teardown was confirmed`);
 // "the collector ran": a downgraded review whose daemon was nonetheless confirmed gone is safe to
 // delete, while an ownership refusal or an unconfirmed teardown never reaches here — so the file's
 // absence is exactly the set of run directories that still own a live (or unaccounted-for) daemon.
+// It records only the DAEMON-teardown fact, never the review verdict: `terminal` is still 'completed'
+// here, but the attestation gate and the round-marker write below can both downgrade it to 'failed'.
+// Stamping `terminal` would leave the file claiming `completed` next to a `STATUS: failed` trailer —
+// a contradiction in the run's own evidence. The verdict lives in the STATUS line; this file answers
+// exactly one question, "is the daemon gone?", and that answer is fixed by the time we reach here.
 try {
-  writeFileSync(join(stateDir, 'teardown'), `confirmed ${terminal}\n`);
+  writeFileSync(join(stateDir, 'teardown'), 'confirmed stopped\n');
 } catch (e) {
   warn(`could not record teardown evidence (${e.message}); leave the run directory in place`);
 }
