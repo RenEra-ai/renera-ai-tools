@@ -22,7 +22,12 @@ import { makeRepo, seamEnv, rmDir, pidAlive, git } from './fixtures/helpers.mjs'
 const run = promisify(execFile);
 const CLI = fileURLToPath(new URL('../bin/codex-drive.mjs', import.meta.url));
 const COLLECT = fileURLToPath(new URL('../scripts/commit-review-collect.mjs', import.meta.url));
+const STATUS = fileURLToPath(new URL('../scripts/commit-review-status.mjs', import.meta.url));
 const FIXTURE = fileURLToPath(new URL('./fixtures/mock-appserver.mjs', import.meta.url));
+
+// The recovery reader run against a REAL collector-produced run directory (stdout-lost simulation).
+const recoverStatus = (dir) =>
+  run(process.execPath, [STATUS, '--state-dir', dir]).then((r) => r.stdout.trim());
 
 // These spawn REAL detached, unref'd daemons. A failed assertion must not strand one (plus its mock
 // app-server) on the developer's machine, so registration happens BEFORE any assertion can throw.
@@ -344,6 +349,22 @@ test('a correlated DOUBLE write failure never yields a false success', async () 
   assert.ok(statSync(join(s.runDir, 'last-reviewed-sha')).isDirectory(),
     'the completion write must have failed, leaving no SHA behind');
   assert.ok(!existsSync(join(s.runDir, 'last-reviewed-sha.tmp')), 'no partial completion temp may survive');
+  // And the recovery reader agrees end-to-end: a directory-shaped marker is NOT read as completed.
+  assert.equal(await recoverStatus(s.runDir), 'unknown',
+    'recovery must never read a directory-shaped marker as a completion');
+});
+
+test('the recovery reader reads a real completed collection as completed and a real failed one as failed', async () => {
+  // Ties the shipped reader to the collector's actual output: a completed run leaves last-reviewed-sha
+  // holding start-head (⇒ completed); a downgraded run leaves phase=failed and no marker (⇒ failed).
+  const done = await liveSession('ok');
+  await collect(done.runDir, 'completed');
+  assert.equal(await recoverStatus(done.runDir), 'completed');
+
+  const bad = await liveSession('ok');
+  writeFileSync(join(bad.runDir, 'dirty'), 'perhaps\n');   // forces a downgrade to failed
+  await collect(bad.runDir, 'completed');
+  assert.equal(await recoverStatus(bad.runDir), 'failed');
 });
 
 test('the teardown override is refused without CODEX_DRIVE_TEST_MODE=1', async () => {
