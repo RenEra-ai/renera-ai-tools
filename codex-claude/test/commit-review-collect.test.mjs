@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { existsSync, readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeRepo, seamEnv, rmDir, pidAlive, git } from './fixtures/helpers.mjs';
@@ -284,60 +284,66 @@ test('the teardown marker records the DAEMON fact, not a verdict that attestatio
     'the marker must not claim the review completed when the emitted verdict was failed');
 });
 
-test('the final verdict is persisted to `phase`, matching the STATUS trailer, so a lost stdout still establishes the result', async () => {
+test('a lost stdout is recoverable from the run dir: last-reviewed-sha certifies completion, phase records failed/timeout', async () => {
   // stdout is a pipe a dropped turn or truncated capture can lose; the retained directory must still
-  // record what happened. `phase` is written from the same value as the STATUS line, at the single
-  // emit choke point, so the two cannot disagree. Completed first...
+  // establish what happened, and must never let a reader infer a false success. A COMPLETED round is
+  // recorded SOLELY by last-reviewed-sha (its presence is the verdict, its content the reviewed SHA) —
+  // there is no separate `completed` token that a later failure could leave behind as a lie.
   const done = await liveSession('ok');
   const rc = await collect(done.runDir, 'completed');
   assert.equal(rc.code, 0, rc.stderr);
   assert.equal(lastTwo(rc.stdout)[0], 'STATUS: completed');
-  assert.equal(readFileSync(join(done.runDir, 'phase'), 'utf8').trim(), 'completed');
+  assert.equal(readFileSync(join(done.runDir, 'last-reviewed-sha'), 'utf8').trim(), done.head,
+    'a completed round is certified by last-reviewed-sha holding the reviewed SHA');
+  assert.ok(!existsSync(join(done.runDir, 'phase')),
+    'phase is never written on a completed round — no `completed` token can ever contradict a failure');
 
-  // ...then a downgrade: an unreadable dirty flag forces the verdict to failed AFTER the turn read as
-  // completed. `phase` must record the FINAL downgraded verdict, not the optimistic pre-attestation
-  // state — proving it is written from emit(), past every downgrade, not at read time.
+  // ...and a downgrade: an unreadable dirty flag forces the verdict to failed AFTER the turn read as
+  // completed. The unhappy verdict lands in phase, and no completion record is written.
   const bad = await liveSession('ok');
   writeFileSync(join(bad.runDir, 'dirty'), 'perhaps\n');
   const rb = await collect(bad.runDir, 'completed');
   assert.equal(rb.code, 2);
   assert.equal(lastTwo(rb.stdout)[0], 'STATUS: failed');
   assert.equal(readFileSync(join(bad.runDir, 'phase'), 'utf8').trim(), 'failed',
-    'phase must record the final verdict emitted, not the read-as-completed state');
+    'phase records the final unhappy verdict for recovery');
+  assert.ok(!existsSync(join(bad.runDir, 'last-reviewed-sha')),
+    'a downgraded round writes no completion record');
 });
 
-test('a phase-write failure fails CLOSED: no exit-0 success, no round-marker advance', async () => {
-  // The durable verdict is part of the exit-0 claim, so it must not fail open. Here `phase` is a
-  // pre-existing directory, so writeFileSync throws EISDIR — exactly the reported repro. The collector
-  // must NOT report a clean review and must NOT advance last-reviewed-sha (a marker moved past a round
-  // whose verdict could not be recorded would silently shrink the next review's scope).
+test('a completion-record write failure downgrades to failed and writes no completed marker', async () => {
+  // last-reviewed-sha is the SINGLE completion record; if its write fails the round is not certified.
+  // Here it is a pre-existing directory, so the atomic write throws — the collector must downgrade to
+  // STATUS: failed / exit 2, record the failed verdict in phase, and leave NO completion record.
   const s = await liveSession('ok');
-  mkdirSync(join(s.runDir, 'phase'));                  // force EISDIR on the phase write
+  mkdirSync(join(s.runDir, 'last-reviewed-sha'));    // force the completion write to fail
   const r = await collect(s.runDir, 'completed');
-  assert.equal(r.code, 2, 'an unrecordable verdict must never exit 0');
+  assert.equal(r.code, 2, 'a review whose completion could not be recorded must not exit 0');
   assert.equal(lastTwo(r.stdout)[0], 'STATUS: failed');
-  assert.match(r.stderr, /could not record final phase/);
-  assert.match(r.stderr, /durable verdict could not be persisted/);
-  assert.ok(!existsSync(join(s.runDir, 'last-reviewed-sha')),
-    'the round marker must not advance when the verdict could not be persisted');
-});
-
-test('a round-marker write failure rewrites phase to failed — no completed verdict survives a failed exit', async () => {
-  // The ordering trap: `phase` is written 'completed' first, then the marker. If the marker write then
-  // fails, stdout downgrades to STATUS: failed / exit 2 — but the durable `phase` must be rewritten to
-  // match, or recovery reads a `completed` verdict for a round that actually exited 2. Here
-  // last-reviewed-sha is a pre-existing directory, so the marker write throws (the reported repro).
-  const s = await liveSession('ok');
-  mkdirSync(join(s.runDir, 'last-reviewed-sha'));    // force the round-marker write to fail
-  const r = await collect(s.runDir, 'completed');
-  assert.equal(r.code, 2, 'a review whose round marker could not be recorded must not exit 0');
-  assert.equal(lastTwo(r.stdout)[0], 'STATUS: failed');
-  assert.match(r.stderr, /could not record last-reviewed-sha/);
+  assert.match(r.stderr, /could not record the completion result/);
   assert.equal(readFileSync(join(s.runDir, 'phase'), 'utf8').trim(), 'failed',
-    'the durable phase must equal the emitted STATUS, never remain completed');
-  // The atomic writer leaves no torn temp behind on a failed write.
-  assert.ok(!existsSync(join(s.runDir, 'last-reviewed-sha.tmp')), 'no partial marker temp may survive');
+    'the unhappy verdict lands in phase; no `completed` token is ever written');
+  assert.ok(!existsSync(join(s.runDir, 'last-reviewed-sha.tmp')), 'no partial completion temp may survive');
   assert.ok(!existsSync(join(s.runDir, 'phase.tmp')), 'no partial phase temp may survive');
+});
+
+test('a correlated DOUBLE write failure never yields a false success', async () => {
+  // The residual hole from the earlier two-file design: if the completion write fails AND the fallback
+  // verdict write ALSO fails (one read-only fs / ENOSPC / EIO hitting both), a reader must still not be
+  // able to infer a `completed`. Force both by pre-creating last-reviewed-sha AND phase as directories,
+  // so every atomicWrite onto them throws.
+  const s = await liveSession('ok');
+  mkdirSync(join(s.runDir, 'last-reviewed-sha'));    // completion write fails
+  mkdirSync(join(s.runDir, 'phase'));                // fallback verdict write fails too
+  const r = await collect(s.runDir, 'completed');
+  assert.equal(r.code, 2, 'a review whose result could not be recorded must never exit 0');
+  assert.equal(lastTwo(r.stdout)[0], 'STATUS: failed');
+  assert.match(r.stderr, /could not record the completion result/);
+  // No readable completion record exists: last-reviewed-sha stayed a directory (the write failed), so a
+  // recovery reader finds no reviewed SHA there and can never mistake this round for a success.
+  assert.ok(statSync(join(s.runDir, 'last-reviewed-sha')).isDirectory(),
+    'the completion write must have failed, leaving no SHA behind');
+  assert.ok(!existsSync(join(s.runDir, 'last-reviewed-sha.tmp')), 'no partial completion temp may survive');
 });
 
 test('the teardown override is refused without CODEX_DRIVE_TEST_MODE=1', async () => {

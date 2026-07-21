@@ -2,8 +2,9 @@
 
 Round 7 of independent Codex review. One P2, again a residue of the previous round: 1.8.15 made the
 `phase` write fail closed, but wrote `phase` *before* the round marker, so a marker-write failure left
-`phase` claiming `completed` next to a downgraded `STATUS: failed`. Fixed in **1.8.16**. The local cache
-is still 1.8.9 (no live review has run), so nothing here is a field regression.
+`phase` claiming `completed` next to a downgraded `STATUS: failed`. Fixed in **1.8.16**. The plugin
+cache has since been updated to 1.8.16, but no live review has yet run against the detached path, so
+nothing here is a field regression.
 
 ## Round 7 finding
 
