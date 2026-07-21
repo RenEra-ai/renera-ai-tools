@@ -171,6 +171,15 @@ function flushWrite(text) {
 // failure arrive after a body the gate has already accepted, and the trailers must be the last two
 // lines of THIS call's stdout.
 async function emit(status, reviewText, code) {
+  // Persist the FINAL verdict durably before the flush. stdout is the primary channel, but it is a
+  // pipe a dropped turn or a truncated capture can lose; the retained run directory must still be able
+  // to establish the collection result — this is the `phase` file the design contract names. Written
+  // from the SAME `status` that goes to the trailer, at the single choke point every exit funnels
+  // through, so the durable phase and the STATUS line can never diverge; and written BEFORE the flush,
+  // so it is on disk even when the flush is the very thing that is lost. `teardown` records only
+  // daemon liveness (orthogonal to the verdict); `phase` records the verdict itself.
+  try { writeFileSync(join(stateDir, 'phase'), `${status}\n`); }
+  catch (e) { warn(`could not record final phase (${e.message})`); }
   const text = reviewText || '';
   const body = text ? (text.endsWith('\n') ? text : `${text}\n`) : '';
   await flushWrite(`${body}STATUS: ${status}\nSCOPE: ${scopeLabel} head=${startHead} dirty=${dirty}\n`);
