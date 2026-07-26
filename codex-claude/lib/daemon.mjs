@@ -1,4 +1,5 @@
 import { createServer } from 'node:net';
+import { createHash } from 'node:crypto';
 import { unlinkSync, existsSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { AppServer } from './appserver.mjs';
@@ -11,12 +12,19 @@ import { resolveReviewTarget, buildNativeReviewTarget } from './git-scope.mjs';
 // minutes and are bounded client-side. This only ever fires on a protocol violation, so it is short.
 const RESPONSE_BACKSTOP_MS = 5000;
 
+// UTF-8 sha256, hex. The dispatcher hashes the prompt FILE's bytes; the daemon hashes the string it
+// was actually asked to send. For any valid UTF-8 prompt those are the same bytes — which is the
+// whole basis of the gate, and why the CLI reads the file itself (`--prompt-file`) instead of
+// letting a shell's `$(cat …)` reshape it first.
+const sha256Hex = (s) => createHash('sha256').update(Buffer.from(String(s), 'utf8')).digest('hex');
+
 // A review session must be exactly the profile the companion uses. `review` refuses on anything else
 // rather than quietly reviewing under a writable sandbox or on a resumed general-purpose thread.
 export const REVIEW_PROFILE = { sandbox: 'read-only', approvalPolicy: 'never', ephemeral: true };
 
 export class Daemon {
-  constructor({ socketPath, appServerOpts = {}, clientInfo, resume = null, model = null, codexHome = null, cwd = null, profile = null }) {
+  constructor({ socketPath, appServerOpts = {}, clientInfo, resume = null, model = null, codexHome = null, cwd = null, profile = null,
+    privateSession = false, gatePromptPolicy = null }) {
     this.socketPath = socketPath;
     this.appServerOpts = appServerOpts;
     this.clientInfo = clientInfo;
@@ -29,6 +37,15 @@ export class Daemon {
     this.cwd = resolvePath(cwd || process.cwd());
     // Thread profile recorded at start (sandbox/approvalPolicy/ephemeral). null = a plain thread.
     this.profile = profile;
+    // GATE session state. `privateSession` is recorded (not inferred) so `gate_snapshot` can prove
+    // it: a shared session's socket can be redirected by any concurrent `start`, so a gate that ran
+    // on one is not attestable. `gatePromptPolicy` = {allowed: [sha256…]} restricts which prompts
+    // may start a turn AT ALL — the helper agent holds a live socket, and this is what stops it
+    // substituting its own cheap prompt and having that turn certify the gate.
+    this.privateSession = privateSession === true;
+    this.gatePromptPolicy = gatePromptPolicy && Array.isArray(gatePromptPolicy.allowed) && gatePromptPolicy.allowed.length
+      ? { allowed: [...gatePromptPolicy.allowed] }
+      : null;
     this.app = null;
     this.server = null;
     this.threadId = null;
@@ -53,7 +70,7 @@ export class Daemon {
   _freshTurn(extra = {}) {
     return {
       id: null, status: 'idle', buffer: '', planBuffer: '', planText: null, parked: null,
-      message: null, isPlan: false, isReview: false, reviewText: null,
+      message: null, isPlan: false, isReview: false, reviewText: null, promptSha256: null,
       gen: this._gen, awaitingResponse: false, buffered: [], backstop: null, finalized: false,
       cancelRequested: false, lastEventAt: null, eventCount: 0,
       ...extra,
@@ -151,6 +168,21 @@ export class Daemon {
       // ~/.codex-drive/state.json, and therefore state.cwd) can still resolve a relative --out
       // against the repo this daemon actually runs in.
       case 'read': return { ...this._completedResult(), cwd: this.cwd };
+      // INTERNAL — deliberately NOT a `codex-drive` verb. The gate collector needs identity
+      // (pid/thread/cwd/private/prompt policy) and the turn result in ONE reply: taken as two calls,
+      // a turn could advance between them and the record would bind an identity to a result that
+      // never belonged to it. A daemon from an older build answers `unknown_cmd`, which is the
+      // collector's explicit runtime-skew signal rather than a silently weaker check.
+      case 'gate_snapshot': return {
+        gateProtocol: 1,
+        pid: process.pid,
+        private: this.privateSession,
+        threadId: this.threadId,
+        cwd: this.cwd,
+        gatePromptSha256: this.gatePromptPolicy ? [...this.gatePromptPolicy.allowed] : [],
+        promptSha256: this.turn.promptSha256,
+        ...this._completedResult(),
+      };
       case 'interrupt': return this._interrupt();
       case 'status': return {
         threadId: this.threadId, turnStatus: this.turn.status,
@@ -178,6 +210,14 @@ export class Daemon {
     if (this._appExited) return { error: 'app_server_exited' };
     if (this.restartRequired) return { error: 'restart_required', reason: this.restartReason };
     if (this.turn.status === 'running' || this.turn.status === 'awaiting_input') return { error: 'busy' };
+    // GATE POLICY. Checked BEFORE _beginTurn, so a refused prompt starts no turn and spends no
+    // `gen` — the turn token stays a truthful count of turns this session actually ran, which is
+    // what the collector binds its attestation to. Hashing the exact prompt bytes is the point:
+    // the helper agent is trusted with a socket, not with the contents of the review.
+    const promptSha256 = sha256Hex(String(prompt ?? ''));
+    if (this.gatePromptPolicy && !this.gatePromptPolicy.allowed.includes(promptSha256)) {
+      return { error: 'wrong_gate_prompt', allowed: this.gatePromptPolicy.allowed.length };
+    }
     // mode: 'plan' | 'default' | undefined. plan & default set collaborationMode (model required);
     // undefined = plain send (no collaborationMode; inherits the thread's current mode).
     const explicitMode = mode === 'plan' || mode === 'default' ? mode : undefined;
@@ -197,15 +237,23 @@ export class Daemon {
     // plan) is NOT plan-producing, so a review's internal-checklist item/plan/delta can't shadow its
     // agentMessage/VERDICT. (plan-round's static re-ask therefore issues an explicit `plan` turn, not a
     // bare `send`.) Per-turn, so a rejected start can never desync it from the server thread.
-    this._beginTurn({ isPlan: explicitMode === 'plan' });
+    this._beginTurn({ isPlan: explicitMode === 'plan', promptSha256 });
     this._sendStart(METHODS.TURN_START, params, 'turn/start');
     return { ok: true, status: 'running' };
   }
+
+  // A gate session accepts ONLY its hashed prompts, and `review` carries no prompt at all — so it
+  // has nothing the policy could bind. Left open, it was a way to DESTROY evidence rather than forge
+  // it: a native review on a gate session replaces the completed, policy-approved turn with one the
+  // collector must refuse. Fail closed with the same error the prompt gate uses.
+  _gateBlocksReview() { return this.gatePromptPolicy ? { error: 'wrong_gate_prompt' } : null; }
 
   // Native git-scoped review. Mirrors _startTurn's lifecycle; the scope is resolved and validated
   // SYNCHRONOUSLY so a bad --base is a plain command error with the turn state untouched, rather than
   // a daemon boot plus a full Codex turn that ends in an unexplained blank review.
   _startReview(base, scope) {
+    const blocked = this._gateBlocksReview();
+    if (blocked) return blocked;
     if (this.turn.status === 'running' || this.turn.status === 'awaiting_input') return { error: 'busy' };
     // The transport is gone: AppServer already rejected every pending RPC, so a new turn would be
     // written into a dead pipe and then wait forever for a response nobody will send.

@@ -36,6 +36,7 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs doctor
 | `scripts/review-round.mjs` | Short-turn one-shot review on an in-process ephemeral daemon (lives and dies inside one Bash call — not for ultra; the `codex-impl-reviewer` agent drives an owned detached session instead). |
 | **workflow** `workflows/codex-wrap.js` | **Workflow-mode** composition: brackets a repo's own no-land Workflow with a Codex architect plan + review, then lands. Invoked by `/codex-issue` when a composable `.claude/workflows/*.js` or `.mjs` file is detected. |
 | `scripts/plan-round.mjs` | Short-turn one-shot Plan-mode driver on an in-process ephemeral daemon (same one-Bash-call lifetime — not for ultra; the `codex-architect` agent drives an owned detached session instead). |
+| `scripts/gate-attest.mjs` | Terminal step of a **dispatcher-owned** Codex gate: proves the live daemon is the one the dispatcher started, takes the result from it, stops it, confirms it died, and writes the plan/review artifact + an attestation record. Its exit-0 JSON is the only thing that authorizes a gate — nothing an agent writes is trusted. |
 | **command** `/codex-compose-setup` | Makes a repo composition-ready: adds the `noLand` seam to its workflow (diff + approval) **in place**, or scaffolds a starter workflow if none exists. |
 | `templates/implement-issue.template.js` | Repo-agnostic starter workflow (already `noLand`-aware; discovers the repo's test command) used by `/codex-compose-setup` scaffolding. |
 
@@ -47,6 +48,19 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs doctor
 ## Full automation (`/codex-issue`)
 
 `/codex-issue` runs the loop in the main thread; Codex is driven by the thin `codex-architect`/`codex-impl-reviewer` subagents (dispatched via Task).
+
+**The two Codex gates are dispatcher-owned.** The main thread starts the Codex session itself
+(`start --private --gate-prompt-sha256 …`, which makes the daemon refuse any prompt it did not
+hash), hands the helper only a socket and prompt paths, and finishes the round with
+`scripts/gate-attest.mjs collect` — run against the *live* daemon, which reads the result, tears the
+session down, confirms it died, and writes the plan/review file itself. Only that collector's exit-0
+JSON authorizes a gate; nothing the helper writes or says is evidence. This exists because the
+harness can silently drop a plugin subagent's identity, in which case the "independent Codex review"
+is the dispatching model reviewing its own diff — see
+`docs/bugs/subagent-messages-not-delivered-to-main-thread.md`. For the same reason, **helpers are
+dispatched without a `name`**: a named teammate loses its plugin `subagent_type` and its report never
+returns. Third-party dispatchers that pass no `GATE_SOCKET` still get the agents' original
+self-owned behaviour.
 
 `/codex-issue <issue-number | free-text task> [--dry-run] [--base <branch>]` runs the whole loop
 hands-off in the main thread:

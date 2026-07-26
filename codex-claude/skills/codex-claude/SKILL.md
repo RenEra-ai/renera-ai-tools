@@ -160,6 +160,22 @@ Requires the `gh` CLI (authenticated) for issue intake + push/PR. Unlike the man
 (human-supervised), the loop **auto-answers** the architect's clarifying questions (via the helper
 agents) and **auto-approves** the implementation plan, then integrates the result.
 
+**Dispatch every helper WITHOUT a `name`.** A `name` puts the agent in *teammate* mode, where a
+plugin-namespaced `subagent_type` is **silently dropped** — it runs as a generic assistant with none
+of its instructions — and its final report is **never returned to the dispatcher**. Both failures are
+silent: no error, no warning. See `docs/bugs/subagent-messages-not-delivered-to-main-thread.md`; the
+same run had a helper substitute its own model's review for the Codex gate. If a dispatch surface
+cannot omit `name`, fail rather than enter teammate mode.
+
+Because that mitigation cannot be enforced from inside the plugin, the two Codex **gates** invert the
+trust boundary: the **dispatcher** starts the session (`start --private --gate-prompt-sha256 …`) and
+writes the prompts, the helper is handed only a socket and prompt paths, and
+`scripts/gate-attest.mjs collect` — run by the dispatcher against the live daemon — is the only thing
+that authorizes a gate. A session bound to a prompt hash refuses any other prompt
+(`{"error":"wrong_gate_prompt"}`), so a helper that never reached Codex has no turn to attest and one
+that substitutes a cheap prompt cannot start a turn at all. The helper agents keep their original
+self-owned recipe as a fallback when no `GATE_SOCKET` is passed.
+
 Codex is driven by thin, `Task`-free helper subagents (they isolate the verbose Codex wait-loop):
 - **codex-architect** (agent) — drives an owned, *detached private* Codex Plan-mode session (an
   ultra plan turn outlives any single Bash call; the agent polls it and always stops it) to produce
@@ -206,14 +222,14 @@ repo's workflow must read it), and **`/codex-doctor`** to preflight which mode a
 | Verb | Args | Returns |
 |---|---|---|
 | `doctor` | — | `{ codexVersion, authPresent, threads }` |
-| `start` | `[--cwd <path>] [--model <m>] [--resume <uuid> \| --resume-latest] [--force] [--private] [--sandbox <s>] [--approval-policy <p>] [--ephemeral]` | `{ ok, threadId, socket, pid, cwd, private }` — **idempotent**: refuses if a live session already exists (avoids orphaning its daemon); `--force` stops the existing one first. `--private` neither reads nor writes the global state (use with `--socket` below). Profile flags are validated **before** any existing session is probed or stopped, and are rejected on a `--resume` |
-| `plan` | `"<prompt>" [--effort <e>] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"restart_required"}` · `{error:"no_model_for_mode"}` |
-| `send` | `"<prompt>" [--effort <e>] [--mode default] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"restart_required"}` · `{error:"no_model_for_mode"}` (only with `--mode`) |
+| `start` | `[--cwd <path>] [--model <m>] [--resume <uuid> \| --resume-latest] [--force] [--private] [--sandbox <s>] [--approval-policy <p>] [--ephemeral] [--gate-prompt-sha256 <hex> [--gate-retry-prompt-sha256 <hex>]]` | `{ ok, threadId, socket, pid, cwd, private[, gatePromptSha256] }` — **idempotent**: refuses if a live session already exists (avoids orphaning its daemon); `--force` stops the existing one first. `--private` neither reads nor writes the global state (use with `--socket` below). Profile flags are validated **before** any existing session is probed or stopped, and are rejected on a `--resume`. The gate flags bind the session to those prompt hashes — any other prompt is refused with `{error:"wrong_gate_prompt"}` — and require `--private` (a shared session's socket can be redirected by any concurrent `start`) |
+| `plan` | `("<prompt>" \| --prompt-file <path>) [--effort <e>] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"restart_required"}` · `{error:"no_model_for_mode"}` · `{error:"wrong_gate_prompt"}`. **`--prompt-file` sends the file's exact bytes** — `"$(cat f)"` strips trailing newlines and is bounded by ARG_MAX, so it cannot match a gate hash |
+| `send` | `("<prompt>" \| --prompt-file <path>) [--effort <e>] [--mode default] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"restart_required"}` · `{error:"no_model_for_mode"}` (only with `--mode`) · `{error:"wrong_gate_prompt"}`. `--prompt-file` as for `plan` |
 | `review` | `[--base <ref\|sha> \| --scope <auto\|working-tree\|branch>]` | `{ ok, status:"running", scope }` · `{error:"busy"}` · `{error:"wrong_thread_profile"}` · `{error:"restart_required"}` · `{error:"<validation>"}`. **Native git-scoped commit review** (`review/start`) — distinct from a prompt-based `send` review: it takes no prompt, inherits the config's effort, and returns the built-in reviewer's findings. Requires a session started with `--sandbox read-only --approval-policy never --ephemeral`. Scope is validated synchronously: an unresolvable/non-ancestor/empty-delta base is an error, never a silent fallback |
 | `wait` | `[--timeout-ms <N>]` | `{status:"completed",message[,empty:true]}` · `{status:"question",question}` · `{status:"approval",request}` · `{status:"interrupted"\|"failed",message}` · `{status:"unsupported",request}` · `{status:"timeout"[,turnStatus,lastEventAgoMs,eventCount]}` (exit 2) — on a client-side timeout the CLI probes the daemon's `status` (bounded, best-effort) and inlines the activity fields, so working-vs-stuck is decidable from the one call; missing fields mean the probe itself failed |
 | `answer` | `--id <qid> (--option <n> \| --text "<s>")` | `{ ok }` · `{error:"no_pending_question"}` (`--option` is 1-based; one selection per call — answering resumes the turn). Exactly one of `--option`/`--text` is required and both need a real value: a valueless flag used to answer the live question with the literal text `__option:true` / `true` |
 | `approve` | `--decision allow\|deny` | `{ ok }` · `{error:"no_pending_approval"}` |
-| `read` | `[--out <path>]` | `{ status, message[, empty:true], cwd }` (last assistant message; `empty:true` flags a completed turn that produced no content). `--out` writes a non-empty message to a file; a RELATIVE path resolves against the daemon's reported `cwd`, not the caller's |
+| `read` | `[--out <path>] [--parsed-verdict]` | `{ status, message[, empty:true], cwd, kind, turnToken }` (last assistant message; `empty:true` flags a completed turn that produced no content; `kind` is `plan\|review\|turn` for the turn being READ; `turnToken` is the per-daemon turn id that binds a result to one invocation). `--out` writes a non-empty message to a file; a RELATIVE path resolves against the daemon's reported `cwd`, not the caller's. `--parsed-verdict` (boolean) adds `parsedVerdict: NO ISSUES\|ISSUES FOUND\|UNCLEAR` from the ONE shared rule (`lib/verdict.mjs`: only the FINAL non-empty line may be a verdict) — opt-in, so a plan read carries no meaningless verdict |
 | `interrupt` | — | `{ ok }` · `{error:"no_active_turn"}` (only when nothing is running or awaiting input). A turn whose `turn/start` response has not arrived yet is **also** interruptible: it is ended locally as `interrupted` and the session is marked `restartRequired` (that turn's id never reached us, so its later traffic can no longer be told apart from a new turn's) |
 | `status` | — | `{ threadId, turnStatus, parked, cwd, lastEventAgoMs, eventCount, restartRequired[, restartReason] }` — `restartRequired:true` means the session refuses new turns until `stop` + `start`. `lastEventAgoMs`/`eventCount`: ms since ANY app-server traffic this turn (own thread, delegated subagent threads, server requests) + how many such events — a running turn whose ago keeps growing while the count stands still is stuck; one that streams is merely slow |
 | `stop` | — | `{ ok }` (tears down the daemon, kills the app-server, removes the socket; the `~/.codex-drive/state.json` record is left behind as a stale entry — `start`'s liveness probe replaces it) |

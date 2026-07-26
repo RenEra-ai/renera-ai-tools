@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseArgs, toCommand, parseStartProfile, assertKnownFlags } from '../lib/verbs.mjs';
+import { parseArgs, toCommand, parseStartProfile, assertKnownFlags, parseGatePromptPolicy, promptFilePath } from '../lib/verbs.mjs';
 
 test('review maps --base / --scope, and omits what was not given', () => {
   assert.deepEqual(toCommand({ verb: 'review', flags: { base: 'abc123' } }), { cmd: 'review', base: 'abc123' });
@@ -164,4 +164,60 @@ test('a positional on a verb that takes none is an error (a forgotten flag name)
   assert.throws(() => toCommand({ verb: 'stop', positional: 'now', flags: {} }), /takes no positional/);
   // plan/send legitimately take one.
   assert.equal(toCommand({ verb: 'send', positional: 'hello', flags: {} }).prompt, 'hello');
+});
+
+test('read --parsed-verdict is boolean-only and never reaches the daemon command', () => {
+  // The field is computed CLI-side ON PURPOSE (no protocol change, so it also works against a
+  // daemon an older build started) — the wire command must stay a bare read.
+  assert.deepEqual(toCommand({ verb: 'read', flags: { 'parsed-verdict': true } }), { cmd: 'read' });
+  // Same truthiness trap as `--force no`: a valued form looks "on" while swallowing the next token.
+  assert.throws(() => toCommand({ verb: 'read', flags: { 'parsed-verdict': 'yes' } }),
+    /--parsed-verdict is a boolean flag/);
+  assert.throws(() => toCommand({ verb: 'wait', flags: { 'parsed-verdict': true } }),
+    /unknown flag --parsed-verdict for verb 'wait'/);
+});
+
+test('--prompt-file is resolved by the caller and cannot be combined with a positional', () => {
+  // The flag exists because `send "$(cat f)"` cannot deliver exact bytes: command substitution
+  // strips trailing newlines, and a gate session hashes the prompt.
+  assert.equal(promptFilePath('send', undefined, { 'prompt-file': '/tmp/p' }), '/tmp/p');
+  assert.equal(promptFilePath('plan', undefined, { 'prompt-file': '/tmp/p' }), '/tmp/p');
+  assert.equal(promptFilePath('send', 'inline prompt', {}), null);
+  assert.equal(promptFilePath('read', undefined, { 'prompt-file': '/tmp/p' }), null);
+  // Two prompt sources is ambiguous, and silently preferring one would send a prompt the caller
+  // never hashed.
+  assert.throws(() => promptFilePath('send', 'inline', { 'prompt-file': '/tmp/p' }),
+    /cannot be combined with a positional prompt/);
+  assert.throws(() => promptFilePath('send', undefined, { 'prompt-file': true }),
+    /--prompt-file requires a value/);
+  assert.doesNotThrow(() => assertKnownFlags('send', { 'prompt-file': '/tmp/p', effort: 'ultra' }));
+});
+
+test('parseGatePromptPolicy accepts a hashed gate session and rejects every unusable shape', () => {
+  assert.equal(parseGatePromptPolicy({}), null);
+  const a = 'a'.repeat(64);
+  const b = 'b'.repeat(64);
+  assert.deepEqual(parseGatePromptPolicy({ 'gate-prompt-sha256': a, private: true }), { allowed: [a] });
+  assert.deepEqual(parseGatePromptPolicy({ 'gate-prompt-sha256': a, 'gate-retry-prompt-sha256': b, private: true }),
+    { allowed: [a, b] });
+  // An identical retry prompt is not an error, just one entry.
+  assert.deepEqual(parseGatePromptPolicy({ 'gate-prompt-sha256': a, 'gate-retry-prompt-sha256': a, private: true }),
+    { allowed: [a] });
+  // A retry hash alone would restrict the session to the RE-ASK prompt and refuse the real one.
+  assert.throws(() => parseGatePromptPolicy({ 'gate-retry-prompt-sha256': b, private: true }),
+    /--gate-retry-prompt-sha256 requires --gate-prompt-sha256/);
+  assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': 'A'.repeat(64), private: true }),
+    /64 lowercase hex/);
+  assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': 'abc', private: true }), /64 lowercase hex/);
+  assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': true, private: true }),
+    /--gate-prompt-sha256 requires a value/);
+  // A shared session's socket can be redirected by any concurrent `start`, so the collector could
+  // not prove WHICH daemon it talked to.
+  assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': a }), /requires --private/);
+  // A resumed thread carries turns that predate the policy — a snapshot could attest one of those.
+  assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': a, private: true, resume: 'x' }),
+    /cannot be combined with --resume/);
+  assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': a, private: true, 'resume-latest': true }),
+    /cannot be combined with --resume/);
+  assert.doesNotThrow(() => assertKnownFlags('start', { 'gate-prompt-sha256': a, 'gate-retry-prompt-sha256': b, private: true }));
 });

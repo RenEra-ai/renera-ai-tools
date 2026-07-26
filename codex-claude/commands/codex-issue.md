@@ -40,6 +40,22 @@ push an un-clean change). `gh` (authenticated) is required for issue intake and 
 
 Follow the **codex-claude** skill for the exact `codex-drive` verb contract used by the helper agents.
 
+**HARD RULE — dispatch every helper WITHOUT a `name`.** Passing `name` puts the agent in *teammate*
+mode, where a plugin-namespaced `subagent_type` is **silently dropped** (it runs as a generic
+assistant with none of these instructions) and its final report is **never returned to you**. In the
+incident that produced this rule, three helpers ran as generic assistants and one substituted its own
+model's review for the Codex gate — see `docs/bugs/subagent-messages-not-delivered-to-main-thread.md`.
+This applies to **every** dispatch in this command — the architect, planner and reviewer, and the
+repo's own QA/review subagents in §5 and §7: an unnamespaced project-local type does keep its
+identity in teammate mode, but its report still never comes back, which is how three hours of
+finished QA work was abandoned and redone. If the Task/Agent surface you have cannot omit `name`,
+**abort** rather than enter teammate mode.
+
+That rule is a mitigation, not a guarantee — the harness may still fail to load a helper's identity.
+So the two Codex gates below do not trust what the helper *says* at all: **you** own the Codex
+session, and `scripts/gate-attest.mjs` — run by you, against the live daemon — is the only thing that
+can authorize a gate.
+
 ## 0. Preflight
 
 - `$CDX doctor`. If `codexVersion` is null or `authPresent` is false → **abort** (Codex not installed /
@@ -84,13 +100,63 @@ Decide and **say which branch you took**:
   **`/codex-compose-setup`** for the higher-fidelity engine. Proceeding in **main-thread mode**."
 - No composable workflow → **main-thread mode**. Say: "No composable workflow detected — main-thread mode."
 
-## 3. Architect design plan (Codex, read-only)
+## 3. Architect design plan (Codex, read-only) — you own the session
 
-Dispatch the **codex-architect** subagent (Task) with the issue/task text and instruct it to save to
-`--out .codex/plans/issue-<#>.md` (a slug for free-text). Parse its **first line**: `STATUS: DONE` →
-hold the absolute path it returns as `$PLAN_PATH` and **Read** the plan body from it as `$DESIGN` (the
-reviewer in §6 receives `$PLAN_PATH`; `$DESIGN` feeds the §4 planner). `STATUS: FAILED` → **abort** (no
-usable architect plan — fail loud; do not improvise one).
+**You** start the Codex session and **you** collect the result; the helper only drives the turn.
+
+**Shell variables do NOT survive between Bash calls** (only the working directory does), and the
+steps below are separate calls with a Task dispatch in the middle. So each call **prints** the paths
+it mints and every later call uses those **literal absolute paths**. Substitute them as you go.
+
+1. **Mint the two directories** (one Bash call):
+   ```bash
+   ROOT=$(cd "$(git rev-parse --show-toplevel)" && pwd -P)
+   RUN=$(mktemp -d /tmp/cdx-gate-architect.XXXXXX)      # STATE — yours alone; never given to the helper
+   SHARE=$(mktemp -d /tmp/cdx-gate-prompts.XXXXXX)      # PROMPTS — the only path the helper learns
+   printf 'ROOT=%s\nRUN_DIR=%s\nPROMPT_DIR=%s\n' "$ROOT" "$RUN" "$SHARE"
+   ```
+   The split is load-bearing: `start.json` is the collector's root of trust, and the helper is a
+   process that can write files. If it knew `RUN_DIR` it could overwrite that record with one for a
+   session of its own — so it never learns the path.
+2. **Write both prompts in full, before dispatching** (Write tool, into `<PROMPT_DIR>`):
+   `<PROMPT_DIR>/prompt` = the architect brief + the issue/task text (the body the codex-architect
+   agent documents). `<PROMPT_DIR>/retry` = the complete re-ask ("Approvals are unavailable in this
+   read-only planning session … emit the FULL file-by-file plan as plain text NOW …"). The daemon
+   accepts **only** these two, so a nudge the helper invents is refused — write the retry properly,
+   not as a stub.
+3. **Hash them and start the gate session** (one Bash call, literal paths):
+   ```bash
+   SHA() { node -e 'process.stdout.write(require("crypto").createHash("sha256").update(require("fs").readFileSync(process.argv[1])).digest("hex"))' "$1"; }
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --private --cwd "<ROOT>" \
+     --gate-prompt-sha256 "$(SHA "<PROMPT_DIR>/prompt")" \
+     --gate-retry-prompt-sha256 "$(SHA "<PROMPT_DIR>/retry")" > "<RUN_DIR>/start.json"
+   cat "<RUN_DIR>/start.json"
+   ```
+   Keep that stdout **verbatim** — the collector checks the live daemon against it. Take `socket`
+   from the printed JSON as the literal `<GATE_SOCKET>`.
+4. **Dispatch the codex-architect subagent (Task, no `name`)** passing the literals `GATE_SOCKET`,
+   `PROMPT_PATH=<PROMPT_DIR>/prompt`, `RETRY_PROMPT_PATH=<PROMPT_DIR>/retry`. It returns
+   `STATUS: READY` or `STATUS: FAILED`; either way it leaves the daemon running for you.
+5. **Collect — this, not the helper's word, is the gate:**
+   ```bash
+   node ${CLAUDE_PLUGIN_ROOT}/scripts/gate-attest.mjs collect --state-dir "<RUN_DIR>" --gate architect \
+     --outcome completed --cwd "<ROOT>" --artifact "<RUN_DIR>/plan.md" --prompt "<PROMPT_DIR>/prompt"
+   ```
+   Use `--outcome failed` (or `timeout`) if the Task errored or you gave up on it — the daemon still
+   gets torn down, and the round then cannot be certified.
+6. **Branch on the collector's JSON only.** `ok:true` → copy the artifact **and its record**:
+   ```bash
+   mkdir -p .codex/plans
+   cp "<RUN_DIR>/plan.md" .codex/plans/issue-<#>.md            # a slug for free-text
+   cp "<RUN_DIR>/attestation.json" .codex/plans/issue-<#>.attest.json
+   rm -rf "<RUN_DIR>" "<PROMPT_DIR>"
+   ```
+   Hold `.codex/plans/issue-<#>.md` as `$PLAN_PATH` and Read it as `$DESIGN` (the §4 planner's input;
+   §6 re-inlines the bytes). The attestation is the durable evidence README/SKILL advertise — copy it
+   before deleting the run dir. `ok:false` → **abort** with "Codex architect gate unattested
+   (`<reason>`)"; never improvise a plan, and never treat a `STATUS: READY` as evidence on its own.
+   If the collector reported `stopped:false`, **keep both directories** and surface the recovery line
+   it printed on stderr: something still owns a live daemon.
 
 ## 4. Claude implementation plan (read-only, plan-mode)
 
@@ -157,21 +223,63 @@ are deliberately sequential, and the single global Codex session (one in-flight 
 because the two tools happened to use separate backends — an implementation detail, not a guarantee.
 
 Compute the changed files: `git diff --name-only <START | base_sha>..HEAD` (use `base_sha` in
-Workflow-engine mode, `$START` in main-thread mode). Dispatch the **codex-impl-reviewer** subagent (Task)
-with the **plan file path `$PLAN_PATH`** (`.codex/plans/issue-<#>.md`) — **NOT** the plan prose — and
-the changed-file list; the reviewer hands `$PLAN_PATH` to its driver, which inlines the plan
-**verbatim**. You **MUST NOT** summarize, compress, drop sections from, reorder, or re-author the plan
-when handing it off — doing so lets a load-bearing constraint silently vanish before the review ever
-sees it. You **MAY** additionally pass the issue's acceptance criteria, but only as a **separate,
-clearly-labeled** block — never in place of, or merged into, the verbatim plan. Read its **last line**:
-clean **only** when it is exactly `VERDICT: NO ISSUES`. A clean verdict
-with **no** `Reviewed files:` line and no findings is a thin signal → dispatch the reviewer once more
-asking it to list the files it reviewed first; if still substance-free, accept clean. `VERDICT: ISSUES
-FOUND` / `VERDICT: UNCLEAR` with findings → §7.
+Workflow-engine mode, `$START` in main-thread mode). Then run the **same dispatcher-owned seam as §3**,
+per round, in a fresh run dir (`mktemp -d /tmp/cdx-gate-review.XXXXXX`):
+
+1. **Mint a fresh state dir and prompt dir for THIS round** exactly as §3 step 1 (`mktemp -d
+   /tmp/cdx-gate-review.XXXXXX` and `/tmp/cdx-gate-prompts.XXXXXX`), and print both — same rule, same
+   reason: the helper never learns the state dir. Use the printed literals below.
+2. **Write the brief** to `<PROMPT_DIR>/brief` (Write tool): what to review, the changed-file list,
+   and "END with a verdict on its OWN FINAL line: exactly 'VERDICT: NO ISSUES' or 'VERDICT: ISSUES
+   FOUND'". Then **assemble the prompt in Bash so the plan is copied, not retyped**:
+   ```bash
+   { cat "<PROMPT_DIR>/brief"; printf '\n\n=== ARCHITECT DESIGN PLAN (verbatim) ===\n'; cat "$PLAN_PATH"; } > "<PROMPT_DIR>/prompt"
+   ```
+   You **MUST NOT** summarize, compress, drop sections from, reorder, or re-author the plan — doing so
+   lets a load-bearing constraint silently vanish before the review ever sees it, which is why this is
+   a `cat` and not a Write. You **MAY** append the issue's acceptance criteria under a **separate**
+   `=== ISSUE ACCEPTANCE CRITERIA ===` header, never merged into the plan block. Write
+   `<PROMPT_DIR>/retry` (the complete re-ask) too.
+3. Hash both and start the gate session exactly as §3 step 3, saving stdout verbatim to
+   `<RUN_DIR>/start.json`; take the socket from it.
+4. Dispatch the **codex-impl-reviewer** subagent (Task, **no `name`**) with the literal
+   `GATE_SOCKET`, `PROMPT_PATH=<PROMPT_DIR>/prompt`, `RETRY_PROMPT_PATH=<PROMPT_DIR>/retry`. It
+   reviews and reports; it stops nothing.
+5. Collect:
+   ```bash
+   node ${CLAUDE_PLUGIN_ROOT}/scripts/gate-attest.mjs collect --state-dir "<RUN_DIR>" --gate review \
+     --outcome completed --cwd "<ROOT>" --artifact "<RUN_DIR>/review.md" \
+     --prompt "<PROMPT_DIR>/prompt" --plan "$PLAN_PATH"
+   ```
+   (`--outcome failed|timeout` if the Task died or you abandoned the round.) Passing **both**
+   `--prompt` and `--plan` is what makes the record's "reviewed against this plan" claim checkable:
+   the collector verifies the prompt is the one the turn actually ran **and** that the plan's bytes
+   are inside it, so a round where the inlining was skipped fails the gate instead of quietly
+   attesting a review that never saw the plan.
+
+**Decide from the collector's JSON, not from the helper's last line.** The findings you act on come
+from `<RUN_DIR>/review.md` — the daemon's own words, which the collector wrote. Keep the round's
+directories until you have consumed the findings (§7 reads that file); remove them at the end of the
+round, or keep them if `stopped:false`:
+
+- `ok:true` + `parsedVerdict: "NO ISSUES"` → **clean**. (A clean verdict with no `Reviewed files:`
+  line and no findings is a thin signal → run one more round asking for the file list first; if still
+  substance-free, accept clean.)
+- `ok:true` + `parsedVerdict: "ISSUES FOUND"` → §7.
+- `ok:true` + `parsedVerdict: "UNCLEAR"` **with concrete findings** in `<RUN_DIR>/review.md` → §7. Codex
+  really ran and produced actionable findings; they are worth fixing even though the verdict line
+  never landed.
+- `ok:true` + `UNCLEAR` with **no** findings → **abort** as an unusable Codex result. Do not burn a
+  review round on nothing.
+- `ok:false` → **abort** with "Codex review gate unattested (`<reason>`)". This is **not** a finding
+  and must **never** enter §7 — it means the gate did not run, and iterating on it would burn every
+  remaining round exactly as the incident did. `stopped:false` → keep the round's directories and
+  surface the recovery line.
 
 ## 7. Address findings (you, with full development context)
 
-Invoke the **receiving-code-review** skill on the reviewer's findings: verify each against the code,
+Invoke the **receiving-code-review** skill on the findings in `<RUN_DIR>/review.md` (the collector-written
+review — the helper's summary is a convenience, that file is the record): verify each against the code,
 fix only genuinely-wrong things, and **push back (in your report) on false positives** with technical
 reasoning — do not implement blindly. Then **re-run this repo's own review/QA gates on the fix**:
 - main-thread mode → dispatch the repo's gate subagents (Task) / run its gate commands as in §5,
@@ -245,6 +353,8 @@ outstanding findings and current state.
   close**. Or — if you stopped early — exactly why and the current state (branch, commits, outstanding
   findings). Be honest about anything you could not get clean or any gate that could not run.
 
-In both modes the loop never auto-merges and never closes the issue itself. Do not drive `codex-drive`
-yourself for the plan/review turns — the `codex-architect` / `codex-impl-reviewer` subagents do that, and
+In both modes the loop never auto-merges and never closes the issue itself. You DO drive `codex-drive`
+yourself for the two gate seams (§3/§6 `start` + `gate-attest collect`) — that ownership is the gate —
+but you do NOT drive the plan/review TURNS: the `codex-architect` / `codex-impl-reviewer` subagents poll
+those on the socket you hand them, and
 isolate their verbose wait-loops from this conversation.

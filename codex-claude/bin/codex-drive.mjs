@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { join, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, readdirSync, statSync } from 'node:fs';
-import { parseArgs, toCommand, parseStartProfile, assertKnownFlags } from '../lib/verbs.mjs';
+import { parseArgs, toCommand, parseStartProfile, assertKnownFlags, parseGatePromptPolicy, promptFilePath } from '../lib/verbs.mjs';
+import { parseVerdict } from '../lib/verdict.mjs';
 import { sendCommand } from '../lib/client.mjs';
 import { StateStore } from '../lib/state.mjs';
 import { Daemon } from '../lib/daemon.mjs';
@@ -27,6 +28,11 @@ async function main() {
       // every `review` on the session would be refused wrong_thread_profile.
       cwd: opts.cwd,
       profile: opts.profile,
+      // Gate identity MUST ride the payload too: the policy is enforced inside this detached
+      // process, and `private` is recorded so the collector can refuse to certify a gate that ran
+      // on a shared session (whose socket a concurrent `start` could have redirected).
+      privateSession: opts.private === true,
+      gatePromptPolicy: opts.gatePromptPolicy || null,
       // Env is inherited through the detached spawn (it passes no `env`), so the same gated test
       // seam the one-shot uses also reaches here — which is what makes the detached path testable
       // offline at all.
@@ -88,6 +94,21 @@ async function main() {
   const state = socketFlag ? null : store.readState();
   if (!socketFlag && !state) { fail('no active session; run `codex-drive start` first (or pass --socket <path>)'); }
   const socket = socketFlag || state.socket;
+  // `--prompt-file` is resolved HERE, before toCommand, so the daemon receives the file's EXACT
+  // bytes. `send "$(cat f)"` cannot: command substitution strips trailing newlines and argv is
+  // bounded by ARG_MAX (a plan-sized prompt overflows it), and a gate session hashes exact bytes.
+  let promptPath;
+  try { promptPath = promptFilePath(parsed.verb, parsed.positional, parsed.flags); }
+  catch (e) { fail(e.message); }
+  if (promptPath) {
+    let text;
+    try { text = readFileSync(promptPath, 'utf8'); }
+    catch (e) { fail(`--prompt-file could not be read: ${e.message}`); }
+    // An empty prompt is a silent no-op turn at best; the daemon would start a turn with no
+    // instructions and the gate would attest whatever the model said unprompted.
+    if (!text.trim()) fail(`--prompt-file is empty: ${promptPath}`);
+    parsed.positional = text;
+  }
   const cmd = toCommand(parsed);
   // --timeout-ms is a client-side per-call wall-clock cap (mainly for `wait`): if the daemon
   // doesn't respond in time, report {status:"timeout"} so an unattended orchestrator can interrupt.
@@ -147,6 +168,14 @@ async function main() {
       writeFileSync(abs, res.message.endsWith('\n') ? res.message : res.message + '\n');
     }
   }
+  // Opt-in deterministic verdict for the SANCTIONED detached recipe. The rule lives in
+  // lib/verdict.mjs; computing it here (not in the daemon) means no protocol change, so it also
+  // works against a session an older build started. Opt-in, not always-on: a `read` of an architect
+  // PLAN turn would otherwise carry a meaningless `parsedVerdict: "UNCLEAR"` that reads like a
+  // verdict about the plan.
+  if (parsed.verb === 'read' && parsed.flags['parsed-verdict'] === true && res && !res.error) {
+    res.parsedVerdict = parseVerdict(typeof res.message === 'string' ? res.message : '');
+  }
   process.stdout.write(JSON.stringify(res) + '\n');
   if (res.error) process.exit(2);
 }
@@ -156,8 +185,12 @@ async function startDaemon(parsed, store) {
   // before the existing-session probe below, which with --force STOPS that session. Validating later
   // means `start --force --sandbox bogus` destroys an unrelated live session and only then errors.
   let profile;
+  let gatePromptPolicy;
   try {
     profile = parseStartProfile(parsed.flags);
+    // Same reason as the profile: validated FIRST, before the existing-session probe below, which
+    // with --force STOPS that session. A malformed gate hash must never cost a live daemon.
+    gatePromptPolicy = parseGatePromptPolicy(parsed.flags);
   } catch (e) {
     fail(e.message);
   }
@@ -238,7 +271,8 @@ async function startDaemon(parsed, store) {
     }
   } catch { /* best effort — never block a start on housekeeping */ }
   const socketPath = join(store.baseDir, `d-${process.pid}-${Date.now().toString(36)}.sock`);
-  const payload = JSON.stringify({ socketPath, resume: resumeId, model: parsed.flags.model, cwd, profile });
+  const payload = JSON.stringify({ socketPath, resume: resumeId, model: parsed.flags.model, cwd, profile,
+    private: isPrivate, gatePromptPolicy });
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '__daemon', payload], {
     detached: true, stdio: 'ignore', cwd,
   });
@@ -273,7 +307,11 @@ async function startDaemon(parsed, store) {
   // A --private session stays out of the global record entirely: nothing to clobber, nothing to
   // leave behind pointing at a daemon its owner will stop.
   if (!isPrivate) store.writeState({ threadId, pid: child.pid, socket: socketPath, cwd, model: parsed.flags.model || null });
-  process.stdout.write(JSON.stringify({ ok: true, threadId, socket: socketPath, pid: child.pid, cwd, private: isPrivate }) + '\n');
+  // `gatePromptSha256` appears ONLY for a gate session: this stdout is what the dispatcher saves as
+  // start.json, and the collector cross-checks the recorded policy against the live daemon's — so a
+  // start record for a non-gate session can never be passed off as one.
+  process.stdout.write(JSON.stringify({ ok: true, threadId, socket: socketPath, pid: child.pid, cwd, private: isPrivate,
+    ...(gatePromptPolicy ? { gatePromptSha256: gatePromptPolicy.allowed } : {}) }) + '\n');
 }
 
 function fail(msg) { process.stderr.write(`codex-drive: ${msg}\n`); process.exit(1); }

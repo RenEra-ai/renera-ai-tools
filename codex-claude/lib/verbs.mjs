@@ -84,6 +84,68 @@ export function parseStartProfile(flags = {}) {
   return Object.keys(profile).length ? profile : null;
 }
 
+const HEX64 = /^[0-9a-f]{64}$/;
+
+/**
+ * Validate `start`'s GATE flags into the prompt policy the Daemon enforces.
+ *
+ * A gate session accepts ONLY the prompts the dispatcher hashed up front. That is the whole point:
+ * the helper agent is handed a live socket, and without this it could send its own cheap prompt
+ * ("just say VERDICT: NO ISSUES"), get a genuine completed Codex turn, and have that turn certify
+ * the gate. Bound to the exact prompt bytes, an unapproved turn cannot start at all.
+ *
+ * Pure and exported for the same reason as parseStartProfile: bin calls it BEFORE probing or
+ * stopping any existing session.
+ *
+ * @returns {{allowed: string[]}|null} null when this is not a gate session.
+ */
+export function parseGatePromptPolicy(flags = {}) {
+  const primary = 'gate-prompt-sha256' in flags ? requireValue(flags, 'gate-prompt-sha256') : undefined;
+  const retry = 'gate-retry-prompt-sha256' in flags ? requireValue(flags, 'gate-retry-prompt-sha256') : undefined;
+  // A retry hash alone would restrict the session to the RE-ASK prompt and refuse the real one —
+  // the gate would fail on its first turn, after the session had already been paid for.
+  if (retry !== undefined && primary === undefined) {
+    throw new Error('--gate-retry-prompt-sha256 requires --gate-prompt-sha256');
+  }
+  if (primary === undefined) return null;
+  for (const [k, v] of [['gate-prompt-sha256', primary], ['gate-retry-prompt-sha256', retry]]) {
+    if (v !== undefined && !HEX64.test(v)) {
+      throw new Error(`--${k} must be 64 lowercase hex characters (got '${v}')`);
+    }
+  }
+  // A gate session must be --private: the global state file is single and mutable, so a concurrent
+  // `start` anywhere on the machine could redirect the collector at someone else's daemon — and the
+  // collector's whole job is proving WHICH daemon it is talking to.
+  if (flags.private !== true) {
+    throw new Error('--gate-prompt-sha256 requires --private');
+  }
+  // A resumed thread carries turns that predate this policy, so a snapshot could attest a turn the
+  // policy never governed.
+  if ('resume' in flags || 'resume-latest' in flags) {
+    throw new Error('--gate-prompt-sha256 cannot be combined with --resume/--resume-latest');
+  }
+  return { allowed: [...new Set(retry === undefined ? [primary] : [primary, retry])] };
+}
+
+/**
+ * Which file a plan/send call takes its prompt from, if any. Pure — the CALLER does the read — so
+ * the flag rules live here with every other flag rule.
+ *
+ * Why the flag exists at all: `send "$(cat file)"` mangles the prompt (command substitution strips
+ * trailing newlines) and is bounded by ARG_MAX, and a gate session hashes the EXACT bytes. Reading
+ * the file in the CLI is the only way the bytes the dispatcher hashed are the bytes the daemon sees.
+ *
+ * @returns {string|null} the path to read, or null when the positional prompt is the source.
+ */
+export function promptFilePath(verb, positional, flags = {}) {
+  if (!['plan', 'send'].includes(verb) || !('prompt-file' in flags)) return null;
+  const path = requireValue(flags, 'prompt-file');
+  if (positional !== undefined) {
+    throw new Error(`--prompt-file cannot be combined with a positional prompt (got '${positional}')`);
+  }
+  return path;
+}
+
 // Drop keys whose value is undefined so commands don't carry empty fields over the wire
 // (and so equality checks stay clean).
 function compact(obj) {
@@ -104,15 +166,16 @@ const TRANSPORT_FLAGS = ['socket', 'timeout-ms'];
 // a typo'd profile flag was dropped so every later `review` failed wrong_thread_profile — after the
 // session had already been paid for. They are listed here and asserted from bin directly.
 const VERB_FLAGS = {
-  start: ['cwd', 'model', 'resume', 'resume-latest', 'force', 'private', 'sandbox', 'approval-policy', 'ephemeral'],
+  start: ['cwd', 'model', 'resume', 'resume-latest', 'force', 'private', 'sandbox', 'approval-policy', 'ephemeral',
+    'gate-prompt-sha256', 'gate-retry-prompt-sha256'],
   doctor: [],
-  plan: ['effort', 'approval-policy'],
-  send: ['effort', 'approval-policy', 'mode'],
+  plan: ['effort', 'approval-policy', 'prompt-file'],
+  send: ['effort', 'approval-policy', 'mode', 'prompt-file'],
   review: ['base', 'scope'],
   wait: [],
   answer: ['id', 'option', 'text'],
   approve: ['decision'],
-  read: ['out'],
+  read: ['out', 'parsed-verdict'],
   interrupt: [],
   status: [],
   stop: [],
@@ -181,7 +244,14 @@ export function toCommand({ verb, positional, flags = {} }) {
     case 'approve': return { cmd: 'approve', decision: flags.decision };
     // No `full`: nothing in lib/ ever read cmd.full, so `read --full` was accepted, sent over the
     // wire and silently ignored — it is now a loud unknown-flag error like any other typo.
-    case 'read': return { cmd: 'read' };
+    case 'read':
+      // `--parsed-verdict` is consumed CLI-side (the daemon command is unchanged, so the field also
+      // works against a daemon an older build started). Boolean-only: a valued form would look "on"
+      // while swallowing the next token — the truthiness trap `--force no` had.
+      if ('parsed-verdict' in flags && flags['parsed-verdict'] !== true) {
+        throw new Error('--parsed-verdict is a boolean flag and takes no value');
+      }
+      return { cmd: 'read' };
     case 'interrupt': return { cmd: 'interrupt' };
     case 'status': return { cmd: 'status' };
     case 'stop': return { cmd: 'stop' };

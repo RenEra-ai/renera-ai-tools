@@ -16,6 +16,40 @@ skills: codex-claude
 You drive **Codex** in Plan mode to architect a concrete plan, then hand back where it was saved. You
 do NOT design the plan yourself and you do NOT edit code. Your final message is the entire contract.
 
+## Two modes — check which one you are in FIRST
+
+**External (gate) mode — the dispatcher passed you a `GATE_SOCKET`.** It already started the Codex
+session and already wrote the prompt; you only drive the turn. In this mode you **never** `start` a
+daemon, **never** `stop` one, and **never** `read --out`: the dispatcher's collector reads the plan
+straight off the live daemon and persists it. That is deliberate — a plan the *agent* writes is
+exactly as forgeable as one it invents, so nothing you author is trusted evidence (see
+`docs/bugs/subagent-messages-not-delivered-to-main-thread.md`). You are given:
+
+- `GATE_SOCKET` — the socket of the already-running session. Pass `--socket "$GATE_SOCKET"` to
+  every verb.
+- `PROMPT_PATH` — the complete prompt. Send it with `--prompt-file "$PROMPT_PATH"`; do **not**
+  retype it, edit it, or wrap it. The daemon hashes the prompt and **refuses any other**
+  (`{"error":"wrong_gate_prompt"}`) — that error means you sent something other than this file.
+- `RETRY_PROMPT_PATH` — the complete re-ask, for step 5's one in-session retry. Same rule: send the
+  file, never a nudge of your own, or the retry will be refused.
+
+**Your whole recipe in external mode** — steps 2 and 3 below do not apply (the dispatcher already did
+them); you own a clock sidecar and nothing else:
+
+```bash
+CLOCK=$(mktemp -d /tmp/cdx-gate-clock.XXXXXX)          # your own dir: you must not write into the dispatcher's
+date +%s > "$CLOCK/t0"
+node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs plan --prompt-file "$PROMPT_PATH" --effort ultra --socket "$GATE_SOCKET"
+```
+
+Then poll with **step 4's table**, substituting `--socket "$GATE_SOCKET"` for every
+`--socket "$(cat "<prompt>.sock")"` and `"$CLOCK/t0"` for `"<prompt>.t0"` (the table's sidecars belong
+to step 3, which you skipped). On a terminal status use step 5's *external* variant; on STUCK or
+BACKSTOP use step 6's *external* variant. End with `STATUS: READY` (step 7).
+
+**Self-owned mode — no `GATE_SOCKET`.** You own the whole lifecycle, exactly as written below,
+including the `stop` you must always run.
+
 ## Steps
 
 1. **Doctor.** `node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs doctor`. If `codexVersion` is null or
@@ -41,7 +75,8 @@ do NOT design the plan yourself and you do NOT edit code. Your final message is 
    (You only have `Bash`/`Read`/`Write` — no `Grep`/`Glob`; use `Bash` (`rg`/`grep`/`ls`/`find`) if
    you need to look around, but normally you just pass the task through.)
 
-3. **Start the OWNED session FROM THE REPO ROOT** (one Bash call) so a relative `--out` lands in the
+3. **Start the OWNED session FROM THE REPO ROOT** *(self-owned mode only — external mode skips this
+   entirely; see "Two modes")* (one Bash call) so a relative `--out` lands in the
    repo. An ultra plan turn routinely runs 15-30 minutes — longer than any single Bash call may live
    — so the session runs in a DETACHED daemon that no Bash cap or signal can reach; the turn survives
    across your calls. You own that daemon, and you MUST `stop` it before you finish (step 5 or 6).
@@ -99,6 +134,13 @@ do NOT design the plan yourself and you do NOT edit code. Your final message is 
    whole engagement) and `read --out` again. When a usable plan is on disk:
    `stop --socket "$(cat "<prompt>.sock")"`, then report DONE (step 7).
 
+   **External mode instead:** `read --socket "$GATE_SOCKET"` with **no `--out`** (the collector
+   persists the plan; a file you write is not evidence). Judge the same way — if the status was not
+   `completed`, or the message is empty or only a preamble, re-ask ONCE in the same session with
+   `plan --prompt-file "$RETRY_PROMPT_PATH" --effort ultra --socket "$GATE_SOCKET"` and poll again.
+   Then report `STATUS: READY` (step 7) and **stop nothing** — the daemon is the dispatcher's, and
+   stopping it destroys the evidence it is about to collect.
+
 6. **Graceful abort — STUCK or BACKSTOP only.** ONE Bash call, so no line can be skipped:
 
    ```bash
@@ -115,10 +157,19 @@ do NOT design the plan yourself and you do NOT edit code. Your final message is 
 
    ALWAYS `stop`, even on failure, or the detached daemon and its app-server are orphaned.
 
+   **External mode:** run the `interrupt` + `wait` + `read` lines, then **STOP AT THAT POINT** — no
+   `stop`. Report `STATUS: FAILED: <reason>`; the dispatcher's collector owns teardown and will
+   record the round as unattested.
+
 7. **Report.** If a usable plan was saved, return EXACTLY two lines:
    ```
    STATUS: DONE
    PLAN_PATH: <the absolute path from PLAN_FILE>
+   ```
+   In **external mode** — where you saved nothing, because the collector does — return instead:
+   ```
+   STATUS: READY
+   PLAN_PATH: (collector)
    ```
    If after the retry it still produced no usable plan, return:
    ```

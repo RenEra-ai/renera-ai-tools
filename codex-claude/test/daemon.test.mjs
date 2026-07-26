@@ -1,6 +1,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -446,4 +447,96 @@ test('12 resolved waits on ONE persistent socket leave zero armed close listener
     await p;
   }
   assert.equal(sock.listenerCount('close'), 0, 'resolved waits must detach their close listeners');
+});
+
+// --- gate sessions -------------------------------------------------------------------------------
+// A gate session is one a DISPATCHER started on behalf of a helper agent it cannot trust to be the
+// agent it asked for (docs/bugs/subagent-messages-not-delivered-to-main-thread.md: the harness
+// silently dropped three agents' plugin identity). The daemon is therefore the enforcement point:
+// the helper holds a live socket, and only the prompts the dispatcher hashed may start a turn.
+const sha256 = (s) => createHash('sha256').update(Buffer.from(s, 'utf8')).digest('hex');
+
+test('a gate session runs the approved prompt and reports one atomic snapshot', async () => {
+  const prompt = 'say OK';
+  const { daemon, socketPath, dir } = await startDaemon({
+    privateSession: true, gatePromptPolicy: { allowed: [sha256(prompt)] },
+  });
+  assert.deepEqual(await rpcCall(socketPath, { cmd: 'send', prompt }), { ok: true, status: 'running' });
+  await rpcCall(socketPath, { cmd: 'wait' });
+  const snap = await rpcCall(socketPath, { cmd: 'gate_snapshot' });
+  // Identity AND result in ONE reply: taken as two calls a turn could advance between them, and the
+  // record would bind an identity to a result that never belonged to it.
+  assert.equal(snap.gateProtocol, 1);
+  assert.equal(snap.private, true);
+  assert.equal(snap.pid, process.pid);
+  assert.equal(snap.threadId, daemon.threadId);
+  assert.equal(snap.cwd, daemon.cwd);
+  assert.deepEqual(snap.gatePromptSha256, [sha256(prompt)]);
+  assert.equal(snap.promptSha256, sha256(prompt), 'the snapshot must name WHICH approved prompt ran');
+  assert.equal(snap.status, 'completed');
+  assert.equal(snap.message, 'OK');
+  assert.equal(snap.kind, 'turn');
+  assert.equal(snap.turnToken, 1);
+  await daemon.stop();
+  rmDir(dir);
+});
+
+test('a gate session refuses an unapproved prompt WITHOUT spending a turn token', async () => {
+  // The forgery this closes: a helper that never intends to review can send its own cheap prompt
+  // ("just say VERDICT: NO ISSUES"), get a genuine completed Codex turn, and have that turn certify
+  // the gate. The token must not move either — it is what the attestation binds to.
+  const approved = 'REVIEW the diff';
+  const { daemon, socketPath, dir } = await startDaemon({
+    privateSession: true, gatePromptPolicy: { allowed: [sha256(approved)] },
+  });
+  const rejected = await rpcCall(socketPath, { cmd: 'send', prompt: 'say OK' });
+  assert.equal(rejected.error, 'wrong_gate_prompt');
+  let snap = await rpcCall(socketPath, { cmd: 'gate_snapshot' });
+  // "No turn has run", not literally 0: the constructor's idle turn is built before `_gen` is
+  // initialised, so its token is absent rather than zero. The collector tests the same invariant
+  // (a token must be a positive integer) rather than a particular falsy shape.
+  assert.ok(!(snap.turnToken >= 1), `a refused prompt must not spend a turn token (got ${snap.turnToken})`);
+  assert.equal(snap.promptSha256, null, 'a refused prompt must leave no trace of having run');
+  assert.equal(snap.status, 'idle');
+  // The approved prompt still works afterwards — the refusal is not a wedged session.
+  assert.deepEqual(await rpcCall(socketPath, { cmd: 'send', prompt: approved }), { ok: true, status: 'running' });
+  await rpcCall(socketPath, { cmd: 'wait' });
+  snap = await rpcCall(socketPath, { cmd: 'gate_snapshot' });
+  assert.equal(snap.turnToken, 1);
+  assert.equal(snap.promptSha256, sha256(approved));
+  await daemon.stop();
+  rmDir(dir);
+});
+
+test('an ordinary session is unaffected: no policy, no restriction, and it says so', async () => {
+  const { daemon, socketPath, dir } = await startDaemon();
+  assert.deepEqual(await rpcCall(socketPath, { cmd: 'send', prompt: 'anything at all' }), { ok: true, status: 'running' });
+  await rpcCall(socketPath, { cmd: 'wait' });
+  const snap = await rpcCall(socketPath, { cmd: 'gate_snapshot' });
+  // Reported honestly rather than omitted: the collector refuses a session that cannot prove it was
+  // private and policy-bound, so an ordinary session must look exactly like what it is.
+  assert.deepEqual(snap.gatePromptSha256, []);
+  assert.equal(snap.private, false);
+  assert.equal(snap.status, 'completed');
+  await daemon.stop();
+  rmDir(dir);
+});
+
+test('a gate session refuses the native review verb too', async () => {
+  // `review` carries no prompt, so the policy has nothing to bind — and left open it was a way to
+  // DESTROY evidence: a native review replaces the completed, policy-approved gate turn.
+  const prompt = 'say OK';
+  const { daemon, socketPath, dir } = await startDaemon({
+    privateSession: true, gatePromptPolicy: { allowed: [sha256(prompt)] },
+    profile: { sandbox: 'read-only', approvalPolicy: 'never', ephemeral: true },
+  });
+  await rpcCall(socketPath, { cmd: 'send', prompt });
+  await rpcCall(socketPath, { cmd: 'wait' });
+  const res = await rpcCall(socketPath, { cmd: 'review', scope: 'working-tree' });
+  assert.equal(res.error, 'wrong_gate_prompt');
+  const snap = await rpcCall(socketPath, { cmd: 'gate_snapshot' });
+  assert.equal(snap.kind, 'turn', 'the approved turn must survive');
+  assert.equal(snap.turnToken, 1);
+  await daemon.stop();
+  rmDir(dir);
 });

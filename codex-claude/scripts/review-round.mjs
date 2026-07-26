@@ -13,6 +13,10 @@ import { buildReviewPrompt } from '../lib/review-prompt.mjs';
 import { CLIENT_INFO } from '../lib/protocol.mjs';
 import { driveTurn } from '../lib/drive-loop.mjs';
 import { testAppServerOpts, testWaitMs } from '../lib/test-appserver.mjs';
+// The verdict rule is SHARED (lib/verdict.mjs), not re-implemented here: the reviewer agent is
+// banned from running this script, so its copy of the rule was unreachable to the sanctioned
+// detached recipe. Same bytes on stdout — only the source of the algorithm moved.
+import { hasVerdict, parseVerdict } from '../lib/verdict.mjs';
 
 // Prefer --prompt-file (avoids shell-quoting/injection from review/plan text with backticks, $(), quotes).
 const pf = process.argv.indexOf('--prompt-file');
@@ -97,13 +101,6 @@ const drive = (flags) => driveTurn(socketPath, {
   onUnsupported: 'return',
 });
 
-// Mirror the deterministic parser below exactly: ONLY the FINAL non-empty line may be the verdict
-// (trailing text after an earlier VERDICT line → no verdict → the static re-ask must still fire).
-const hasVerdict = (m) => {
-  const ls = String(m || '').split('\n').map((l) => l.trim()).filter(Boolean);
-  return /^VERDICT:\s*(NO ISSUES|ISSUES FOUND)$/i.test(ls.length ? ls[ls.length - 1] : '');
-};
-
 let res = { status: 'failed', message: '' };
 const flags = { declinedExec: false };
 try {
@@ -124,10 +121,7 @@ try {
 
 // Deterministic verdict: ONLY the FINAL non-empty line may be the verdict (trailing text → UNCLEAR).
 const msg = res.message || '';
-const lines = msg.split('\n').map((l) => l.trim()).filter(Boolean);
-const last = lines.length ? lines[lines.length - 1] : '';
-const vm = /^VERDICT:\s*(NO ISSUES|ISSUES FOUND)$/i.exec(last);
-const parsed = vm ? vm[1].toUpperCase() : 'UNCLEAR';
+const parsed = parseVerdict(msg);
 console.log('STATUS: ' + res.status + (res.empty ? ' (empty)' : ''));
 console.log('PARSED_VERDICT: ' + parsed);
 console.log('=== REVIEW ===');

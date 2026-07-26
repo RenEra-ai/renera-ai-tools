@@ -206,3 +206,20 @@ test('plan-round approves a safe command without needing the re-ask', async () =
   // No --out → no PLAN_FILE line; the mock's decision echo is not plan-shaped → (no-plan).
   assert.deepEqual(headLines(r.stdout, 2), ['STATUS: completed (no-plan)', '=== PLAN ===']);
 });
+
+test('review-round stdout is byte-identical after the verdict rule moved to lib/verdict.mjs', async () => {
+  // The head-line assertions above pin ORDER; this pins the whole payload. The verdict algorithm now
+  // lives in lib/verdict.mjs (so the sanctioned detached recipe can reach it too) and the one thing
+  // that extraction must not do is change what this script prints — a consumer parses these bytes.
+  const dir = workdir();
+  const r = await script(REVIEW, ['--prompt-file', promptFile(dir, 'REVIEWPLAN please review')], dir);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout, [
+    'STATUS: completed',
+    'PARSED_VERDICT: NO ISSUES',
+    '=== REVIEW ===',
+    'Reviewed src/app.js.',
+    'VERDICT: NO ISSUES',
+    '',
+  ].join('\n'));
+});
