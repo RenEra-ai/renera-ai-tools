@@ -64,7 +64,10 @@ export async function listLiveDaemons({ baseDir = join(homedir(), '.codex-drive'
     // platform-dependent errno (ENOTSOCK on Darwin, ECONNREFUSED on Linux), and on the latter the
     // prune rule would delete a file that was never a daemon's.
     try { if (!lstatSync(socket).isSocket()) return { socket, error: 'not a socket' }; }
-    catch { return null; }   // vanished between readdir and lstat: already gone
+    catch (e) {
+      if (e && e.code === 'ENOENT') return null;   // vanished between readdir and lstat: already gone
+      return { socket, error: e.message };         // EACCES etc: reported, never silently omitted
+    }
     let st;
     try {
       st = await sendCommand(socket, { cmd: 'status' }, { timeoutMs });
@@ -81,7 +84,11 @@ export async function listLiveDaemons({ baseDir = join(homedir(), '.codex-drive'
         return null;   // provably dead twice: pruned and omitted
       }
     }
-    if (st && st.error) return { socket, error: String(st.error) };
+    // A reply that parses but is not an object (JSON `null`, a bare string) would throw on the
+    // field reads below — inside the probe's async fn, which would reject Promise.all and violate
+    // the never-throws contract.
+    if (!st || typeof st !== 'object') return { socket, error: 'malformed status reply' };
+    if (st.error) return { socket, error: String(st.error) };
     return {
       socket,
       ...(Number.isInteger(st.pid) ? { pid: st.pid } : {}),   // pre-1.8.21 daemons report none

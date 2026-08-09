@@ -67,18 +67,15 @@ const teardown = readRegularFile(dir, 'teardown');
 //   - teardown evidence is present (`confirmed stopped`). The collector writes that only after proving
 //     the daemon was torn down, and always BEFORE the marker — so a marker without it is not a real
 //     completed run.
+let line = 'unknown\n';   // no durable record ⇒ not-complete, never success
 if (startHead && SHA_RE.test(startHead) && marker === startHead && teardown === 'confirmed stopped') {
-  process.stdout.write('completed\n');
-  process.exit(0);
+  line = 'completed\n';
+} else {
+  const phase = readRegularFile(dir, 'phase');
+  if (phase === 'failed' || phase === 'timeout') line = `${phase}\n`;
 }
 
-const phase = readRegularFile(dir, 'phase');
-if (phase === 'failed' || phase === 'timeout') {
-  process.stdout.write(`${phase}\n`);
-  process.exit(0);
-}
-
-// No completion record and no recognized unhappy verdict: the collection did not durably record a
-// result. Not-complete, never success.
-process.stdout.write('unknown\n');
-process.exit(0);
+// No process.exit() here, deliberately: stdout to a PIPE is asynchronous, and exiting before the
+// write drains can drop the sole recovery line — the exact loss this reader exists to recover
+// from. The process ends (code 0) once the write has completed.
+process.stdout.write(line);

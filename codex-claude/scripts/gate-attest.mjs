@@ -51,7 +51,7 @@
 // an unidentified daemon is how one agent kills another's review). After ownership is proven, it
 // ALWAYS stops and confirms teardown before deciding anything else — so no refusal path can leave
 // an orphaned app-server behind.
-import { closeSync, existsSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, linkSync, lstatSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { parseArgs, assertOnlyFlags } from '../lib/verbs.mjs';
@@ -195,15 +195,42 @@ const SALVAGE_REASONS = new Set(['gate_mismatch', 'wrong_turn_kind', 'empty_resu
 let lockHeld = false;
 let liveMessage = null;
 
+// Alive unless the kill(0) probe PROVES death (ESRCH). EPERM = alive but not ours. Defined before
+// the lock block: the dead-owner takeover below needs it, and confirmStopped shares it.
+const pidAlive = (p) => {
+  if (p === null) return false;
+  try { process.kill(p, 0); return true; }
+  catch (e) { return e.code !== 'ESRCH'; }
+};
+
 // --- one collect per run directory --------------------------------------------------------------
-// Exclusive create, never released: a run directory describes ONE gate round, and a second collect
-// against it would be either a retry of an already-torn-down session (nothing left to prove) or a
-// concurrent collector racing this one over the same outputs.
-try {
-  closeSync(openSync(lockPath, 'wx'));
+// Exclusive create, recording the OWNER's pid. Released by no one — with ONE exception: a lock
+// whose recorded owner is provably dead (ESRCH) and whose run directory holds no durable outcome
+// (no attestation.json, no refusal.json) is a collector that was killed mid-run having decided
+// nothing; leaving its lock in place made the completed turn permanently uncollectable through the
+// documented flow. The displace-then-recreate below is atomic per step, so of N racers exactly one
+// wins the rename and everyone else refuses as before. Pid reuse fails SAFE: a recycled pid reads
+// as alive and the takeover is refused.
+const takeLock = () => {
+  const fd = openSync(lockPath, 'wx');
+  try { writeFileSync(fd, `${process.pid}\n`); } finally { closeSync(fd); }
   lockHeld = true;
+};
+try {
+  takeLock();
 } catch (e) {
-  await refuse('collect_in_progress', false, `could not take ${lockPath}: ${e.message}`);
+  let recovered = false;
+  try {
+    const raw = readFileSync(lockPath, 'utf8').trim();
+    const owner = /^\d{1,10}$/.test(raw) ? Number(raw) : null;   // a legacy/garbage lock is never displaced
+    if (owner !== null && !pidAlive(owner) && !existsSync(attestationPath) && !existsSync(refusalPath)) {
+      renameSync(lockPath, `${lockPath}.stale-${owner}`);
+      takeLock();
+      warn(`displaced collect.lock of dead collector ${owner} (no durable outcome was recorded); retained as ${lockPath}.stale-${owner}`);
+      recovered = true;
+    }
+  } catch { /* any failure in the takeover path falls through to the ordinary refusal */ }
+  if (!recovered) await refuse('collect_in_progress', false, `could not take ${lockPath}: ${e.message}`);
 }
 
 // --- the start record ---------------------------------------------------------------------------
@@ -271,13 +298,8 @@ if (st.cwd !== startCwd) {
 
 // OWNERSHIP IS PROVEN HERE — the threadId is unique per session and this daemon serves the recorded
 // repo. From this line on, EVERY exit tears the daemon down first: a refusal that walks away from a
-// daemon it has already identified as ours orphans it (and the never-released lock below means no
-// second collect can come back for it).
-const pidAlive = (p) => {
-  if (p === null) return false;
-  try { process.kill(p, 0); return true; }
-  catch (e) { return e.code !== 'ESRCH'; }   // EPERM = alive but not ours; only ESRCH proves death
-};
+// daemon it has already identified as ours orphans it (and the lock — displaceable only by a
+// provably-dead owner's successor — means no ordinary second collect can come back for it).
 
 async function confirmStopped() {
   const deadline = Date.now() + TEARDOWN_TIMEOUT_MS;
@@ -326,7 +348,10 @@ const refuseOwned = async (reason, detail, turnStatus) => refuse(reason, await t
 // mean attesting a session whose prompt policy was never enforced.
 let snap = null;
 try {
-  snap = await call({ cmd: 'gate_snapshot' });
+  // {close:true}: this is the CLOSING snapshot — the daemon latches against any further turn
+  // starting, so the identity+result pair collected here cannot be invalidated by a helper racing
+  // the window between this reply and `stop` (teardown keys its interrupt on this reply's status).
+  snap = await call({ cmd: 'gate_snapshot', close: true });
 } catch (e) {
   await refuseOwned('session_unreachable', `gate_snapshot failed: ${e.message}`, st.turnStatus);
 }
@@ -437,12 +462,18 @@ if (planPath) {
 // what the model was actually asked. This closes the gap in the direction that actually goes wrong
 // in practice: not an attacker, but a dispatcher that followed the recipe imperfectly and never
 // inlined the plan, leaving a "reviewed against the plan" record for a review that never saw it.
+//
+// --prompt documents the PRIMARY brief, and is checked against allowedPrompts[0] — NOT against the
+// certifying turn's own prompt. Checking the latter made every documented primary→retry round
+// uncollectable: the recipes pass the primary file, but after an in-session retry the certifying
+// turn's prompt is the re-ask. When the retry certifies, the primary's actual run is already
+// enforced above via promptSha256Seen; when the primary certifies, it IS the certifying turn.
 if (promptFile) {
   let promptBytes = null;
   try { promptBytes = readFileSync(promptFile); }
   catch (e) { await refuse('prompt_mismatch', true, `--prompt could not be read: ${promptFile}: ${e.message}`); }
-  if (sha256(promptBytes) !== snapshot.promptSha256) {
-    await refuse('prompt_mismatch', true, `--prompt ${promptFile} is not the prompt this turn ran`);
+  if (sha256(promptBytes) !== allowedPrompts[0]) {
+    await refuse('prompt_mismatch', true, `--prompt ${promptFile} is not the primary gate prompt`);
   }
   if (planBytes && !promptBytes.includes(planBytes)) {
     await refuse('unusable_plan', true, 'the plan was never inlined into the prompt — this review did not judge against it');
@@ -459,10 +490,13 @@ function atomicWrite(target, bytes) {
     writeFileSync(fd, bytes);
     fsyncSync(fd);
     closeSync(fd); fd = null;
-    // rename(2) would silently clobber; the exclusive-target rule is the point of the check.
-    if (existsSync(target)) throw new Error(`target appeared while writing: ${target}`);
-    renameSync(tmp, target);
-    // The rename is only durable once the DIRECTORY entry is. Best effort: not every platform
+    // link(2) is the ATOMIC no-replace publish: it fails EEXIST if the target exists, with no
+    // window at all. The previous existsSync-then-rename pair had a race in which a concurrent
+    // writer's already-published target could be silently clobbered — for an artifact, that is a
+    // valid attestation left pointing at bytes it never certified.
+    linkSync(tmp, target);
+    rmSync(tmp, { force: true });
+    // The link is only durable once the DIRECTORY entry is. Best effort: not every platform
     // permits opening a directory, and a missing dir-fsync is not a reason to fail the gate.
     try { const dfd = openSync(dirname(target), 'r'); try { fsyncSync(dfd); } finally { closeSync(dfd); } } catch { /* best effort */ }
   } catch (e) {

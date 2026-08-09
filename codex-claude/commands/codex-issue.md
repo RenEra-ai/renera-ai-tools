@@ -284,9 +284,11 @@ per round, in a fresh run dir (`mktemp -d /tmp/cdx-gate-review.XXXXXX`):
    `running` → keep `wait`-polling; only a turn you know failed (or are abandoning) gets
    `--outcome failed|timeout`. Passing **both**
    `--prompt` and `--plan` is what makes the record's "reviewed against this plan" claim checkable:
-   the collector verifies the prompt is the one the turn actually ran **and** that the plan's bytes
-   are inside it, so a round where the inlining was skipped fails the gate instead of quietly
-   attesting a review that never saw the plan.
+   the collector verifies `--prompt` is the PRIMARY brief, that the session actually ran it (the
+   daemon records which approved prompts started turns — so this holds even when the in-session
+   retry is the turn that certifies), **and** that the plan's bytes are inside it — a round where
+   the inlining was skipped fails the gate instead of quietly attesting a review that never saw
+   the plan.
 
 **Decide from the collector's JSON, not from the helper's last line.** The findings you act on come
 from `<RUN_DIR>/review.md` — the daemon's own words, which the collector wrote. Keep the round's

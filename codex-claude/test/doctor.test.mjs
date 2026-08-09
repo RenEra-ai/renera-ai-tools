@@ -22,12 +22,12 @@ function tmp() {
   return d;
 }
 
-/** A daemon stand-in that answers `status` like lib/daemon.mjs does. */
+/** A daemon stand-in that answers `status` like lib/daemon.mjs does. `undefined` = never replies. */
 function statusServer(baseDir, name, reply) {
   const socket = join(baseDir, name);
   const server = createServer((sock) => {
     sock.setEncoding('utf8');
-    sock.on('data', () => { if (reply) sock.write(`${JSON.stringify(reply)}\n`); });
+    sock.on('data', () => { if (reply !== undefined) sock.write(`${JSON.stringify(reply)}\n`); });
     sock.on('error', () => {});
   });
   server.listen(socket);
@@ -109,12 +109,24 @@ test('a wedged daemon (accepts, never replies) is reported with an error and NOT
   // A busy daemon is a live daemon: mid-ultra-turn silence is normal, so a probe timeout must never
   // cost the socket. Same reason there is no TTL/reaper at all.
   const baseDir = tmp();
-  const { socket } = statusServer(baseDir, 'd-4-wedged.sock', null);
+  const { socket } = statusServer(baseDir, 'd-4-wedged.sock');
   const daemons = await listLiveDaemons({ baseDir, timeoutMs: 200 });
   assert.equal(daemons.length, 1);
   assert.equal(daemons[0].socket, socket);
   assert.match(daemons[0].error, /timeout/);
   assert.equal(existsSync(socket), true, 'a wedged socket must never be pruned');
+});
+
+test('a malformed (non-object) status reply is reported, never thrown and never pruned', async () => {
+  // JSON `null` parses fine and would throw on the field reads — inside the probe's async fn,
+  // rejecting Promise.all and violating the never-throws contract.
+  const baseDir = tmp();
+  const { socket } = statusServer(baseDir, 'd-6-null.sock', null);
+  const daemons = await listLiveDaemons({ baseDir, timeoutMs: 2000 });
+  assert.equal(daemons.length, 1);
+  assert.equal(daemons[0].socket, socket);
+  assert.match(daemons[0].error, /malformed status reply/);
+  assert.equal(existsSync(socket), true);
 });
 
 test('a missing base dir is an empty list, and doctorReport carries the daemons alongside health', async () => {

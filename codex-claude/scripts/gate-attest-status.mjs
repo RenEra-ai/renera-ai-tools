@@ -73,24 +73,24 @@ const dir = stateDir.trim();
 // `attested` wins over `refused`: the collector writes exactly one of the two per run directory, so
 // both present means someone assembled the directory by hand — and preferring the attestation is
 // still safe, because the record only ever exists after a confirmed-teardown success path.
+// Anything that parses to no recognized shape is `unknown`: nothing was durably recorded, which is
+// treated as not-attested, never as success.
+let line = 'unknown\n';
 const record = readJson(dir, 'attestation.json');
+const refusal = readJson(dir, 'refusal.json');
 if (record && typeof record === 'object'
   && record.schema === 1
   && record.teardown === 'confirmed'
   && (record.gate === 'architect' || record.gate === 'review')
   && record.artifact && typeof record.artifact.path === 'string' && record.artifact.path.length) {
-  process.stdout.write('attested\n');
-  process.exit(0);
-}
-
-const refusal = readJson(dir, 'refusal.json');
-if (refusal && typeof refusal === 'object'
+  line = 'attested\n';
+} else if (refusal && typeof refusal === 'object'
   && typeof refusal.reason === 'string' && REASON_RE.test(refusal.reason)) {
-  process.stdout.write(`refused: ${refusal.reason}\n`);
-  process.exit(0);
+  line = `refused: ${refusal.reason}\n`;
 }
 
-// Neither record parses to a recognized shape: nothing was durably recorded. Not-attested, never
-// success.
-process.stdout.write('unknown\n');
-process.exit(0);
+// No process.exit() here, deliberately: stdout to a PIPE is asynchronous, and exiting before the
+// write drains can drop the sole recovery line — the exact loss this reader exists to recover
+// from. With nothing else keeping the event loop alive, the process ends (code 0) once the write
+// has completed.
+process.stdout.write(line);

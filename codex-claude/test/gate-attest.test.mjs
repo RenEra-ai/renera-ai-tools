@@ -772,15 +772,58 @@ test('the re-ask guard binds to prompts that RAN, not to the turn counter', asyn
   assert.equal(r1.body.stopped, true);
   assert.match(r1.stderr, /primary brief never ran/);
 
-  // The legit shape the guard must not break: primary, then the retry — the retry's turn attests.
+  // The legit shape the guard must not break: primary, then the retry — the retry's turn attests,
+  // AND the recipe-shaped collect works: --prompt names the PRIMARY brief (checking it against the
+  // certifying turn's own prompt made every documented primary→retry round uncollectable).
   const legit = await mk();
   for (const p of [legit.promptPath, legit.retryPath]) {
     await cli(['send', '--prompt-file', p, '--socket', legit.socket]);
     await cli(['wait', '--socket', legit.socket, '--timeout-ms', '20000']);
   }
-  const r2 = await collect(args(legit, 'review'));
+  const r2 = await collect(args(legit, 'review', ['--prompt', legit.promptPath]));
   assert.equal(r2.code, 0, `${r2.stdout}${r2.stderr}`);
   assert.equal(r2.body.turnToken, 2);
+
+  // The retry file as --prompt is refused: the record documents the brief, not the nudge.
+  const wrongDoc = await mk();
+  for (const p of [wrongDoc.promptPath, wrongDoc.retryPath]) {
+    await cli(['send', '--prompt-file', p, '--socket', wrongDoc.socket]);
+    await cli(['wait', '--socket', wrongDoc.socket, '--timeout-ms', '20000']);
+  }
+  const r3 = await collect(args(wrongDoc, 'review', ['--prompt', wrongDoc.retryPath]));
+  assert.equal(r3.body.reason, 'prompt_mismatch');
+  assert.match(r3.stderr, /not the primary gate prompt/);
+});
+
+test("a dead collector's lock is displaced; a live one's — or a decided round's — never is", async () => {
+  const dir = repo();
+  // Dead owner, no durable outcome: the successor collects the round normally.
+  const s = await gateSession(dir, 'REVIEWPLAN judge this\n');
+  await drive(s);
+  const dead = await reapedPid();
+  writeFileSync(join(s.stateDir, 'collect.lock'), `${dead}\n`);
+  const r = await collect(args(s, 'review'));
+  assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /displaced collect\.lock of dead collector/);
+  assert.equal(existsSync(join(s.stateDir, `collect.lock.stale-${dead}`)), true, 'the stale lock is retained as evidence');
+
+  // Alive owner: refused exactly as before — the takeover never races a running collector.
+  const s2 = await gateSession(dir, 'REVIEWPLAN judge this\n');
+  await drive(s2);
+  writeFileSync(join(s2.stateDir, 'collect.lock'), `${process.pid}\n`);
+  const r2 = await collect(args(s2, 'review'));
+  assert.equal(r2.body.reason, 'collect_in_progress');
+  await cli(['stop', '--socket', s2.socket]);
+
+  // Dead owner but a durable outcome exists: the round is decided — never displaced.
+  const s3 = await gateSession(dir, 'REVIEWPLAN judge this\n');
+  const dead3 = await reapedPid();
+  writeFileSync(join(s3.stateDir, 'collect.lock'), `${dead3}\n`);
+  writeFileSync(join(s3.stateDir, 'refusal.json'), '{"reason":"declared_failed","stopped":true}\n');
+  const r3 = await collect(args(s3, 'review'));
+  assert.equal(r3.body.reason, 'collect_in_progress');
+  assert.equal(existsSync(join(s3.stateDir, `collect.lock.stale-${dead3}`)), false);
+  await cli(['stop', '--socket', s3.socket]);
 });
 
 test('--prompt binds the record end-to-end: wrong prompt, or a plan that was never inlined, refuses', async () => {

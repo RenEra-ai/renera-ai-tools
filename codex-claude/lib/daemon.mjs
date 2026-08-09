@@ -54,6 +54,10 @@ export class Daemon {
     // retry prompt twice and have "a retry with turnToken 2" certify a session that never ran the
     // real brief — the collector demands the primary appear here.
     this._gatePromptsSeen = new Set();
+    // Latched by the collector's closing gate_snapshot ({close:true}): from that point the reply it
+    // took IS the session's final word, and a helper racing the collect window can no longer start
+    // a fresh turn that teardown (keyed to the snapshot's status) would neither see nor interrupt.
+    this._gateClosed = false;
     this.app = null;
     this.server = null;
     this.threadId = null;
@@ -181,7 +185,13 @@ export class Daemon {
       // a turn could advance between them and the record would bind an identity to a result that
       // never belonged to it. A daemon from an older build answers `unknown_cmd`, which is the
       // collector's explicit runtime-skew signal rather than a silently weaker check.
-      case 'gate_snapshot': return {
+      case 'gate_snapshot':
+        // {close:true} makes this snapshot the CLOSING one: no further turns may start, so the
+        // identity+result pair it returns cannot be invalidated between the snapshot and `stop`.
+        // Latched before the reply is built — the latch and the reply are one atomic step. Only
+        // meaningful on a gate session; a bare snapshot (tests, probes) latches nothing.
+        if (cmd.close === true && this.gatePromptPolicy) this._gateClosed = true;
+        return {
         // Protocol 2: the reply carries `gate`, and the collector's certification depends on it —
         // a versionless new field would make missing-vs-mismatched ambiguous, so the bump converts
         // every older-daemon shape into the collector's explicit runtime_skew path.
@@ -226,6 +236,10 @@ export class Daemon {
     if (this._appExited) return { error: 'app_server_exited' };
     if (this.restartRequired) return { error: 'restart_required', reason: this.restartReason };
     if (this.turn.status === 'running' || this.turn.status === 'awaiting_input') return { error: 'busy' };
+    // A closed gate accepts no further turns of ANY prompt: the collector has already taken its
+    // closing snapshot, and a turn started now would exist only to be silently discarded by the
+    // teardown that follows.
+    if (this._gateClosed) return { error: 'gate_closed' };
     // GATE POLICY. Checked BEFORE _beginTurn, so a refused prompt starts no turn and spends no
     // `gen` — the turn token stays a truthful count of turns this session actually ran, which is
     // what the collector binds its attestation to. Hashing the exact prompt bytes is the point:
@@ -265,7 +279,9 @@ export class Daemon {
     // plan) is NOT plan-producing, so a review's internal-checklist item/plan/delta can't shadow its
     // agentMessage/VERDICT. (plan-round's static re-ask therefore issues an explicit `plan` turn, not a
     // bare `send`.) Per-turn, so a rejected start can never desync it from the server thread.
-    if (this.gatePromptPolicy) this._gatePromptsSeen.add(promptSha256);
+    // NOTE: the prompt is recorded in _gatePromptsSeen only when the turn/start RESPONSE is
+    // accepted (_onStartResponse) — recording here would mark a server-REJECTED primary as "seen",
+    // and a later context-free retry could then certify a session whose brief never ran.
     this._beginTurn({ isPlan: explicitMode === 'plan', promptSha256 });
     this._sendStart(METHODS.TURN_START, params, 'turn/start');
     return { ok: true, status: 'running' };
@@ -412,6 +428,12 @@ export class Daemon {
       return this._finalizeTurn(`${label} returned an unusable reviewThreadId (${JSON.stringify(res.reviewThreadId)})`);
     }
     this.turn.awaitingResponse = false;
+    // GATE: only now — authoritative id in hand, turn accepted server-side — did this prompt's turn
+    // actually START. An earlier record (at _startTurn) marked a rejected primary as "seen", which
+    // let a later retry-only completion certify a session whose brief never entered the thread. The
+    // gen guard above makes this the same turn whose promptSha256 we recorded; the rejection and
+    // no-id arms never reach here.
+    if (this.gatePromptPolicy && this.turn.promptSha256) this._gatePromptsSeen.add(this.turn.promptSha256);
     this._clearBackstop();
     // Replay in arrival order, now that the id is known and the stale filter can do its job.
     // Notifications go back through _onNotification — NOT straight to _dispatchNotification — so the

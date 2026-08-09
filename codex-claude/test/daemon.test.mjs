@@ -582,6 +582,48 @@ test('an architect gate refuses a plain send, accepts plan turns — retries inc
   rmDir(dir);
 });
 
+test('a rejected turn/start is never "seen": a retry alone still cannot certify', async () => {
+  // The hash is recorded only when the turn/start RESPONSE is accepted. Recording at submit time
+  // marked a server-REJECTED primary as having run, and a later context-free retry could then
+  // certify a session whose brief never entered the thread.
+  const primary = 'BADTURN the real brief';
+  const retry = 'REVIEWPLAN output the review NOW';
+  const { daemon, socketPath, dir } = await startDaemon({
+    privateSession: true, gatePromptPolicy: { allowed: [sha256(primary), sha256(retry)], gate: 'review' },
+  });
+  assert.deepEqual(await rpcCall(socketPath, { cmd: 'send', prompt: primary }), { ok: true, status: 'running' });
+  const failed = await rpcCall(socketPath, { cmd: 'wait' });
+  assert.equal(failed.status, 'failed');
+  await rpcCall(socketPath, { cmd: 'send', prompt: retry });
+  await rpcCall(socketPath, { cmd: 'wait' });
+  const snap = await rpcCall(socketPath, { cmd: 'gate_snapshot' });
+  assert.equal(snap.turnToken, 2);
+  assert.deepEqual(snap.promptSha256Seen, [sha256(retry)],
+    'a server-rejected primary must not count as having run');
+  await daemon.stop();
+  rmDir(dir);
+});
+
+test('a closing gate_snapshot latches the session; a bare one stays a pure probe', async () => {
+  // The collect race this closes: a helper starting one more allowed turn between the collector's
+  // snapshot and its stop — teardown, keyed to the snapshot's completed status, would neither see
+  // nor interrupt it.
+  const prompt = 'REVIEWPLAN judge this';
+  const { daemon, socketPath, dir } = await startDaemon({
+    privateSession: true, gatePromptPolicy: { allowed: [sha256(prompt)], gate: 'review' },
+  });
+  await rpcCall(socketPath, { cmd: 'send', prompt });
+  await rpcCall(socketPath, { cmd: 'wait' });
+  await rpcCall(socketPath, { cmd: 'gate_snapshot' });   // bare probe: latches nothing
+  const closing = await rpcCall(socketPath, { cmd: 'gate_snapshot', close: true });
+  assert.equal(closing.status, 'completed');
+  assert.deepEqual(await rpcCall(socketPath, { cmd: 'send', prompt }), { error: 'gate_closed' });
+  const after = await rpcCall(socketPath, { cmd: 'gate_snapshot' });
+  assert.equal(after.turnToken, 1, 'the latched session must still hold the collected turn');
+  await daemon.stop();
+  rmDir(dir);
+});
+
 test('status reports the daemon pid', async () => {
   const { daemon, socketPath, dir } = await startDaemon();
   const st = await rpcCall(socketPath, { cmd: 'status' });
