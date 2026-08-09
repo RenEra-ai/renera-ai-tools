@@ -487,7 +487,7 @@ test('a gate session accepts ONLY the hashed prompt — and --prompt-file is wha
   // hashed would NOT be the bytes the daemon received, and every gate turn would be refused.
   const promptBytes = Buffer.from('REVIEWPLAN judge this against the plan\n', 'utf8');
   writeFileSync(promptPath, promptBytes);
-  const { socket } = await startPrivate(dir, 'ok', ['--gate-prompt-sha256', sha256Hex(promptBytes)]);
+  const { socket } = await startPrivate(dir, 'ok', ['--gate-prompt-sha256', sha256Hex(promptBytes), '--gate', 'review']);
 
   // The shell-substitution form (same text, no trailing newline) is a DIFFERENT prompt and is refused.
   const stripped = await cli(['send', promptBytes.toString('utf8').replace(/\n+$/, ''), '--socket', socket], { env: env() });
@@ -515,17 +515,58 @@ test('start records the gate policy, and refuses a gate policy it cannot enforce
   assert.equal('gatePromptSha256' in plain, false);
   await cli(['stop', '--socket', plain.socket], { env: env() });
 
-  const gated = await startPrivate(dir, 'ok', ['--gate-prompt-sha256', hash]);
+  const gated = await startPrivate(dir, 'ok', ['--gate-prompt-sha256', hash, '--gate', 'review']);
   assert.deepEqual(gated.gatePromptSha256, [hash]);
+  assert.equal(gated.gate, 'review', 'the start record must name the gate the collector will cross-check');
   await cli(['stop', '--socket', gated.socket], { env: env() });
 
   // Rejected BEFORE any spawn — a malformed gate flag must never cost a live daemon.
-  const shared = await cli(['start', '--cwd', dir, '--gate-prompt-sha256', hash], { env: env() });
+  const shared = await cli(['start', '--cwd', dir, '--gate-prompt-sha256', hash, '--gate', 'review'], { env: env() });
   assert.equal(shared.code, 1);
   assert.match(shared.stderr, /requires --private/);
-  const malformed = await cli(['start', '--private', '--cwd', dir, '--gate-prompt-sha256', 'abc'], { env: env() });
+  const malformed = await cli(['start', '--private', '--cwd', dir, '--gate-prompt-sha256', 'abc', '--gate', 'review'], { env: env() });
   assert.equal(malformed.code, 1);
   assert.match(malformed.stderr, /64 lowercase hex/);
+  // The gate↔hash pairing is mandatory in both directions, and a bad gate name is a parse error —
+  // all three refused before any observable side effect.
+  const nameless = await cli(['start', '--private', '--cwd', dir, '--gate-prompt-sha256', hash], { env: env() });
+  assert.equal(nameless.code, 1);
+  assert.match(nameless.stderr, /requires --gate <architect\|review>/);
+  const hashless = await cli(['start', '--private', '--cwd', dir, '--gate', 'review'], { env: env() });
+  assert.equal(hashless.code, 1);
+  assert.match(hashless.stderr, /--gate requires --gate-prompt-sha256/);
+  const bogus = await cli(['start', '--private', '--cwd', dir, '--gate-prompt-sha256', hash, '--gate', 'bogus'], { env: env() });
+  assert.equal(bogus.code, 1);
+  assert.match(bogus.stderr, /expected 'architect' or 'review'/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('the gate kind rides the __daemon payload: a review gate refuses `plan` from the CLI', async () => {
+  // The incident this front-stops (docs/bugs/gate-orphaned-completed-turn.md): a helper drove a
+  // review gate with `plan`, and the wrong kind surfaced only at collect time — after the 17-minute
+  // turn had completed and the collector had torn the session down. Now the DETACHED daemon itself
+  // refuses the verb in milliseconds, which also proves `gate` survived the payload handoff.
+  const dir = repo();
+  const promptPath = join(dir, 'gate-prompt.txt');
+  const promptBytes = Buffer.from('REVIEWPLAN judge this\n', 'utf8');
+  writeFileSync(promptPath, promptBytes);
+  const { socket, pid } = await startPrivate(dir, 'ok', ['--gate-prompt-sha256', sha256Hex(promptBytes), '--gate', 'review']);
+
+  const wrongVerb = await cli(['plan', '--prompt-file', promptPath, '--socket', socket], { env: env() });
+  assert.deepEqual(JSON.parse(wrongVerb.stdout), { error: 'wrong_gate_turn_kind', expected: 'send' });
+
+  const accepted = await cli(['send', '--prompt-file', promptPath, '--socket', socket], { env: env() });
+  assert.deepEqual(JSON.parse(accepted.stdout), { ok: true, status: 'running' });
+  await cli(['wait', '--socket', socket, '--timeout-ms', '15000'], { env: env() });
+  const read = JSON.parse((await cli(['read', '--parsed-verdict', '--socket', socket], { env: env() })).stdout);
+  assert.equal(read.status, 'completed');
+  assert.equal(read.kind, 'turn');
+  assert.equal(read.parsedVerdict, 'NO ISSUES');
+  // The pid chain doctor's orphan accounting relies on: the detached daemon's own status reply
+  // names the same pid the start record captured.
+  const st = JSON.parse((await cli(['status', '--socket', socket], { env: env() })).stdout);
+  assert.equal(st.pid, pid);
+  await cli(['stop', '--socket', socket], { env: env() });
   rmSync(dir, { recursive: true, force: true });
 });
 

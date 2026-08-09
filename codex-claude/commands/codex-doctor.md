@@ -25,6 +25,13 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs doctor
 Report `codexVersion` / `authPresent`. If `codexVersion` is null → Codex CLI not installed; if
 `authPresent` is false → not logged in (`codex login`). Either makes the architect steps unrunnable.
 
+Also report `daemons` — every entry is a **live detached session** (`--private` daemons have no other
+trace anywhere). `turnStatus: "completed"` means a finished turn whose result is still readable
+(`read --socket <socket>`); an entry nobody can account for is an orphan — probe before stopping, and
+never blind-`stop` one whose turn is `running` (the turn survives its agent and may still be doing
+real work: `docs/bugs/gate-orphaned-completed-turn.md`). An entry with `error` is a socket that
+answered nothing — report it, don't touch it.
+
 ## 2. Resolved mode (workflow-composition vs subagent) and why
 
 ```bash

@@ -466,11 +466,14 @@ test('a gate session runs the approved prompt and reports one atomic snapshot', 
   const snap = await rpcCall(socketPath, { cmd: 'gate_snapshot' });
   // Identity AND result in ONE reply: taken as two calls a turn could advance between them, and the
   // record would bind an identity to a result that never belonged to it.
-  assert.equal(snap.gateProtocol, 1);
+  assert.equal(snap.gateProtocol, 2);
   assert.equal(snap.private, true);
   assert.equal(snap.pid, process.pid);
   assert.equal(snap.threadId, daemon.threadId);
   assert.equal(snap.cwd, daemon.cwd);
+  // A policy built without a gate name (direct construction) is tolerated at class level and
+  // reported honestly as null — the collector is what fail-closes on it.
+  assert.equal(snap.gate, null);
   assert.deepEqual(snap.gatePromptSha256, [sha256(prompt)]);
   assert.equal(snap.promptSha256, sha256(prompt), 'the snapshot must name WHICH approved prompt ran');
   assert.equal(snap.status, 'completed');
@@ -517,7 +520,72 @@ test('an ordinary session is unaffected: no policy, no restriction, and it says 
   // private and policy-bound, so an ordinary session must look exactly like what it is.
   assert.deepEqual(snap.gatePromptSha256, []);
   assert.equal(snap.private, false);
+  assert.equal(snap.gate, null);
   assert.equal(snap.status, 'completed');
+  await daemon.stop();
+  rmDir(dir);
+});
+
+test('a review gate refuses a plan turn BEFORE it runs, and a plain send still works', async () => {
+  // The front-stop for docs/bugs/gate-orphaned-completed-turn.md: the collector certifies a review
+  // gate only from a plain send (kind 'turn'), and discovering a `plan` verb at collect time costs
+  // the whole completed turn. The daemon refuses synchronously instead — no token, no turn.
+  const prompt = 'REVIEWPLAN judge this';
+  const { daemon, socketPath, dir } = await startDaemon({
+    model: 'mock-model',
+    privateSession: true, gatePromptPolicy: { allowed: [sha256(prompt)], gate: 'review' },
+  });
+  const rejected = await rpcCall(socketPath, { cmd: 'plan', prompt });
+  assert.deepEqual(rejected, { error: 'wrong_gate_turn_kind', expected: 'send' });
+  let snap = await rpcCall(socketPath, { cmd: 'gate_snapshot' });
+  assert.ok(!(snap.turnToken >= 1), 'a refused kind must not spend a turn token');
+  assert.equal(snap.promptSha256, null, 'a refused kind must leave no trace of having run');
+  assert.equal(snap.status, 'idle');
+  // `send --mode plan` is the same plan-producing turn under another spelling — same refusal.
+  assert.deepEqual(await rpcCall(socketPath, { cmd: 'send', mode: 'plan', prompt }),
+    { error: 'wrong_gate_turn_kind', expected: 'send' });
+  assert.deepEqual(await rpcCall(socketPath, { cmd: 'send', prompt }), { ok: true, status: 'running' });
+  await rpcCall(socketPath, { cmd: 'wait' });
+  snap = await rpcCall(socketPath, { cmd: 'gate_snapshot' });
+  assert.equal(snap.gate, 'review');
+  assert.equal(snap.gateProtocol, 2);
+  assert.equal(snap.kind, 'turn');
+  assert.equal(snap.turnToken, 1);
+  await daemon.stop();
+  rmDir(dir);
+});
+
+test('an architect gate refuses a plain send, accepts plan turns — retries included', async () => {
+  const prompt = 'PLANSTREAM architect this';
+  const retry = 'PLANSTREAM re-ask';
+  const { daemon, socketPath, dir } = await startDaemon({
+    model: 'mock-model',
+    privateSession: true, gatePromptPolicy: { allowed: [sha256(prompt), sha256(retry)], gate: 'architect' },
+  });
+  assert.deepEqual(await rpcCall(socketPath, { cmd: 'send', prompt }),
+    { error: 'wrong_gate_turn_kind', expected: 'plan' });
+  assert.deepEqual(await rpcCall(socketPath, { cmd: 'plan', prompt }), { ok: true, status: 'running' });
+  await rpcCall(socketPath, { cmd: 'wait' });
+  // The kind rule is per-turn: the RETRY is bound to the same kind as the primary.
+  assert.deepEqual(await rpcCall(socketPath, { cmd: 'send', prompt: retry }),
+    { error: 'wrong_gate_turn_kind', expected: 'plan' });
+  assert.deepEqual(await rpcCall(socketPath, { cmd: 'plan', prompt: retry }), { ok: true, status: 'running' });
+  await rpcCall(socketPath, { cmd: 'wait' });
+  const snap = await rpcCall(socketPath, { cmd: 'gate_snapshot' });
+  assert.equal(snap.gate, 'architect');
+  assert.equal(snap.kind, 'plan');
+  assert.equal(snap.turnToken, 2);
+  // Both approved prompts RAN, and the snapshot says so — this is what lets the collector tell a
+  // primary-then-retry session apart from a retry-driven-twice forgery.
+  assert.deepEqual([...snap.promptSha256Seen].sort(), [sha256(prompt), sha256(retry)].sort());
+  await daemon.stop();
+  rmDir(dir);
+});
+
+test('status reports the daemon pid', async () => {
+  const { daemon, socketPath, dir } = await startDaemon();
+  const st = await rpcCall(socketPath, { cmd: 'status' });
+  assert.equal(st.pid, process.pid);
   await daemon.stop();
   rmDir(dir);
 });

@@ -5,6 +5,8 @@
 // its plugin identity, and it reviewed the diff itself — as its own model — in good faith. Every
 // case below is a way that failure could still reach a green gate. The headline one is
 // `turn_not_completed` on an untouched session: the agent that never contacted Codex at all.
+// docs/bugs/gate-orphaned-completed-turn.md added the opposite family: a refusal that silently
+// destroys COMPLETED work — hence the gate-kind binding, --salvage, and the durable refusal record.
 //
 // The refusals matter more than the happy path, so each one asserts BOTH the reason and whether the
 // daemon was left alive — an orphaned app-server is a real cost, and a refusal that leaks one is
@@ -14,7 +16,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
@@ -79,13 +81,13 @@ function repo() {
  * prompt, hash it, start a --private policy-bound daemon, keep `start`'s stdout verbatim as
  * start.json. `drive` then plays the HELPER's half.
  */
-async function gateSession(dir, prompt, { model = 'gpt-5-codex' } = {}) {
+async function gateSession(dir, prompt, { model = 'gpt-5-codex', gate = 'review' } = {}) {
   const stateDir = tmp();
   const promptPath = join(stateDir, 'prompt');
   writeFileSync(promptPath, prompt);
   const hash = sha256(readFileSync(promptPath));
   const r = await cli(['start', '--private', '--cwd', dir, '--sandbox', 'read-only',
-    '--approval-policy', 'never', '--ephemeral', '--model', model, '--gate-prompt-sha256', hash]);
+    '--approval-policy', 'never', '--ephemeral', '--model', model, '--gate-prompt-sha256', hash, '--gate', gate]);
   let out = null;
   try { out = JSON.parse(r.stdout); } catch { /* asserted below */ }
   if (out && out.socket) SPAWNED.push(out.socket);
@@ -126,22 +128,64 @@ function fakeDaemon(replies) {
   return { dir, socket, server };
 }
 
-/** A hand-built run directory pointing at a fake daemon. */
-function fakeSession(socket, { cwd, threadId = 'thread-fake', pid = process.pid, priv = true, policy = ['a'.repeat(64)] } = {}) {
+/** A hand-built run directory pointing at a fake daemon. `gate: null` omits the field (skew shape). */
+function fakeSession(socket, { cwd, threadId = 'thread-fake', pid = process.pid, priv = true, policy = ['a'.repeat(64)], gate = 'review' } = {}) {
   const stateDir = tmp();
   writeFileSync(join(stateDir, 'start.json'), `${JSON.stringify({
-    ok: true, threadId, socket, pid, cwd, private: priv, ...(policy ? { gatePromptSha256: policy } : {}),
+    ok: true, threadId, socket, pid, cwd, private: priv, ...(policy ? { gatePromptSha256: policy, ...(gate ? { gate } : {}) } : {}),
   })}\n`);
   return { stateDir, socket, start: { cwd, threadId }, artifact: join(stateDir, 'artifact.md') };
+}
+
+/**
+ * A fake daemon that actually DIES on `stop` — socket removed, connections ended — so the collector
+ * can reach its POST-teardown ladder against snapshot shapes a real 1.8.21 daemon can no longer
+ * produce (the kind front-stop makes wrong_turn_kind unreachable via a real `start`). Pair it with a
+ * fakeSession whose pid is already reaped, so confirmStopped's pid probe passes too.
+ */
+function mortalFakeDaemon(replies) {
+  const dir = tmp('cdx-ga-fake-');
+  const socket = join(dir, 'f.sock');
+  const server = createServer((sock) => {
+    let buf = '';
+    sock.on('data', (d) => {
+      buf += d;
+      for (let i = buf.indexOf('\n'); i >= 0; i = buf.indexOf('\n')) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 1);
+        if (!line.trim()) continue;
+        const cmd = JSON.parse(line);
+        sock.write(JSON.stringify(replies(cmd) ?? { error: 'unknown_cmd' }) + '\n');
+        if (cmd.cmd === 'stop') {
+          sock.end();
+          server.close(() => {});
+          try { rmSync(socket, { force: true }); } catch { /* already gone */ }
+        }
+      }
+    });
+    sock.on('error', () => {});
+  });
+  server.listen(socket);
+  SERVERS.push(server);
+  return { dir, socket, server };
+}
+
+/** A pid that provably belonged to a real process and is now dead (ESRCH for pidAlive). */
+async function reapedPid() {
+  const child = spawn(process.execPath, ['-e', '']);
+  const pid = child.pid;
+  await new Promise((resolve) => child.on('exit', resolve));
+  return pid;
 }
 
 // --- the happy paths ------------------------------------------------------------------------------
 
 test('architect gate: the collector persists the plan itself and attests the turn that produced it', async () => {
   const dir = repo();
-  const s = await gateSession(dir, 'PLANSTREAM architect this\n');
+  const s = await gateSession(dir, 'PLANSTREAM architect this\n', { gate: 'architect' });
   await drive(s, 'plan');
-  const r = await collect(args(s, 'architect'));
+  // --salvage on a SUCCESSFUL collect must be inert: no salvage file, no refusal record.
+  const salvage = join(s.stateDir, 'plan.unattested.md');
+  const r = await collect(args(s, 'architect', ['--salvage', salvage]));
   assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
   assert.equal(r.body.ok, true);
   assert.equal(r.body.gate, 'architect');
@@ -157,8 +201,11 @@ test('architect gate: the collector persists the plan itself and attests the tur
   assert.ok(artifact.endsWith('\n'));
   const record = JSON.parse(readFileSync(join(s.stateDir, 'attestation.json'), 'utf8'));
   assert.equal(record.schema, 1);
+  assert.equal(record.gateProtocol, 2);
   assert.equal(record.teardown, 'confirmed');
   assert.equal(record.turn.kind, 'plan');
+  assert.equal(existsSync(salvage), false, 'a successful collect must never write the salvage path');
+  assert.equal(existsSync(join(s.stateDir, 'refusal.json')), false, 'success leaves no refusal record');
   assert.equal(record.prompt.actualSha256, sha256(readFileSync(s.promptPath)));
   assert.ok(record.prompt.allowedSha256.includes(record.prompt.actualSha256));
   assert.equal(record.artifact.sha256, sha256(readFileSync(s.artifact)));
@@ -211,6 +258,13 @@ test('THE HEADLINE CASE: a session the helper never drove cannot be attested', a
   assert.equal(r.body.stopped, true);
   assert.equal(existsSync(s.artifact), false, 'nothing may be written for an unattested gate');
   assert.equal(existsSync(join(s.stateDir, 'attestation.json')), false);
+  // The refusal IS durably recorded — a refused run directory used to be indistinguishable from one
+  // where collect never ran at all.
+  const refusal = JSON.parse(readFileSync(join(s.stateDir, 'refusal.json'), 'utf8'));
+  assert.equal(refusal.reason, 'turn_not_completed');
+  assert.equal(refusal.stopped, true);
+  assert.match(refusal.collectedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal('salvagePath' in refusal, false);
 });
 
 test('a substituted prompt cannot even start a turn, so it can never be collected', async () => {
@@ -225,19 +279,94 @@ test('a substituted prompt cannot even start a turn, so it can never be collecte
   assert.equal(r.body.stopped, true);
 });
 
-test('the gate a turn belongs to is checked: a plan turn cannot certify a review (and vice versa)', async () => {
+test('the gate a SESSION is bound to is checked: an architect session cannot certify a review (and vice versa)', async () => {
+  // With the kind front-stop, a real daemon can no longer run the wrong-kind turn at all — the
+  // confusion now surfaces as a gate identity mismatch between the session and the collect line.
   const dir = repo();
-  const s1 = await gateSession(dir, 'PLANSTREAM architect this\n');
+  const s1 = await gateSession(dir, 'PLANSTREAM architect this\n', { gate: 'architect' });
   await drive(s1, 'plan');
-  const r1 = await collect(args(s1, 'review'));
-  assert.equal(r1.body.reason, 'wrong_turn_kind');
+  // gate_mismatch is a structural refusal of a COMPLETED turn — --salvage must preserve its text.
+  const salvage = join(s1.stateDir, 'plan.unattested.md');
+  const r1 = await collect(args(s1, 'review', ['--salvage', salvage]));
+  assert.equal(r1.body.reason, 'gate_mismatch');
   assert.equal(r1.body.stopped, true);
+  assert.equal(r1.body.salvaged, salvage);
+  assert.match(readFileSync(salvage, 'utf8'), /Add GET \/healthz/);
+  const refusal = JSON.parse(readFileSync(join(s1.stateDir, 'refusal.json'), 'utf8'));
+  assert.equal(refusal.reason, 'gate_mismatch');
+  assert.equal(refusal.salvagePath, salvage);
 
   const s2 = await gateSession(dir, 'REVIEWPLAN judge this\n');
   await drive(s2);
   const r2 = await collect(args(s2, 'architect'));
-  assert.equal(r2.body.reason, 'wrong_turn_kind');
+  assert.equal(r2.body.reason, 'gate_mismatch');
   assert.equal(r2.body.stopped, true);
+});
+
+test('wrong_turn_kind survives as defence in depth — and --salvage preserves the text it refuses to certify', async () => {
+  // THE INCIDENT SHAPE (docs/bugs/gate-orphaned-completed-turn.md): a completed, policy-approved,
+  // verdict-bearing turn of the wrong kind. A real 1.8.21 daemon front-stops the verb, so this is
+  // reachable only through a hand-built daemon — which is exactly what defence in depth is for.
+  // The refusal must stand AND the text must survive it.
+  const dir = repo();
+  const pid = await reapedPid();
+  const message = 'I audited the delta against the plan.\nVERDICT: ISSUES FOUND';
+  const hash = 'a'.repeat(64);
+  const f = mortalFakeDaemon((cmd) => {
+    if (cmd.cmd === 'status') return { threadId: 'thread-fake', turnStatus: 'completed', cwd: dir };
+    if (cmd.cmd === 'gate_snapshot') {
+      return { gateProtocol: 2, pid, private: true, threadId: 'thread-fake', cwd: dir, gate: 'review',
+        gatePromptSha256: [hash], promptSha256: hash, status: 'completed', message, kind: 'plan', turnToken: 1 };
+    }
+    return { ok: true };
+  });
+  const s = fakeSession(f.socket, { cwd: dir, pid });
+  const salvage = join(s.stateDir, 'review.unattested.md');
+  const r = await collect(args(s, 'review', ['--salvage', salvage]));
+  assert.equal(r.code, 2);
+  assert.equal(r.body.reason, 'wrong_turn_kind');
+  assert.equal(r.body.stopped, true);
+  assert.equal(r.body.salvaged, salvage);
+  assert.equal(readFileSync(salvage, 'utf8'), `${message}\n`);
+  assert.match(r.stderr, /NOT a gate artifact/);
+  const refusal = JSON.parse(readFileSync(join(s.stateDir, 'refusal.json'), 'utf8'));
+  assert.equal(refusal.reason, 'wrong_turn_kind');
+  assert.equal(refusal.stopped, true);
+  assert.equal(refusal.salvagePath, salvage);
+  assert.equal(existsSync(s.artifact), false, 'salvage must never touch the artifact path');
+});
+
+test('a snapshot with no gate binding, or one that contradicts the start record, is gate_mismatch', async () => {
+  const dir = repo();
+  const hash = 'a'.repeat(64);
+  const snapBase = { gateProtocol: 2, pid: process.pid, private: true, threadId: 'thread-fake', cwd: dir,
+    gatePromptSha256: [hash], promptSha256: hash, status: 'completed', message: 'x', kind: 'turn', turnToken: 1 };
+  const shortEnv = { CODEX_DRIVE_TEST_MODE: '1', CODEX_DRIVE_TEST_TEARDOWN_MS: '300' };
+
+  // gate:null — a directly-constructed daemon that never bound a kind. The collector fail-closes.
+  const f1 = fakeDaemon((cmd) => (cmd.cmd === 'status'
+    ? { threadId: 'thread-fake', turnStatus: 'completed', cwd: dir }
+    : { ...snapBase, gate: null }));
+  const r1 = await collect(args(fakeSession(f1.socket, { cwd: dir }), 'review'), shortEnv);
+  assert.equal(r1.body.reason, 'gate_mismatch');
+  assert.match(r1.stderr, /never bound to a gate/);
+
+  // start.json says architect, the live daemon says review: drift between record and daemon.
+  const f2 = fakeDaemon((cmd) => (cmd.cmd === 'status'
+    ? { threadId: 'thread-fake', turnStatus: 'completed', cwd: dir }
+    : { ...snapBase, gate: 'review' }));
+  const r2 = await collect(args(fakeSession(f2.socket, { cwd: dir, gate: 'architect' }), 'review'), shortEnv);
+  assert.equal(r2.body.reason, 'gate_mismatch');
+  assert.match(r2.stderr, /disagree about the gate kind/);
+
+  // A start.json WITHOUT gate (version-skew shape) is tolerated at the record level — the snapshot's
+  // own gate governs, so this must get PAST both gate checks (it dies later on the immortal fake's
+  // unconfirmable teardown, which proves how far it got).
+  const f3 = fakeDaemon((cmd) => (cmd.cmd === 'status'
+    ? { threadId: 'thread-fake', turnStatus: 'completed', cwd: dir }
+    : { ...snapBase, gate: 'review' }));
+  const r3 = await collect(args(fakeSession(f3.socket, { cwd: dir, gate: null }), 'review'), shortEnv);
+  assert.equal(r3.body.reason, 'teardown_unconfirmed', 'a gate-less start record must not be a gate_mismatch');
 });
 
 test('a declared failure or timeout is a CEILING a late completion cannot lift', async () => {
@@ -248,12 +377,19 @@ test('a declared failure or timeout is a CEILING a late completion cannot lift',
   for (const [outcome, reason] of [['failed', 'declared_failed'], ['timeout', 'declared_timeout']]) {
     const s = await gateSession(dir, 'REVIEWPLAN judge this\n');
     await drive(s);
+    // Even with --salvage: a DECLARED outcome never salvages — the dispatcher's own declaration is
+    // the reason, and a readable review would invite re-litigating it.
+    const salvage = join(s.stateDir, 'review.unattested.md');
     const r = await collect(['--state-dir', s.stateDir, '--gate', 'review', '--outcome', outcome,
-      '--cwd', s.start.cwd, '--artifact', s.artifact]);
+      '--cwd', s.start.cwd, '--artifact', s.artifact, '--salvage', salvage]);
     assert.equal(r.code, 2);
     assert.equal(r.body.reason, reason);
     assert.equal(r.body.stopped, true, 'the daemon must still be torn down');
     assert.equal(existsSync(s.artifact), false);
+    assert.equal(existsSync(salvage), false, 'a declared outcome must never salvage');
+    assert.equal('salvaged' in r.body, false);
+    const refusal = JSON.parse(readFileSync(join(s.stateDir, 'refusal.json'), 'utf8'));
+    assert.equal(refusal.reason, reason);
   }
 });
 
@@ -267,11 +403,38 @@ test('an empty completion and a preamble-only plan are both refused', async () =
 
   // `done` is a completed PLAN turn with no file reference, step or bullet — the reasoning-preamble
   // shape isUsablePlan() exists to reject, and exactly what a plan-less "plan" gate would attest.
-  const thin = await gateSession(dir, 'generic prompt with no plan\n');
+  const thin = await gateSession(dir, 'generic prompt with no plan\n', { gate: 'architect' });
   await drive(thin, 'plan');
   const r2 = await collect(args(thin, 'architect'));
   assert.equal(r2.body.reason, 'unusable_plan');
   assert.equal(r2.body.stopped, true);
+});
+
+test('--salvage preserves the text on structural refusals from a REAL daemon', async () => {
+  const dir = repo();
+  // prompt_mismatch: the --prompt handed to collect is not the prompt the turn ran. The review
+  // itself completed fine — exactly the class where discarding the text is pure loss.
+  const s = await gateSession(dir, 'REVIEWPLAN judge this\n');
+  await drive(s);
+  const other = join(tmp(), 'other-prompt');
+  writeFileSync(other, 'a completely different prompt\n');
+  const salvage = join(s.stateDir, 'review.unattested.md');
+  const r = await collect(args(s, 'review', ['--prompt', other, '--salvage', salvage]));
+  assert.equal(r.body.reason, 'prompt_mismatch');
+  assert.equal(r.body.stopped, true);
+  assert.equal(r.body.salvaged, salvage);
+  assert.match(readFileSync(salvage, 'utf8'), /VERDICT: NO ISSUES/);
+  assert.equal(JSON.parse(readFileSync(join(s.stateDir, 'refusal.json'), 'utf8')).salvagePath, salvage);
+
+  // unusable_plan: the preamble-only "plan" is refused as an artifact but preserved as evidence.
+  const thin = await gateSession(dir, 'generic prompt with no plan\n', { gate: 'architect' });
+  await drive(thin, 'plan');
+  const planSalvage = join(thin.stateDir, 'plan.unattested.md');
+  const r2 = await collect(args(thin, 'architect', ['--salvage', planSalvage]));
+  assert.equal(r2.body.reason, 'unusable_plan');
+  assert.equal(r2.body.salvaged, planSalvage);
+  assert.ok(readFileSync(planSalvage, 'utf8').trim().length > 0);
+  assert.equal(existsSync(thin.artifact), false);
 });
 
 // --- ownership: what the collector must NOT do ----------------------------------------------------
@@ -343,7 +506,7 @@ test('a shared session cannot certify a gate, however well it answers', async ()
   // Same refusal when the RECORD claims private but the live daemon does not.
   const f2 = fakeDaemon((cmd) => (cmd.cmd === 'status'
     ? { threadId: 'thread-fake', turnStatus: 'completed', cwd: dir }
-    : { gateProtocol: 1, pid: process.pid, private: false, threadId: 'thread-fake', cwd: dir,
+    : { gateProtocol: 2, gate: 'review', pid: process.pid, private: false, threadId: 'thread-fake', cwd: dir,
       gatePromptSha256: ['a'.repeat(64)], promptSha256: 'a'.repeat(64), status: 'completed', message: 'x', kind: 'turn', turnToken: 1 }));
   const s2 = fakeSession(f2.socket, { cwd: dir });
   const r2 = await collect(args(s2, 'review'));
@@ -354,12 +517,32 @@ test('a live daemon enforcing a different policy than the record is refused', as
   const dir = repo();
   const f = fakeDaemon((cmd) => (cmd.cmd === 'status'
     ? { threadId: 'thread-fake', turnStatus: 'completed', cwd: dir }
-    : { gateProtocol: 1, pid: process.pid, private: true, threadId: 'thread-fake', cwd: dir,
+    : { gateProtocol: 2, gate: 'review', pid: process.pid, private: true, threadId: 'thread-fake', cwd: dir,
       gatePromptSha256: ['b'.repeat(64)], promptSha256: 'b'.repeat(64), status: 'completed', message: 'x', kind: 'turn', turnToken: 1 }));
   const s = fakeSession(f.socket, { cwd: dir, policy: ['a'.repeat(64)] });
   const r = await collect(args(s, 'review'));
   assert.equal(r.body.reason, 'prompt_mismatch');
   assert.equal(r.body.stopped, false);
+});
+
+test('a 1.8.20 daemon (gate protocol 1) is runtime skew, torn down if possible, never salvaged', async () => {
+  // The one real cross-version shape: a detached gate daemon that survived a plugin upgrade. Its
+  // snapshot never bound a gate kind, so this collector cannot attest it — and because the text was
+  // read under a protocol this build does not trust, --salvage must not write it either.
+  const dir = repo();
+  const f = fakeDaemon((cmd) => (cmd.cmd === 'status'
+    ? { threadId: 'thread-fake', turnStatus: 'completed', cwd: dir }
+    : { gateProtocol: 1, pid: process.pid, private: true, threadId: 'thread-fake', cwd: dir,
+      gatePromptSha256: ['a'.repeat(64)], promptSha256: 'a'.repeat(64), status: 'completed',
+      message: 'Reviewed x.\nVERDICT: NO ISSUES', kind: 'turn', turnToken: 1 }));
+  const s = fakeSession(f.socket, { cwd: dir });
+  const salvage = join(s.stateDir, 'review.unattested.md');
+  const r = await collect(args(s, 'review', ['--salvage', salvage]), { CODEX_DRIVE_TEST_MODE: '1', CODEX_DRIVE_TEST_TEARDOWN_MS: '300' });
+  assert.equal(r.body.reason, 'runtime_skew');
+  assert.equal(r.body.stopped, false, 'the immortal fake cannot be confirmed dead');
+  assert.equal(existsSync(salvage), false);
+  assert.equal('salvaged' in r.body, false);
+  assert.equal(JSON.parse(readFileSync(join(s.stateDir, 'refusal.json'), 'utf8')).reason, 'runtime_skew');
 });
 
 test('an acknowledged stop is not a teardown: nothing is written until the daemon is provably gone', async () => {
@@ -369,7 +552,7 @@ test('an acknowledged stop is not a teardown: nothing is written until the daemo
   const f = fakeDaemon((cmd) => {
     if (cmd.cmd === 'status') return { threadId: 'thread-fake', turnStatus: 'completed', cwd: dir };
     if (cmd.cmd === 'gate_snapshot') {
-      return { gateProtocol: 1, pid: process.pid, private: true, threadId: 'thread-fake', cwd: dir,
+      return { gateProtocol: 2, gate: 'review', pid: process.pid, private: true, threadId: 'thread-fake', cwd: dir,
         gatePromptSha256: ['a'.repeat(64)], promptSha256: 'a'.repeat(64), status: 'completed',
         message: 'Reviewed x.\nVERDICT: NO ISSUES', kind: 'turn', turnToken: 1 };
     }
@@ -385,11 +568,16 @@ test('an acknowledged stop is not a teardown: nothing is written until the daemo
 
 // --- the run directory itself ---------------------------------------------------------------------
 
-test('a start record that is not a complete gate record is refused before anything is touched', async () => {
+test('a start record that is not a complete gate record is refused (stopping nothing, recording the refusal)', async () => {
   const dir = repo();
   const cases = [
     ['{}\n', 'invalid_start_record'],
     ['not json\n', 'invalid_start_record'],
+    // JSON `null` PARSES — dereferencing it used to kill the module with a bare TypeError: empty
+    // stdout, exit 1, lock burned, no refusal record. It must be an ordinary refusal like the rest.
+    ['null\n', 'invalid_start_record'],
+    ['false\n', 'invalid_start_record'],
+    ['[1,2]\n', 'invalid_start_record'],
     // A start record for an ORDINARY session: no policy means nothing ever restricted the prompts.
     [`${JSON.stringify({ ok: true, threadId: 't', socket: '/tmp/x.sock', pid: 1, cwd: dir, private: true })}\n`, 'invalid_start_record'],
     // A policy that is not a set of hashes cannot bind anything.
@@ -404,6 +592,9 @@ test('a start record that is not a complete gate record is refused before anythi
       '--cwd', dir, '--artifact', join(stateDir, 'a.md')]);
     assert.equal(r.code, 2);
     assert.equal(r.body.reason, reason, `for ${content}`);
+    assert.equal(r.body.stopped, false, 'a record-level refusal stops nothing');
+    // These fire past the lock, so the durable record must exist for every one of them.
+    assert.equal(JSON.parse(readFileSync(join(stateDir, 'refusal.json'), 'utf8')).reason, reason);
   }
 });
 
@@ -428,14 +619,22 @@ test('one collect per run directory, and pre-existing outputs are never overwrit
   const locked = await collect(args(s, 'review'));
   assert.equal(locked.body.reason, 'collect_in_progress');
   assert.equal(locked.body.stopped, false);
+  // A PRE-lock refusal records nothing: this directory is (or races) someone else's collect, and
+  // writing into it would clobber the record of whatever that collect decided.
+  assert.equal(existsSync(join(s.stateDir, 'refusal.json')), false);
 
   rmSync(join(s.stateDir, 'collect.lock'));
   writeFileSync(s.artifact, 'a plausible-looking review someone dropped here\n');
-  const pre = await collect(args(s, 'review'));
+  // A persist-phase refusal is past every structural check with the daemon already dead — the one
+  // place losing the text over a stale file would repeat the incident. --salvage must save it.
+  const salvage = join(s.stateDir, 'review.unattested.md');
+  const pre = await collect(args(s, 'review', ['--salvage', salvage]));
   assert.equal(pre.body.reason, 'preexisting_artifact');
   assert.equal(pre.body.stopped, true, 'the daemon is ours by then, so it must still be stopped');
   assert.equal(readFileSync(s.artifact, 'utf8'), 'a plausible-looking review someone dropped here\n',
     'the pre-existing file must be left exactly as found');
+  assert.equal(pre.body.salvaged, salvage);
+  assert.match(readFileSync(salvage, 'utf8'), /VERDICT: NO ISSUES/);
 });
 
 test('a missing or empty --plan is refused rather than reviewed against nothing', async () => {
@@ -457,6 +656,14 @@ test('usage errors exit 1, emit one JSON object, and touch nothing', async () =>
     [['--state-dir', stateDir, '--gate', 'review', '--outcome', 'completed', '--cwd', 'relative/path', '--artifact', join(stateDir, 'a.md')], /must be an absolute path/],
     [['--state-dir', join(stateDir, 'missing'), '--gate', 'review', '--outcome', 'completed', '--cwd', dir, '--artifact', join(stateDir, 'a.md')], /--state-dir does not exist/],
     [['--state-dir', stateDir, '--gate', 'review', '--outcome', 'completed', '--cwd', dir, '--artifact', join(stateDir, 'a.md'), '--bogus', 'x'], /unknown flag --bogus/],
+    [['--state-dir', stateDir, '--gate', 'review', '--outcome', 'completed', '--cwd', dir, '--artifact', join(stateDir, 'a.md'), '--salvage', 'relative/copy.md'], /--salvage must be an absolute path/],
+    // --salvage resolving to the artifact would hand an UNCERTIFIED text the exact name every
+    // downstream step trusts — and the comparison is on RESOLVED paths, so aliases are caught too.
+    [['--state-dir', stateDir, '--gate', 'review', '--outcome', 'completed', '--cwd', dir, '--artifact', join(stateDir, 'a.md'), '--salvage', join(stateDir, 'a.md')], /--salvage must not be the --artifact path/],
+    [['--state-dir', stateDir, '--gate', 'review', '--outcome', 'completed', '--cwd', dir, '--artifact', join(stateDir, 'a.md'), '--salvage', `${stateDir}//a.md`], /--salvage must not be the --artifact path/],
+    // Nor may salvage claim a state-dir record: planted at refusal.json it would beat the durable
+    // refusal record to its own name.
+    [['--state-dir', stateDir, '--gate', 'review', '--outcome', 'completed', '--cwd', dir, '--artifact', join(stateDir, 'a.md'), '--salvage', join(stateDir, 'refusal.json')], /--salvage must not be refusal\.json/],
   ];
   for (const [argv, pattern] of cases) {
     const r = await collect(argv);
@@ -465,6 +672,7 @@ test('usage errors exit 1, emit one JSON object, and touch nothing', async () =>
     assert.match(r.stderr, pattern);
   }
   assert.equal(existsSync(join(stateDir, 'collect.lock')), false, 'a usage error must not even take the lock');
+  assert.equal(existsSync(join(stateDir, 'refusal.json')), false, 'a usage error must record nothing');
 });
 
 test('--help is a documented success, not a refusal', async () => {
@@ -519,7 +727,7 @@ test('a session whose ONLY turn was the re-ask cannot certify', async () => {
   const r0 = await cli(['start', '--private', '--cwd', dir, '--sandbox', 'read-only',
     '--approval-policy', 'never', '--ephemeral', '--model', 'gpt-5-codex',
     '--gate-prompt-sha256', sha256(readFileSync(promptPath)),
-    '--gate-retry-prompt-sha256', sha256(readFileSync(retryPath))]);
+    '--gate-retry-prompt-sha256', sha256(readFileSync(retryPath)), '--gate', 'review']);
   const out = JSON.parse(r0.stdout);
   SPAWNED.push(out.socket);
   writeFileSync(join(stateDir, 'start.json'), r0.stdout);
@@ -530,6 +738,49 @@ test('a session whose ONLY turn was the re-ask cannot certify', async () => {
   const r = await collect(args(s, 'review'));
   assert.equal(r.body.reason, 'prompt_mismatch');
   assert.equal(r.body.stopped, true);
+});
+
+test('the re-ask guard binds to prompts that RAN, not to the turn counter', async () => {
+  // Two consecutive re-ask turns used to satisfy the old "turnToken >= 2" heuristic — a session that
+  // never ran the real brief could have a genuine completed retry turn attest it. The daemon now
+  // records which approved prompts actually started turns; the collector demands the primary.
+  const dir = repo();
+  const mk = async () => {
+    const stateDir = tmp();
+    const promptPath = join(stateDir, 'prompt');
+    const retryPath = join(stateDir, 'retry');
+    writeFileSync(promptPath, 'REVIEWPLAN the real brief\n');
+    writeFileSync(retryPath, 'REVIEWPLAN output the review NOW\n');
+    const r0 = await cli(['start', '--private', '--cwd', dir, '--sandbox', 'read-only',
+      '--approval-policy', 'never', '--ephemeral', '--model', 'gpt-5-codex',
+      '--gate-prompt-sha256', sha256(readFileSync(promptPath)),
+      '--gate-retry-prompt-sha256', sha256(readFileSync(retryPath)), '--gate', 'review']);
+    const out = JSON.parse(r0.stdout);
+    SPAWNED.push(out.socket);
+    writeFileSync(join(stateDir, 'start.json'), r0.stdout);
+    return { stateDir, promptPath, retryPath, socket: out.socket, start: out, artifact: join(stateDir, 'artifact.md') };
+  };
+
+  // The forgery: the re-ask twice. turnToken reaches 2, but the primary never ran.
+  const forged = await mk();
+  for (let i = 0; i < 2; i++) {
+    await cli(['send', '--prompt-file', forged.retryPath, '--socket', forged.socket]);
+    await cli(['wait', '--socket', forged.socket, '--timeout-ms', '20000']);
+  }
+  const r1 = await collect(args(forged, 'review'));
+  assert.equal(r1.body.reason, 'prompt_mismatch');
+  assert.equal(r1.body.stopped, true);
+  assert.match(r1.stderr, /primary brief never ran/);
+
+  // The legit shape the guard must not break: primary, then the retry — the retry's turn attests.
+  const legit = await mk();
+  for (const p of [legit.promptPath, legit.retryPath]) {
+    await cli(['send', '--prompt-file', p, '--socket', legit.socket]);
+    await cli(['wait', '--socket', legit.socket, '--timeout-ms', '20000']);
+  }
+  const r2 = await collect(args(legit, 'review'));
+  assert.equal(r2.code, 0, `${r2.stdout}${r2.stderr}`);
+  assert.equal(r2.body.turnToken, 2);
 });
 
 test('--prompt binds the record end-to-end: wrong prompt, or a plan that was never inlined, refuses', async () => {

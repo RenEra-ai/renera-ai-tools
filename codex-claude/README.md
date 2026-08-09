@@ -50,8 +50,9 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs doctor
 `/codex-issue` runs the loop in the main thread; Codex is driven by the thin `codex-architect`/`codex-impl-reviewer` subagents (dispatched via Task).
 
 **The two Codex gates are dispatcher-owned.** The main thread starts the Codex session itself
-(`start --private --gate-prompt-sha256 …`, which makes the daemon refuse any prompt it did not
-hash), hands the helper only a socket and prompt paths, and finishes the round with
+(`start --private --gate <architect|review> --gate-prompt-sha256 …`, which makes the daemon refuse
+any prompt it did not hash — and any turn of the wrong KIND for that gate), hands the helper only a
+socket and prompt paths, and finishes the round with
 `scripts/gate-attest.mjs collect` — run against the *live* daemon, which reads the result, tears the
 session down, confirms it died, and writes the plan/review file itself. Only that collector's exit-0
 JSON authorizes a gate; nothing the helper writes or says is evidence. This exists because the
@@ -111,8 +112,8 @@ object on stdout.
 
 | Verb | Purpose |
 |---|---|
-| `doctor` | Report Codex version, auth presence, thread count. |
-| `start [--cwd <p>] [--model <m>] [--resume-latest \| --resume <uuid>] [--private] [--sandbox <s>] [--approval-policy <p>] [--ephemeral]` | Boot the session daemon, open/resume a thread. `--private` keeps it out of the global state file. |
+| `doctor` | Report Codex version, auth presence, thread count — and `daemons`, every live detached session found by probing `~/.codex-drive/*.sock` (provably dead socket files are pruned). |
+| `start [--cwd <p>] [--model <m>] [--resume-latest \| --resume <uuid>] [--private] [--sandbox <s>] [--approval-policy <p>] [--ephemeral] [--gate-prompt-sha256 <hex> [--gate-retry-prompt-sha256 <hex>] --gate <architect\|review>]` | Boot the session daemon, open/resume a thread. `--private` keeps it out of the global state file. The gate flags bind the session to those prompt hashes AND (via `--gate`, required with them) to the gate's turn kind. |
 | `plan "<prompt>" [--effort ultra] [--approval-policy untrusted]` | Plan-mode (read-only architect) turn. |
 | `send "<prompt>" [--effort <e>] [--mode default] [--approval-policy untrusted]` | Default/review turn (prompt-based). |
 | `review [--base <ref\|sha> \| --scope <auto\|working-tree\|branch>]` | **Native git-scoped commit review** (`review/start`) — the built-in reviewer, no prompt. Needs a `--sandbox read-only --approval-policy never --ephemeral` session. |
@@ -121,7 +122,7 @@ object on stdout.
 | `approve --decision allow\|deny` | Answer a parked exec/file approval. |
 | `read [--out <path>]` | Return the last assistant message (plan or review); `--out` also writes it (relative paths resolve against the daemon's cwd). |
 | `interrupt` | Cancel the in-flight turn. |
-| `status` | Daemon / thread / turn state (incl. `cwd`). |
+| `status` | Daemon / thread / turn state (incl. `pid` and `cwd`). |
 | `stop` | Graceful shutdown (kill app-server, remove socket). |
 
 Every verb except `start`/`doctor` accepts `--socket <path>` to address a specific daemon instead of

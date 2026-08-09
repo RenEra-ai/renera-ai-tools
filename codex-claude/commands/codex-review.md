@@ -41,26 +41,37 @@ below prints the paths it mints and later calls use those **literal absolute pat
 3. Hash both and start the session (one Bash call, literal paths):
    ```bash
    SHA() { node -e 'process.stdout.write(require("crypto").createHash("sha256").update(require("fs").readFileSync(process.argv[1])).digest("hex"))' "$1"; }
-   $CDX start --private --cwd "<ROOT>" --gate-prompt-sha256 "$(SHA "<PROMPT_DIR>/prompt")" \
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --private --cwd "<ROOT>" --gate review \
+     --gate-prompt-sha256 "$(SHA "<PROMPT_DIR>/prompt")" \
      --gate-retry-prompt-sha256 "$(SHA "<PROMPT_DIR>/retry")" > "<RUN_DIR>/start.json"
    cat "<RUN_DIR>/start.json"
    ```
-   Keep that stdout verbatim; take `socket` from it as the literal `<GATE_SOCKET>`.
+   Keep that stdout verbatim; take `socket` from it as the literal `<GATE_SOCKET>`. `--gate review`
+   binds the session to plain `send` turns — the daemon refuses any other verb before it runs.
 4. Dispatch the **codex-impl-reviewer** subagent (Task) — **without a `name`**: passing one puts it in
    teammate mode, where the plugin `subagent_type` is silently dropped and its report never returns.
    Pass the literal `GATE_SOCKET`, `PROMPT_PATH=<PROMPT_DIR>/prompt`,
-   `RETRY_PROMPT_PATH=<PROMPT_DIR>/retry`.
+   `RETRY_PROMPT_PATH=<PROMPT_DIR>/retry`. **Name the verb in your dispatch prompt:
+   `send --prompt-file` (the retry too)** — the collector certifies a review gate only from a plain
+   `send` (kind `turn`), and the daemon answers a plan turn with
+   `{error:"wrong_gate_turn_kind","expected":"send"}` (`docs/bugs/gate-orphaned-completed-turn.md`).
 5. ```bash
    node ${CLAUDE_PLUGIN_ROOT}/scripts/gate-attest.mjs collect --state-dir "<RUN_DIR>" --gate review \
-     --outcome completed --cwd "<ROOT>" --artifact "<RUN_DIR>/review.md" --prompt "<PROMPT_DIR>/prompt"
+     --outcome completed --cwd "<ROOT>" --artifact "<RUN_DIR>/review.md" --prompt "<PROMPT_DIR>/prompt" \
+     --salvage "<RUN_DIR>/review.unattested.md"
    ```
-   (use `--outcome failed` if the Task errored — the daemon is still torn down, and the round cannot
-   be certified).
+   **A Task that errored, was interrupted, or was denied says nothing about the turn** — the daemon
+   is detached and the turn completes regardless. Probe `status --socket "<GATE_SOCKET>"` first:
+   `turnStatus:"completed"` → collect with `--outcome completed`; `running` → keep `wait`-polling.
+   Only a turn you know failed (or are abandoning) gets `--outcome failed` — the daemon is still
+   torn down, and the round cannot be certified.
 
 Then:
 - `ok:true` → present the findings from **`<RUN_DIR>/review.md`** grouped by severity, each with
   `file:line` and a concrete fix. Say "no issues" **only** for `parsedVerdict: "NO ISSUES"`; report
   `UNCLEAR` as an incomplete review, never as clean.
 - `ok:false` → tell me the Codex gate did not run and why (`reason`); do not present a review. If
-  `stopped:false`, keep both directories and show the recovery command it printed.
+  `stopped:false`, keep both directories and show the recovery command it printed. If the JSON
+  carries `salvaged`, `<RUN_DIR>/review.unattested.md` holds the refused turn's text — show me that
+  it exists, but never present it as the review: it is uncertified evidence, not findings.
 - Do **not** auto-apply fixes unless I ask — surface them first.

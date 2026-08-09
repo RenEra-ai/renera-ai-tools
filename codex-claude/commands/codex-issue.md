@@ -127,23 +127,41 @@ it mints and every later call uses those **literal absolute paths**. Substitute 
 3. **Hash them and start the gate session** (one Bash call, literal paths):
    ```bash
    SHA() { node -e 'process.stdout.write(require("crypto").createHash("sha256").update(require("fs").readFileSync(process.argv[1])).digest("hex"))' "$1"; }
-   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --private --cwd "<ROOT>" \
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --private --cwd "<ROOT>" --gate architect \
      --gate-prompt-sha256 "$(SHA "<PROMPT_DIR>/prompt")" \
      --gate-retry-prompt-sha256 "$(SHA "<PROMPT_DIR>/retry")" > "<RUN_DIR>/start.json"
    cat "<RUN_DIR>/start.json"
    ```
    Keep that stdout **verbatim** — the collector checks the live daemon against it. Take `socket`
-   from the printed JSON as the literal `<GATE_SOCKET>`.
+   from the printed JSON as the literal `<GATE_SOCKET>`. `--gate architect` binds the session to
+   **`plan` turns**: the daemon refuses any other verb before it runs, instead of the collector
+   discovering the mismatch after a completed turn (`docs/bugs/gate-orphaned-completed-turn.md`).
 4. **Dispatch the codex-architect subagent (Task, no `name`)** passing the literals `GATE_SOCKET`,
    `PROMPT_PATH=<PROMPT_DIR>/prompt`, `RETRY_PROMPT_PATH=<PROMPT_DIR>/retry`. It returns
    `STATUS: READY` or `STATUS: FAILED`; either way it leaves the daemon running for you.
+   **Your dispatch prompt MUST name the verb: `plan --prompt-file` — for the retry too.** The
+   collector certifies an architect gate only from a turn of kind `plan`, and the daemon enforces it
+   up front (`{error:"wrong_gate_turn_kind","expected":"plan"}` on a plain `send`). Do not
+   paraphrase the verb away: an instruction that names no verb is how a helper once drove a gate
+   with the wrong one.
 5. **Collect — this, not the helper's word, is the gate:**
    ```bash
    node ${CLAUDE_PLUGIN_ROOT}/scripts/gate-attest.mjs collect --state-dir "<RUN_DIR>" --gate architect \
-     --outcome completed --cwd "<ROOT>" --artifact "<RUN_DIR>/plan.md" --prompt "<PROMPT_DIR>/prompt"
+     --outcome completed --cwd "<ROOT>" --artifact "<RUN_DIR>/plan.md" --prompt "<PROMPT_DIR>/prompt" \
+     --salvage "<RUN_DIR>/plan.unattested.md"
    ```
-   Use `--outcome failed` (or `timeout`) if the Task errored or you gave up on it — the daemon still
-   gets torn down, and the round then cannot be certified.
+   **A Task that errored, was interrupted, or was denied says nothing about the turn** — the daemon
+   is detached and the turn runs to completion regardless (`docs/bugs/gate-orphaned-completed-turn.md`:
+   a turn once outlived its dead helper and finished). Before declaring the round dead, probe:
+   ```bash
+   node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs status --socket "<GATE_SOCKET>"
+   ```
+   `turnStatus:"completed"` → the round is collectable: run the collect above, `--outcome completed`.
+   `running` → keep polling `wait --timeout-ms 300000 --socket "<GATE_SOCKET>"` in fresh Bash calls
+   until terminal, then collect. Only when the **turn itself** failed, or you are abandoning it, use
+   `--outcome failed` (or `timeout`) — the daemon still gets torn down, and the round then cannot be
+   certified. Either way, every refusal taken past the collect lock leaves `<RUN_DIR>/refusal.json`
+   behind (`scripts/gate-attest-status.mjs --state-dir "<RUN_DIR>"` reads it back if stdout was lost).
 6. **Branch on the collector's JSON only.** `ok:true` → copy the artifact **and its record**:
    ```bash
    mkdir -p .codex/plans
@@ -156,7 +174,10 @@ it mints and every later call uses those **literal absolute paths**. Substitute 
    before deleting the run dir. `ok:false` → **abort** with "Codex architect gate unattested
    (`<reason>`)"; never improvise a plan, and never treat a `STATUS: READY` as evidence on its own.
    If the collector reported `stopped:false`, **keep both directories** and surface the recovery line
-   it printed on stderr: something still owns a live daemon.
+   it printed on stderr: something still owns a live daemon. If it salvaged
+   (`salvaged` in the JSON), `<RUN_DIR>/plan.unattested.md` preserves the refused turn's text as
+   evidence for the abort report — it is **NOT** an artifact: never treat it as `$PLAN_PATH`, never
+   copy it into `.codex/plans/`.
 
 ## 4. Claude implementation plan (read-only, plan-mode)
 
@@ -240,18 +261,28 @@ per round, in a fresh run dir (`mktemp -d /tmp/cdx-gate-review.XXXXXX`):
    a `cat` and not a Write. You **MAY** append the issue's acceptance criteria under a **separate**
    `=== ISSUE ACCEPTANCE CRITERIA ===` header, never merged into the plan block. Write
    `<PROMPT_DIR>/retry` (the complete re-ask) too.
-3. Hash both and start the gate session exactly as §3 step 3, saving stdout verbatim to
-   `<RUN_DIR>/start.json`; take the socket from it.
+3. Hash both and start the gate session exactly as §3 step 3 — **but with `--gate review`, not
+   `--gate architect`** — saving stdout verbatim to `<RUN_DIR>/start.json`; take the socket from it.
+   `--gate review` binds the session to **plain `send` turns** (the daemon refuses `plan` up front).
 4. Dispatch the **codex-impl-reviewer** subagent (Task, **no `name`**) with the literal
    `GATE_SOCKET`, `PROMPT_PATH=<PROMPT_DIR>/prompt`, `RETRY_PROMPT_PATH=<PROMPT_DIR>/retry`. It
    reviews and reports; it stops nothing.
+   **Your dispatch prompt MUST name the verb: `send --prompt-file` — for the retry too.** The
+   collector certifies a review gate only from a turn of kind `turn` (a plain `send`), and the
+   daemon enforces it up front (`{error:"wrong_gate_turn_kind","expected":"send"}` on `plan`). The
+   incident behind this rule (`docs/bugs/gate-orphaned-completed-turn.md`) was a dispatcher prompt
+   that said `plan` for a review gate: the 17-minute turn completed and was then unattestable.
 5. Collect:
    ```bash
    node ${CLAUDE_PLUGIN_ROOT}/scripts/gate-attest.mjs collect --state-dir "<RUN_DIR>" --gate review \
      --outcome completed --cwd "<ROOT>" --artifact "<RUN_DIR>/review.md" \
-     --prompt "<PROMPT_DIR>/prompt" --plan "$PLAN_PATH"
+     --prompt "<PROMPT_DIR>/prompt" --plan "$PLAN_PATH" --salvage "<RUN_DIR>/review.unattested.md"
    ```
-   (`--outcome failed|timeout` if the Task died or you abandoned the round.) Passing **both**
+   **Dead-helper rule, same as §3 step 5: probe before declaring.** A Task that errored, was
+   interrupted, or was denied says nothing about the turn — it survives its driver and completes.
+   `status --socket "<GATE_SOCKET>"` first: `completed` → collect with `--outcome completed`;
+   `running` → keep `wait`-polling; only a turn you know failed (or are abandoning) gets
+   `--outcome failed|timeout`. Passing **both**
    `--prompt` and `--plan` is what makes the record's "reviewed against this plan" claim checkable:
    the collector verifies the prompt is the one the turn actually ran **and** that the plan's bytes
    are inside it, so a round where the inlining was skipped fails the gate instead of quietly
@@ -274,7 +305,11 @@ round, or keep them if `stopped:false`:
 - `ok:false` → **abort** with "Codex review gate unattested (`<reason>`)". This is **not** a finding
   and must **never** enter §7 — it means the gate did not run, and iterating on it would burn every
   remaining round exactly as the incident did. `stopped:false` → keep the round's directories and
-  surface the recovery line.
+  surface the recovery line. If the JSON carries `salvaged`, `<RUN_DIR>/review.unattested.md`
+  preserves the refused turn's text — it is **NOT** a gate artifact: never read it as findings,
+  never hand it to §7, never copy it over `review.md`; it exists only as evidence for the abort
+  report and for deciding whether to re-run the round. A refusal also leaves `<RUN_DIR>/refusal.json`
+  (readable later with `scripts/gate-attest-status.mjs`).
 
 ## 7. Address findings (you, with full development context)
 

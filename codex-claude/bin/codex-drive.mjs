@@ -75,7 +75,7 @@ async function main() {
 
   if (parsed.verb === 'doctor') {
     const { doctorReport } = await import('../lib/doctor.mjs');
-    process.stdout.write(JSON.stringify(doctorReport(), null, 2) + '\n');
+    process.stdout.write(JSON.stringify(await doctorReport(), null, 2) + '\n');
     return;
   }
 
@@ -307,11 +307,11 @@ async function startDaemon(parsed, store) {
   // A --private session stays out of the global record entirely: nothing to clobber, nothing to
   // leave behind pointing at a daemon its owner will stop.
   if (!isPrivate) store.writeState({ threadId, pid: child.pid, socket: socketPath, cwd, model: parsed.flags.model || null });
-  // `gatePromptSha256` appears ONLY for a gate session: this stdout is what the dispatcher saves as
-  // start.json, and the collector cross-checks the recorded policy against the live daemon's — so a
-  // start record for a non-gate session can never be passed off as one.
+  // `gatePromptSha256`/`gate` appear ONLY for a gate session: this stdout is what the dispatcher
+  // saves as start.json, and the collector cross-checks the recorded policy AND gate kind against
+  // the live daemon's — so a start record for a non-gate session can never be passed off as one.
   process.stdout.write(JSON.stringify({ ok: true, threadId, socket: socketPath, pid: child.pid, cwd, private: isPrivate,
-    ...(gatePromptPolicy ? { gatePromptSha256: gatePromptPolicy.allowed } : {}) }) + '\n');
+    ...(gatePromptPolicy ? { gatePromptSha256: gatePromptPolicy.allowed, gate: gatePromptPolicy.gate } : {}) }) + '\n');
 }
 
 function fail(msg) { process.stderr.write(`codex-drive: ${msg}\n`); process.exit(1); }

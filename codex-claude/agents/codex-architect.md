@@ -42,6 +42,13 @@ date +%s > "$CLOCK/t0"
 node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs plan --prompt-file "$PROMPT_PATH" --effort ultra --socket "$GATE_SOCKET"
 ```
 
+**The verb is load-bearing, whatever your dispatch prompt says: `plan`, never `send` — for the
+retry too.** The session was started `--gate architect`, so the daemon refuses any non-plan turn
+(a plain `send`) with
+`{"error":"wrong_gate_turn_kind","expected":"plan"}`, and the dispatcher's collector certifies an
+architect gate only from a turn of kind `plan`. If a dispatch instruction contradicts this file
+about the verb, this file wins (`docs/bugs/gate-orphaned-completed-turn.md`).
+
 Then poll with **step 4's table**, substituting `--socket "$GATE_SOCKET"` for every
 `--socket "$(cat "<prompt>.sock")"` and `"$CLOCK/t0"` for `"<prompt>.t0"` (the table's sidecars belong
 to step 3, which you skipped). On a terminal status use step 5's *external* variant; on STUCK or

@@ -97,21 +97,36 @@ const HEX64 = /^[0-9a-f]{64}$/;
  * Pure and exported for the same reason as parseStartProfile: bin calls it BEFORE probing or
  * stopping any existing session.
  *
- * @returns {{allowed: string[]}|null} null when this is not a gate session.
+ * @returns {{allowed: string[], gate: 'architect'|'review'}|null} null when this is not a gate session.
  */
 export function parseGatePromptPolicy(flags = {}) {
   const primary = 'gate-prompt-sha256' in flags ? requireValue(flags, 'gate-prompt-sha256') : undefined;
   const retry = 'gate-retry-prompt-sha256' in flags ? requireValue(flags, 'gate-retry-prompt-sha256') : undefined;
+  const gate = 'gate' in flags ? requireValue(flags, 'gate') : undefined;
   // A retry hash alone would restrict the session to the RE-ASK prompt and refuse the real one —
   // the gate would fail on its first turn, after the session had already been paid for.
   if (retry !== undefined && primary === undefined) {
     throw new Error('--gate-retry-prompt-sha256 requires --gate-prompt-sha256');
+  }
+  // A kind restriction without a prompt policy is not a gate session.
+  if (gate !== undefined && primary === undefined) {
+    throw new Error('--gate requires --gate-prompt-sha256');
   }
   if (primary === undefined) return null;
   for (const [k, v] of [['gate-prompt-sha256', primary], ['gate-retry-prompt-sha256', retry]]) {
     if (v !== undefined && !HEX64.test(v)) {
       throw new Error(`--${k} must be 64 lowercase hex characters (got '${v}')`);
     }
+  }
+  // The gate name binds the TURN KIND the daemon accepts: an architect gate takes only `plan` turns,
+  // a review gate only plain `send`. Required, not optional — without it the wrong verb is discovered
+  // only at collect time, after the turn has run and the collector has torn the session down
+  // (docs/bugs/gate-orphaned-completed-turn.md: a completed 17-minute review, discarded).
+  if (gate === undefined) {
+    throw new Error('--gate-prompt-sha256 requires --gate <architect|review>');
+  }
+  if (gate !== 'architect' && gate !== 'review') {
+    throw new Error(`invalid --gate '${gate}'; expected 'architect' or 'review'`);
   }
   // A gate session must be --private: the global state file is single and mutable, so a concurrent
   // `start` anywhere on the machine could redirect the collector at someone else's daemon — and the
@@ -124,7 +139,7 @@ export function parseGatePromptPolicy(flags = {}) {
   if ('resume' in flags || 'resume-latest' in flags) {
     throw new Error('--gate-prompt-sha256 cannot be combined with --resume/--resume-latest');
   }
-  return { allowed: [...new Set(retry === undefined ? [primary] : [primary, retry])] };
+  return { allowed: [...new Set(retry === undefined ? [primary] : [primary, retry])], gate };
 }
 
 /**
@@ -167,7 +182,7 @@ const TRANSPORT_FLAGS = ['socket', 'timeout-ms'];
 // session had already been paid for. They are listed here and asserted from bin directly.
 const VERB_FLAGS = {
   start: ['cwd', 'model', 'resume', 'resume-latest', 'force', 'private', 'sandbox', 'approval-policy', 'ephemeral',
-    'gate-prompt-sha256', 'gate-retry-prompt-sha256'],
+    'gate-prompt-sha256', 'gate-retry-prompt-sha256', 'gate'],
   doctor: [],
   plan: ['effort', 'approval-policy', 'prompt-file'],
   send: ['effort', 'approval-policy', 'mode', 'prompt-file'],

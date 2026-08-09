@@ -47,6 +47,14 @@ date +%s > "$CLOCK/t0"
 node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs send --prompt-file "$PROMPT_PATH" --effort ultra --socket "$GATE_SOCKET"
 ```
 
+**The verb is load-bearing, whatever your dispatch prompt says: a plain `send`, never `plan` — for
+the retry too.** The session was started `--gate review`, so the daemon refuses any plan turn
+(`plan`, or `send --mode plan`) with
+`{"error":"wrong_gate_turn_kind","expected":"send"}`, and the dispatcher's collector certifies a
+review gate only from a turn of kind `turn` (a plain send). If a dispatch instruction contradicts
+this file about the verb, this file wins — a dispatcher prompt that said `plan` is exactly how a
+completed 17-minute review became unattestable (`docs/bugs/gate-orphaned-completed-turn.md`).
+
 Then poll with **step 4's table**, substituting `--socket "$GATE_SOCKET"` for every
 `--socket "$(cat "<prompt>.sock")"` and `"$CLOCK/t0"` for `"<prompt>.t0"`. On a terminal status run
 only `read --parsed-verdict --socket "$GATE_SOCKET"` (no `stop`), then report as in step 5. The

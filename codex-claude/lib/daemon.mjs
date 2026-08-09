@@ -39,13 +39,21 @@ export class Daemon {
     this.profile = profile;
     // GATE session state. `privateSession` is recorded (not inferred) so `gate_snapshot` can prove
     // it: a shared session's socket can be redirected by any concurrent `start`, so a gate that ran
-    // on one is not attestable. `gatePromptPolicy` = {allowed: [sha256…]} restricts which prompts
-    // may start a turn AT ALL — the helper agent holds a live socket, and this is what stops it
-    // substituting its own cheap prompt and having that turn certify the gate.
+    // on one is not attestable. `gatePromptPolicy` = {allowed: [sha256…], gate} restricts which
+    // prompts may start a turn AT ALL — the helper agent holds a live socket, and this is what stops
+    // it substituting its own cheap prompt and having that turn certify the gate. `gate` additionally
+    // binds the turn KIND (architect ⇒ plan, review ⇒ plain send); the CLI always supplies it, and
+    // `null` is tolerated only for direct construction — the collector fail-closes on it.
     this.privateSession = privateSession === true;
     this.gatePromptPolicy = gatePromptPolicy && Array.isArray(gatePromptPolicy.allowed) && gatePromptPolicy.allowed.length
-      ? { allowed: [...gatePromptPolicy.allowed] }
+      ? { allowed: [...gatePromptPolicy.allowed],
+          gate: gatePromptPolicy.gate === 'architect' || gatePromptPolicy.gate === 'review' ? gatePromptPolicy.gate : null }
       : null;
+    // Every approved prompt hash that actually STARTED a turn, session-lifetime. The snapshot's
+    // promptSha256 names only the LAST turn, so without this a helper could run the context-free
+    // retry prompt twice and have "a retry with turnToken 2" certify a session that never ran the
+    // real brief — the collector demands the primary appear here.
+    this._gatePromptsSeen = new Set();
     this.app = null;
     this.server = null;
     this.threadId = null;
@@ -174,17 +182,25 @@ export class Daemon {
       // never belonged to it. A daemon from an older build answers `unknown_cmd`, which is the
       // collector's explicit runtime-skew signal rather than a silently weaker check.
       case 'gate_snapshot': return {
-        gateProtocol: 1,
+        // Protocol 2: the reply carries `gate`, and the collector's certification depends on it —
+        // a versionless new field would make missing-vs-mismatched ambiguous, so the bump converts
+        // every older-daemon shape into the collector's explicit runtime_skew path.
+        gateProtocol: 2,
         pid: process.pid,
         private: this.privateSession,
         threadId: this.threadId,
         cwd: this.cwd,
+        gate: this.gatePromptPolicy ? this.gatePromptPolicy.gate : null,
         gatePromptSha256: this.gatePromptPolicy ? [...this.gatePromptPolicy.allowed] : [],
         promptSha256: this.turn.promptSha256,
+        promptSha256Seen: [...this._gatePromptsSeen],
         ...this._completedResult(),
       };
       case 'interrupt': return this._interrupt();
       case 'status': return {
+        // pid lets doctor (and a dispatcher recovering an orphan) account for the process behind a
+        // socket without a ps round-trip.
+        pid: process.pid,
         threadId: this.threadId, turnStatus: this.turn.status,
         parked: this.turn.parked ? this.turn.parked.kind : null, cwd: this.cwd,
         // Activity for pollers: ms since ANY app-server traffic this turn (own thread, delegated
@@ -218,6 +234,18 @@ export class Daemon {
     if (this.gatePromptPolicy && !this.gatePromptPolicy.allowed.includes(promptSha256)) {
       return { error: 'wrong_gate_prompt', allowed: this.gatePromptPolicy.allowed.length };
     }
+    // GATE KIND (front-stop). The collector certifies an architect gate only from a `plan` turn and
+    // a review gate only from a plain `send` (kind 'turn'); discovering the wrong verb at collect
+    // time once cost a completed 17-minute review (docs/bugs/gate-orphaned-completed-turn.md).
+    // Synchronous and before _beginTurn — no gen spent, no turn started, the same shape as the
+    // prompt gate — and per-turn, so retries are bound to the same kind. `expected` names the VERB
+    // the recipe uses, the actionable form for a helper that just used the wrong one.
+    if (this.gatePromptPolicy && this.gatePromptPolicy.gate) {
+      const wantPlan = this.gatePromptPolicy.gate === 'architect';
+      if (wantPlan !== (mode === 'plan')) {
+        return { error: 'wrong_gate_turn_kind', expected: wantPlan ? 'plan' : 'send' };
+      }
+    }
     // mode: 'plan' | 'default' | undefined. plan & default set collaborationMode (model required);
     // undefined = plain send (no collaborationMode; inherits the thread's current mode).
     const explicitMode = mode === 'plan' || mode === 'default' ? mode : undefined;
@@ -237,6 +265,7 @@ export class Daemon {
     // plan) is NOT plan-producing, so a review's internal-checklist item/plan/delta can't shadow its
     // agentMessage/VERDICT. (plan-round's static re-ask therefore issues an explicit `plan` turn, not a
     // bare `send`.) Per-turn, so a rejected start can never desync it from the server thread.
+    if (this.gatePromptPolicy) this._gatePromptsSeen.add(promptSha256);
     this._beginTurn({ isPlan: explicitMode === 'plan', promptSha256 });
     this._sendStart(METHODS.TURN_START, params, 'turn/start');
     return { ok: true, status: 'running' };

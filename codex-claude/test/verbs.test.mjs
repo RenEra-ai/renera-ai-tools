@@ -197,27 +197,39 @@ test('parseGatePromptPolicy accepts a hashed gate session and rejects every unus
   assert.equal(parseGatePromptPolicy({}), null);
   const a = 'a'.repeat(64);
   const b = 'b'.repeat(64);
-  assert.deepEqual(parseGatePromptPolicy({ 'gate-prompt-sha256': a, private: true }), { allowed: [a] });
-  assert.deepEqual(parseGatePromptPolicy({ 'gate-prompt-sha256': a, 'gate-retry-prompt-sha256': b, private: true }),
-    { allowed: [a, b] });
+  assert.deepEqual(parseGatePromptPolicy({ 'gate-prompt-sha256': a, gate: 'review', private: true }),
+    { allowed: [a], gate: 'review' });
+  assert.deepEqual(parseGatePromptPolicy({ 'gate-prompt-sha256': a, 'gate-retry-prompt-sha256': b, gate: 'architect', private: true }),
+    { allowed: [a, b], gate: 'architect' });
   // An identical retry prompt is not an error, just one entry.
-  assert.deepEqual(parseGatePromptPolicy({ 'gate-prompt-sha256': a, 'gate-retry-prompt-sha256': a, private: true }),
-    { allowed: [a] });
+  assert.deepEqual(parseGatePromptPolicy({ 'gate-prompt-sha256': a, 'gate-retry-prompt-sha256': a, gate: 'review', private: true }),
+    { allowed: [a], gate: 'review' });
   // A retry hash alone would restrict the session to the RE-ASK prompt and refuse the real one.
-  assert.throws(() => parseGatePromptPolicy({ 'gate-retry-prompt-sha256': b, private: true }),
+  assert.throws(() => parseGatePromptPolicy({ 'gate-retry-prompt-sha256': b, gate: 'review', private: true }),
     /--gate-retry-prompt-sha256 requires --gate-prompt-sha256/);
-  assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': 'A'.repeat(64), private: true }),
+  // The gate name binds the turn kind; a hash without it reproduces the wrong-verb loss the kind
+  // front-stop exists to prevent, so the pair is mandatory in both directions.
+  assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': a, private: true }),
+    /--gate-prompt-sha256 requires --gate <architect\|review>/);
+  assert.throws(() => parseGatePromptPolicy({ gate: 'review', private: true }),
+    /--gate requires --gate-prompt-sha256/);
+  assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': a, gate: 'bogus', private: true }),
+    /invalid --gate 'bogus'; expected 'architect' or 'review'/);
+  assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': a, gate: true, private: true }),
+    /--gate requires a value/);
+  assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': 'A'.repeat(64), gate: 'review', private: true }),
     /64 lowercase hex/);
-  assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': 'abc', private: true }), /64 lowercase hex/);
+  assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': 'abc', gate: 'review', private: true }), /64 lowercase hex/);
   assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': true, private: true }),
     /--gate-prompt-sha256 requires a value/);
   // A shared session's socket can be redirected by any concurrent `start`, so the collector could
   // not prove WHICH daemon it talked to.
-  assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': a }), /requires --private/);
+  assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': a, gate: 'review' }), /requires --private/);
   // A resumed thread carries turns that predate the policy — a snapshot could attest one of those.
-  assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': a, private: true, resume: 'x' }),
+  assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': a, gate: 'review', private: true, resume: 'x' }),
     /cannot be combined with --resume/);
-  assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': a, private: true, 'resume-latest': true }),
+  assert.throws(() => parseGatePromptPolicy({ 'gate-prompt-sha256': a, gate: 'review', private: true, 'resume-latest': true }),
     /cannot be combined with --resume/);
-  assert.doesNotThrow(() => assertKnownFlags('start', { 'gate-prompt-sha256': a, 'gate-retry-prompt-sha256': b, private: true }));
+  assert.doesNotThrow(() => assertKnownFlags('start',
+    { 'gate-prompt-sha256': a, 'gate-retry-prompt-sha256': b, gate: 'review', private: true }));
 });
