@@ -195,8 +195,10 @@ The main thread does the rest itself: it **develops** (running the repo's own wo
 QA/review gates, dispatched subagents **and** command gates it names like its own
 Codex review, which the §6 plan review never substitutes for), then **addresses** each review round's findings via the
 **receiving-code-review** skill (verify, fix genuine issues, push back on false positives — never blind
-compliance), re-running the repo's gates (its own Codex review gate included) on each fix delta, until the verdict is `VERDICT: NO ISSUES` or the max rounds
-(default 6) is hit. Every Codex session is **owned and short-lived** — a detached private daemon the
+compliance), re-running the repo's gates (its own Codex review gate included) on each fix delta, until
+the verdict is `VERDICT: NO ISSUES` or the round checkpoint (default 6) forces a recorded
+continue/defer/escalate decision — an applied fix always gets its validation before any stop.
+Every Codex session is **owned and short-lived** — a detached private daemon the
 driving agent starts, polls, and always stops (never the shared global session); the saved design-plan
 **file** is concatenated **verbatim** into each review prompt (byte-for-byte via `cat`, so the gate
 always judges against the exact approved plan — never a paraphrase), so nothing outlives its run.
@@ -204,8 +206,10 @@ Finish: `git push` + `gh pr create` (`Closes #N`
 closes the issue on a merge **into the default branch**; a non-default base like `dev` is flagged for a
 manual close). The loop never auto-merges and never closes the issue itself.
 
-Brakes: `--dry-run` stops before push/PR; the loop halts after the max rounds rather than push an
-un-clean change. **Robustness:** a Codex turn that ends `completed` but empty/preamble-only is retried
+Brakes: `--dry-run` stops before push/PR; at the max rounds the loop records a checkpoint decision
+(continue / defer / escalate — per the repo's own round semantics when its process docs define them)
+instead of pushing an un-clean change, and never stops with the latest fix delta unvalidated.
+**Robustness:** a Codex turn that ends `completed` but empty/preamble-only is retried
 in-thread by the driver; review verdicts use a structured last-line `VERDICT: …` (no fragile substring
 matching). This autonomous path deliberately **overrides** the human-supervised default — use the
 manual `/codex-architect` + `/codex-review` flow when you want to see and decide each step yourself.

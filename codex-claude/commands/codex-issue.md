@@ -35,8 +35,9 @@ CDX="node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs"
 
 This is **fully autonomous**: you make the judgment calls (answering ambiguity from the issue/code,
 approving the implementation plan, deciding when a review is clean) — the only brakes are `--dry-run`
-(stop before push/PR) and **max review rounds** (default 6 → stop before push, report state; never
-push an un-clean change). `gh` (authenticated) is required for issue intake and the finish.
+(stop before push/PR) and the **review-round checkpoint** (default 6 → a recorded checkpoint decision
+per §7, never a bare stop; never push an un-clean change). `gh` (authenticated) is required for issue
+intake and the finish.
 
 Follow the **codex-claude** skill for the exact `codex-drive` verb contract used by the helper agents.
 
@@ -352,8 +353,14 @@ gates for this round (tests, a custom review/QA subagent, or a Codex/AI review c
 Codex review turn in flight at a time** (per §6). This is the exact spot where "batch the
 independent calls" tempts a parallel dispatch — resist it: these gates only *look* independent. Then
 increment the round counter and return to §6 **scoped to the fix delta** (tell the reviewer to review
-only the newly changed files). Stop when clean, or at the max (default 6) → do **not** push; report the
-outstanding findings and current state.
+only the newly changed files). Exit the loop when clean. The max review rounds (default 6) is a
+**checkpoint, never a hard stop** — reaching it can never strand applied work: a committed fix delta
+that has not yet had its delta-scoped §6 re-review gets that one review **first** (an applied fix's
+validation is owed unconditionally, round budget or not). Only then record ONE checkpoint decision:
+if the repo's own process docs (`CLAUDE.md`/`AGENTS.md`) define round/checkpoint semantics, follow
+them (continue another window / defer to a filed follow-up / escalate); otherwise stop without
+pushing and report the outstanding findings, the current state, and the recorded decision. Never push
+an un-clean change, and never end the run with the latest fix delta unreviewed at HEAD.
 
 ## 8. Finish — integrate (skip entirely if `--dry-run`)
 

@@ -81,8 +81,10 @@ hands-off in the main thread:
    (e.g. `dev`) the main thread flags that the issue needs a manual close.
 
 It is **fully autonomous and ends in irreversible actions** (push / PR). Brakes: `--dry-run`
-stops before integration; the loop halts after a max round count (default 6) rather than push an
-un-clean change. This deliberately overrides the human-supervised model of `/codex-architect` +
+stops before integration; the review loop reaches a checkpoint at a max round count (default 6) —
+it validates the last applied fix, records a continue/defer/escalate decision (deferring to the
+repo's own round semantics when its process docs define them), and never pushes an un-clean
+change. This deliberately overrides the human-supervised model of `/codex-architect` +
 `/codex-review` — use those when you want to drive each step yourself. Requires `gh` (GitHub CLI)
 authenticated for the integration step.
 
