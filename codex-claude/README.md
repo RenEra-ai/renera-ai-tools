@@ -124,11 +124,50 @@ object on stdout.
 | `approve --decision allow\|deny` | Answer a parked exec/file approval. |
 | `read [--out <path>]` | Return the last assistant message (plan or review); `--out` also writes it (relative paths resolve against the daemon's cwd). |
 | `interrupt` | Cancel the in-flight turn. |
-| `status` | Daemon / thread / turn state (incl. `pid` and `cwd`). |
+| `status` | Daemon / thread / turn state, including `pid`, `cwd`, and requested/confirmed session model metadata. |
 | `stop` | Graceful shutdown (kill app-server, remove socket). |
 
 Every verb except `start`/`doctor` accepts `--socket <path>` to address a specific daemon instead of
 the global `~/.codex-drive/state.json`. `--flag=value` is not supported (hard error).
+
+### Model selection
+
+`start --model <name>` selects the model for a fresh thread and every subsequent prompt-based
+turn: plain `send`, `plan`, and `send --mode default`. Plain sends retain the thread's current
+collaboration mode and pass the model as a top-level turn override. A resumed session keeps its
+existing thread and settings at resume time; an explicit `--model` applies when its next prompt
+turn starts.
+
+Without `--model`, fresh threads and plain sends leave selection to Codex. Explicit plan/default
+modes need a concrete model: they use the server-confirmed session model, falling back to the
+top-level user config only on servers that provide no model metadata. This preserves the server's
+resolution of project and profile configuration when metadata is available.
+
+Both `start` and `status` include:
+
+| Field | Meaning |
+|---|---|
+| `requestedModel` | The explicit `start --model` value, or `null`. |
+| `sessionModel` | The upstream-confirmed session setting, or `null` when unknown. |
+| `sessionModelSource` | `thread/start`, `thread/resume`, or `thread/settings/updated`; `null` when unknown. |
+
+Sending a model override does not confirm it. If an accepted turn changes the model and the server
+has not supplied updated settings, `sessionModel` and its source become `null`; a rejected turn
+preserves the previous confirmation. These fields describe session settings, not proof of the
+model used for a particular inference, a service reroute, or a separately overridden native review.
+
+Native `review` (`review/start`) uses the configured **`review_model`**, falling back to the current
+session model when unset. The request has no model or effort field. Setting `review_model` does
+not select the model for prompt-based implementation reviews run by `/codex-review` or
+`/codex-issue`; those are ordinary `send` turns. Reasoning effort remains a separate setting.
+See the [app-server protocol](https://learn.chatgpt.com/docs/app-server) and
+[configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
+
+After changing Codex configuration, stop the owned session and start a fresh one to load the new
+settings. To select both general sessions and native reviews via configuration, set top-level
+`model` and `review_model`, checking for higher-precedence project configuration. This changes
+general Codex defaults too; it is not independent selection for the plugin's architect/reviewer
+roles. Existing sessions are not migrated automatically.
 
 ### Stage-2 commit review (shell gate)
 
@@ -173,8 +212,17 @@ is lower than any useful increase.
 
 ```bash
 node --test test/*.test.mjs          # unit tests (zero-dep)
+npm run test:model-protocol         # installed Codex + localhost provider; no login or paid inference
 CODEX_DRIVE_LIVE=1 node --test test/integration.live.test.mjs   # live, needs a logged-in codex
 ```
+
+The opt-in model protocol test uses isolated temporary configuration and captures actual outbound
+request models. It fails if the installed CLI is unavailable; `CODEX_DRIVE_MODEL_PROTOCOL_CODEX`
+can select another binary. On `codex-cli 0.151.0`, with configured model `gpt-5.5`, thread model
+`gpt-5.6-sol`, and a later turn override to `gpt-5.6-terra`, native review followed the thread/turn
+model when `review_model` was unset. With `review_model = "gpt-5.4"`, both native reviews used
+`gpt-5.4` while the prompt turn used `gpt-5.6-terra`. The server emitted `thread/settings/updated`
+for the turn override. These identifiers are test inputs, not plugin defaults or recommendations.
 
 Design rationale and protocol notes live in `docs/specs/2026-05-31-codex-drive-design.md`.
 The Plan-mode (`collaborationMode`) and clarifying-question (`requestUserInput`) surfaces are

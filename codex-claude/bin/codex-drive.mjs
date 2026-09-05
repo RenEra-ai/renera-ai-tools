@@ -311,6 +311,8 @@ async function startDaemon(parsed, store) {
   // saves as start.json, and the collector cross-checks the recorded policy AND gate kind against
   // the live daemon's — so a start record for a non-gate session can never be passed off as one.
   process.stdout.write(JSON.stringify({ ok: true, threadId, socket: socketPath, pid: child.pid, cwd, private: isPrivate,
+    requestedModel: status.requestedModel ?? null, sessionModel: status.sessionModel ?? null,
+    sessionModelSource: status.sessionModelSource ?? null,
     ...(gatePromptPolicy ? { gatePromptSha256: gatePromptPolicy.allowed, gate: gatePromptPolicy.gate } : {}) }) + '\n');
 }
 

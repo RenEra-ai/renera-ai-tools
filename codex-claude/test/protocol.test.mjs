@@ -61,12 +61,23 @@ test('buildTurnStart default mode with effort sets top-level effort', () => {
   assert.deepEqual(p, { threadId: 't1', input: [{ type: 'text', text: 'hi' }], effort: 'high' });
 });
 
+test('plain send places an explicit model at the top level without changing collaboration mode', () => {
+  for (const effort of [undefined, 'ultra']) {
+    const p = buildTurnStart({ threadId: 't1', text: 'review this', model: 'requested-model', effort });
+    assert.deepEqual(p, {
+      threadId: 't1', input: [{ type: 'text', text: 'review this' }], model: 'requested-model',
+      ...(effort ? { effort } : {}),
+    });
+  }
+});
+
 test('buildTurnStart plan mode puts model+effort in settings (no null fields, no top-level effort)', () => {
   const p = buildTurnStart({ threadId: 't1', text: 'go', mode: 'plan', effort: 'xhigh', model: 'gpt-5.5' });
   // settings.model is a REQUIRED string in the protocol; null is rejected (-32600). Only
   // include non-null fields; reasoning_effort lives in settings, not as a top-level param.
   assert.deepEqual(p.collaborationMode, { mode: 'plan', settings: { model: 'gpt-5.5', reasoning_effort: 'xhigh' } });
   assert.equal(p.effort, undefined);
+  assert.equal(p.model, undefined);
 });
 
 test('buildTurnStart plan mode without a model throws (never sends model:null)', () => {
@@ -77,6 +88,7 @@ test('buildTurnStart default mode sets collaborationMode default (exits plan mod
   const p = buildTurnStart({ threadId: 't1', text: 'save it', mode: 'default', model: 'gpt-5.5', effort: 'high' });
   assert.deepEqual(p.collaborationMode, { mode: 'default', settings: { model: 'gpt-5.5', reasoning_effort: 'high' } });
   assert.equal(p.effort, undefined);
+  assert.equal(p.model, undefined);
 });
 
 test('buildTurnStart default mode without a model throws', () => {

@@ -63,6 +63,55 @@ async function startPrivate(dir, mode = 'ok', extra = []) {
   return out;
 }
 
+test('requested and confirmed models survive the detached handoff without becoming the same fact', async () => {
+  const dir = repo();
+  const requestsPath = join(dir, 'requests.jsonl');
+  const e = seamEnv(FIXTURE, 'ok', {}, ['--requests-file', requestsPath, '--session-model', 'server-model']);
+  const r = await cli(['start', '--private', '--cwd', dir, '--model', 'requested-model'], { env: e });
+  let started;
+  try { started = JSON.parse(r.stdout); } catch { /* assertions below */ }
+  if (started?.socket) SPAWNED.push(started.socket);
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(started?.socket, r.stdout);
+  for (const out of [started, JSON.parse((await cli(['status', '--socket', started.socket], { env: e })).stdout)]) {
+    assert.equal(out.requestedModel, 'requested-model');
+    assert.equal(out.sessionModel, 'server-model');
+    assert.equal(out.sessionModelSource, 'thread/start');
+  }
+  assert.equal((await cli(['send', 'say OK', '--socket', started.socket], { env: e })).code, 0);
+  assert.equal((await cli(['wait', '--socket', started.socket, '--timeout-ms', '5000'], { env: e })).code, 0);
+  const requests = readFileSync(requestsPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.equal(requests.find((req) => req.method === 'thread/start').params.model, 'requested-model');
+  const turn = requests.find((req) => req.method === 'turn/start').params;
+  assert.equal(turn.model, 'requested-model');
+  assert.equal(turn.collaborationMode, undefined);
+  const after = JSON.parse((await cli(['status', '--socket', started.socket], { env: e })).stdout);
+  assert.equal(after.requestedModel, 'requested-model');
+  assert.equal(after.sessionModel, null);
+  assert.equal(after.sessionModelSource, null);
+  await cli(['stop', '--socket', started.socket], { env: e });
+});
+
+test('detached start reports nullable metadata and keeps private session state isolated', async () => {
+  const dir = repo();
+  const home = mkdtempSync(join(tmpdir(), 'cdx-mhome-'));
+  DIRS.push(home);
+  const e = env('ok', { HOME: home, CODEX_HOME: home });
+  const r = await cli(['start', '--private', '--cwd', dir], { env: e });
+  let started;
+  try { started = JSON.parse(r.stdout); } catch { /* assertions below */ }
+  if (started?.socket) SPAWNED.push(started.socket);
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(started?.socket, r.stdout);
+  for (const out of [started, JSON.parse((await cli(['status', '--socket', started.socket], { env: e })).stdout)]) {
+    assert.equal(out.requestedModel, null);
+    assert.equal(out.sessionModel, null);
+    assert.equal(out.sessionModelSource, null);
+  }
+  assert.equal(existsSync(join(home, '.codex-drive', 'state.json')), false);
+  await cli(['stop', '--socket', started.socket], { env: e });
+});
+
 test('profile survives the __daemon handoff: review is ACCEPTED on a --private review session', async () => {
   // The detached payload carries {socketPath, resume, model, cwd, profile}. Without the profile the
   // detached daemon records none and every review is refused wrong_thread_profile.

@@ -30,6 +30,12 @@ export class Daemon {
     this.clientInfo = clientInfo;
     this.resume = resume;
     this.model = model;
+    // Requested selection is separate from upstream-confirmed session settings. A sent model
+    // override is not confirmation, and native review may use a separate review_model.
+    this.sessionModel = null;
+    this.sessionModelSource = null;
+    this._sessionModelRevision = 0;
+    this._startingSessionSettings = null;
     this.codexHome = codexHome;
     // ONE absolute cwd, used for all three of: the app-server child spawn, thread/start params, and
     // git-scope's subprocess calls. Split-brain here means resolving the scope against one repo while
@@ -108,17 +114,29 @@ export class Daemon {
     this.app.on('serverRequest', (req) => this._onServerRequest(req));
     this.app.on('exit', (info) => this._onAppExit(info));
     await this.app.initialize(this.clientInfo);
-    // thread/resume stays {threadId}-only: a resumed thread keeps the identity and profile it was
-    // created with, and re-profiling it is not a thing the protocol offers. Review sessions are
-    // start-only by the profile rule, so no resume-side cwd matching is needed.
+    // Keep our resume policy: reopen the existing thread without changing its settings here.
+    // An explicit model still applies to subsequent prompt turns. Review sessions are start-only
+    // by the profile rule, so no resume-side cwd matching is needed.
     // Same rule on the wire: profile flags may set sandbox/approvalPolicy/ephemeral, never cwd.
     const params = this.resume
       ? { threadId: this.resume }
-      : { ...(this.profile || {}), cwd: this.cwd };
-    const started = await this.app.request(this.resume ? METHODS.THREAD_RESUME : METHODS.THREAD_START, params);
-    this.threadId = started.thread.id;
+      : { ...(this.profile || {}), ...(this.model ? { model: this.model } : {}), cwd: this.cwd };
+    const method = this.resume ? METHODS.THREAD_RESUME : METHODS.THREAD_START;
+    // A settings event can share the response's stdout chunk and run before this await resumes.
+    // Preserve it until the response identifies our thread, then prefer the newer confirmation.
+    this._startingSessionSettings = [];
+    try {
+      const started = await this.app.request(method, params);
+      this.threadId = started.thread.id;
+      this._confirmSessionModel(started.model, method);
+      for (const settings of this._startingSessionSettings) {
+        if (settings.threadId === this.threadId) {
+          this._confirmSessionModel(settings.model, NOTIFY.THREAD_SETTINGS_UPDATED);
+        }
+      }
+    } finally { this._startingSessionSettings = null; }
     await this._listen();
-    return { threadId: this.threadId, socketPath: this.socketPath };
+    return { threadId: this.threadId, socketPath: this.socketPath, ...this._modelStatus() };
   }
 
   _listen() {
@@ -213,6 +231,7 @@ export class Daemon {
         pid: process.pid,
         threadId: this.threadId, turnStatus: this.turn.status,
         parked: this.turn.parked ? this.turn.parked.kind : null, cwd: this.cwd,
+        ...this._modelStatus(),
         // Activity for pollers: ms since ANY app-server traffic this turn (own thread, delegated
         // subagent threads, server requests) + how many such events. Computed daemon-side because
         // the raw timestamp is not comparable across processes. Math.max guards an NTP step back.
@@ -226,10 +245,22 @@ export class Daemon {
     }
   }
 
+  _modelStatus() {
+    return { requestedModel: this.model || null, sessionModel: this.sessionModel,
+      sessionModelSource: this.sessionModelSource };
+  }
+
+  _confirmSessionModel(model, source) {
+    if (typeof model !== 'string' || !model.trim()) return;
+    this.sessionModel = model;
+    this.sessionModelSource = source;
+    this._sessionModelRevision += 1;
+  }
+
   _resolveModel() {
-    // Plan mode needs a concrete model string (the protocol rejects null). Prefer an explicit
-    // --model, else the user's configured default from ~/.codex/config.toml.
-    return this.model || readConfiguredModel(this.codexHome || undefined);
+    // Explicit modes require a model. The server resolves project/provider/profile defaults;
+    // the user config reader is only a compatibility fallback for servers lacking metadata.
+    return this.model || this.sessionModel || readConfiguredModel(this.codexHome || undefined);
   }
 
   _startTurn(prompt, mode, effort, approvalPolicy) {
@@ -263,7 +294,7 @@ export class Daemon {
     // mode: 'plan' | 'default' | undefined. plan & default set collaborationMode (model required);
     // undefined = plain send (no collaborationMode; inherits the thread's current mode).
     const explicitMode = mode === 'plan' || mode === 'default' ? mode : undefined;
-    let model;
+    let model = this.model;
     if (explicitMode) {
       model = this._resolveModel();
       if (!model) return { error: 'no_model_for_mode' };
@@ -282,7 +313,8 @@ export class Daemon {
     // NOTE: the prompt is recorded in _gatePromptsSeen only when the turn/start RESPONSE is
     // accepted (_onStartResponse) — recording here would mark a server-REJECTED primary as "seen",
     // and a later context-free retry could then certify a session whose brief never ran.
-    this._beginTurn({ isPlan: explicitMode === 'plan', promptSha256 });
+    this._beginTurn({ isPlan: explicitMode === 'plan', promptSha256,
+      modelOverride: model, modelRevision: this._sessionModelRevision });
     this._sendStart(METHODS.TURN_START, params, 'turn/start');
     return { ok: true, status: 'running' };
   }
@@ -394,6 +426,14 @@ export class Daemon {
   _onStartResponse(gen, res, label) {
     const lateId = res && res.turn && res.turn.id;
     if (this.turn.gen !== gen) return;                 // superseded turn: log-and-drop
+    // An accepted override can change session settings even if this turn was interrupted locally.
+    // Keep any newer settings notification (including one delivered before this callback); without
+    // that evidence, the previous model is no longer confirmed. Rejections never reach this path.
+    if (lateId && this.turn.modelOverride && this.turn.modelOverride !== this.sessionModel
+      && this.turn.modelRevision === this._sessionModelRevision) {
+      this.sessionModel = null;
+      this.sessionModelSource = null;
+    }
     if (!this.turn.awaitingResponse) {
       // The turn already ended (backstop, app exit, an immediate failed completion, or an explicit
       // interrupt) and only now do we learn its id. Record it so the orphan's later traffic can be
@@ -708,6 +748,10 @@ export class Daemon {
     // it can never be replayed either — reaching _dispatchNotification threw a TypeError inside the
     // child's stdout data handler, which kills the whole daemon mid-turn.
     if (!params || typeof params !== 'object') return;
+    if (method === NOTIFY.THREAD_SETTINGS_UPDATED && this._startingSessionSettings) {
+      this._startingSessionSettings.push({ threadId: params.threadId, model: params.threadSettings?.model });
+      return;
+    }
     // Drop foreign traffic at the door, before it can be buffered or arm anything. THE single
     // authoritative filter: replay routes back through here rather than round it.
     // Foreign traffic still STAMPS activity first: `ultra` delegates work to subagent threads whose
@@ -716,6 +760,15 @@ export class Daemon {
     // would read a healthy ultra turn as stuck and gracefully kill exactly the turns ultra is for.
     // (Never buffered, so it cannot double-stamp on replay.)
     if (this._isForeignThread(params.threadId)) { this._stampActivity(); return; }
+    // Session settings are independent of turn IDs and remain useful while idle or finalized.
+    // Handle them before turn buffering so response callbacks cannot erase newer confirmation.
+    if (method === NOTIFY.THREAD_SETTINGS_UPDATED) {
+      if (this.threadId && params.threadId === this.threadId) {
+        this._confirmSessionModel(params.threadSettings?.model, method);
+        this._stampActivity();
+      }
+      return;
+    }
     if (this.turn.awaitingResponse) {
       if (method === NOTIFY.TURN_COMPLETED && params.turn) {
         // A completion carrying the PREVIOUS turn's id belongs to that turn. While our own id is

@@ -28,6 +28,7 @@ export const REVIEW_ITEM = { ENTERED: 'enteredReviewMode', EXITED: 'exitedReview
 
 export const NOTIFY = {
   THREAD_STARTED: 'thread/started',
+  THREAD_SETTINGS_UPDATED: 'thread/settings/updated',
   TURN_STARTED: 'turn/started',
   TURN_COMPLETED: 'turn/completed',
   AGENT_MESSAGE_DELTA: 'item/agentMessage/delta',
@@ -72,9 +73,13 @@ export function buildTurnStart({ threadId, text, mode, effort, model, approvalPo
     const settings = { model };
     if (effort) settings.reasoning_effort = effort;
     params.collaborationMode = { mode, settings };
-  } else if (effort) {
-    // Plain send (no explicit mode): no collaborationMode, effort goes top-level.
-    params.effort = effort;
+  } else {
+    // Plain send preserves the current mode. Model and effort overrides go top-level.
+    if (model != null) {
+      if (typeof model !== 'string' || !model.trim()) throw new Error('model must be a non-empty string');
+      params.model = model;
+    }
+    if (effort) params.effort = effort;
   }
   return params;
 }
@@ -89,7 +94,8 @@ export function buildTurnStart({ threadId, text, mode, effort, model, approvalPo
 // review/start is not promptless) is deliberately declined in favour of the prompt-based
 // review-round.mjs. Anything else is a programming error, so this throws rather than passing it on.
 //
-// No effort/model fields exist on review/start: a review inherits the effective CODEX_HOME config.
+// No effort/model fields exist on review/start. Native review uses review_model when configured,
+// otherwise the current session model; this is separate from prompt-based turn/start reviews.
 export function buildReviewStart({ threadId, target }) {
   if (!threadId || typeof threadId !== 'string') throw new Error('review/start requires a threadId');
   if (!target || typeof target !== 'object') throw new Error('review/start requires a target');

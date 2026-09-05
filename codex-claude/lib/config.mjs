@@ -3,9 +3,9 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 // Read the user's default model from ~/.codex/config.toml (the `model = "..."` or `model = '...'` line at the
-// top level, before any [section] table). Plan mode requires a concrete model string and the
-// `collaborationMode/list` plan preset reports model=null, so this is how we resolve the
-// model the desktop/CLI would use. Returns null if not found.
+// top level, before any [section] table). This is a compatibility fallback for explicit modes
+// when the app-server supplies no session model metadata; it does not reproduce layered Codex
+// configuration resolution. Returns null if not found.
 export function readConfiguredModel(codexHome = join(homedir(), '.codex')) {
   const cfg = join(codexHome, 'config.toml');
   if (!existsSync(cfg)) return null;

@@ -81,11 +81,32 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs doctor
 
 ```bash
 node ${CLAUDE_PLUGIN_ROOT}/bin/codex-drive.mjs start --cwd "$PWD"
-# add --model <name> if Plan mode errors with no_model_for_mode (see Troubleshooting)
+# add --model <name> to select the Codex session and prompt-review model
 # add --resume-latest to continue the most recent Codex thread for this cwd
 ```
 
 → `{ "ok": true, "threadId": "...", "socket": "...", "pid": 12345 }`
+
+`start` and `status` also return nullable `requestedModel`, `sessionModel`, and
+`sessionModelSource`. `requestedModel` is the explicit flag; `sessionModel` is confirmed only by
+the upstream `thread/start`, `thread/resume`, or `thread/settings/updated` source named in
+`sessionModelSource`. Both session fields are `null` when unknown, including after an accepted
+model change without updated upstream settings. A rejected turn retains the previous confirmation.
+Never report the requested value as a confirmed model or treat the session setting as proof of
+the model used for an individual inference or native review.
+
+An explicit `--model` applies at fresh thread creation and on every prompt turn (`send`, `plan`,
+and `send --mode default`). Plain sends preserve the current collaboration mode. Resume keeps
+the existing thread/settings initially; the explicit override applies on its next prompt turn.
+Without the flag, Codex resolves thread/plain-send defaults, and explicit modes prefer confirmed
+session metadata over the user config fallback.
+
+Native `review` has separate selection: `review_model` in effective Codex configuration overrides
+the session model. It does not affect the prompt-based implementation reviews used by this skill.
+Do not add a model/effort field to `review/start`. After configuration changes, stop the owned
+session and start fresh, checking project overrides. Setting both top-level `model` and
+`review_model` changes general Codex defaults too; it does not independently select models for
+the architect and prompt reviewer. See [model selection](../../README.md#model-selection).
 
 ### 2. Architect turn (Plan mode, read-only)
 
@@ -230,16 +251,16 @@ repo's workflow must read it), and **`/codex-doctor`** to preflight which mode a
 | Verb | Args | Returns |
 |---|---|---|
 | `doctor` | — | `{ codexVersion, authPresent, threads, daemons }` — `daemons` lists every LIVE detached session found by probing `~/.codex-drive/*.sock` (`{socket, pid, threadId, turnStatus, cwd, lastEventAgoMs}` per responder; an unresponsive-but-present socket is reported with `error`); socket files nothing listens on (provably dead: ENOENT/ECONNREFUSED) are pruned. This is how an orphaned `--private` daemon — which touches no global state — is FOUND at all |
-| `start` | `[--cwd <path>] [--model <m>] [--resume <uuid> \| --resume-latest] [--force] [--private] [--sandbox <s>] [--approval-policy <p>] [--ephemeral] [--gate-prompt-sha256 <hex> [--gate-retry-prompt-sha256 <hex>] --gate <architect\|review>]` | `{ ok, threadId, socket, pid, cwd, private[, gatePromptSha256, gate] }` — **idempotent**: refuses if a live session already exists (avoids orphaning its daemon); `--force` stops the existing one first. `--private` neither reads nor writes the global state (use with `--socket` below). Profile flags are validated **before** any existing session is probed or stopped, and are rejected on a `--resume`. The gate flags bind the session to those prompt hashes — any other prompt is refused with `{error:"wrong_gate_prompt"}` — and require `--private` (a shared session's socket can be redirected by any concurrent `start`). `--gate` is REQUIRED with them and additionally binds the turn KIND, keyed on the turn's MODE: an architect gate accepts only plan-mode turns (the `plan` verb, or `send --mode plan`), a review gate only non-plan turns (a plain `send`) — the wrong kind is refused up front instead of surfacing at collect time after the turn has run (`docs/bugs/gate-orphaned-completed-turn.md`) |
+| `start` | `[--cwd <path>] [--model <m>] [--resume <uuid> \| --resume-latest] [--force] [--private] [--sandbox <s>] [--approval-policy <p>] [--ephemeral] [--gate-prompt-sha256 <hex> [--gate-retry-prompt-sha256 <hex>] --gate <architect\|review>]` | `{ ok, threadId, socket, pid, cwd, private, requestedModel, sessionModel, sessionModelSource[, gatePromptSha256, gate] }` — **idempotent**: refuses if a live session already exists (avoids orphaning its daemon); `--force` stops the existing one first. `--private` neither reads nor writes the global state (use with `--socket` below). Profile flags are validated **before** any existing session is probed or stopped, and are rejected on a `--resume`. The gate flags bind the session to those prompt hashes — any other prompt is refused with `{error:"wrong_gate_prompt"}` — and require `--private` (a shared session's socket can be redirected by any concurrent `start`). `--gate` is REQUIRED with them and additionally binds the turn KIND, keyed on the turn's MODE: an architect gate accepts only plan-mode turns (the `plan` verb, or `send --mode plan`), a review gate only non-plan turns (a plain `send`) — the wrong kind is refused up front instead of surfacing at collect time after the turn has run (`docs/bugs/gate-orphaned-completed-turn.md`) |
 | `plan` | `("<prompt>" \| --prompt-file <path>) [--effort <e>] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"restart_required"}` · `{error:"no_model_for_mode"}` · `{error:"wrong_gate_prompt"}` · `{error:"wrong_gate_turn_kind",expected:"send"}` (on a `--gate review` session — the collector keys attestation on the turn kind, and the daemon now refuses the wrong verb before the turn runs) · `{error:"gate_closed"}` (the collector has taken its closing snapshot; the session accepts no further turns). **`--prompt-file` sends the file's exact bytes** — `"$(cat f)"` strips trailing newlines and is bounded by ARG_MAX, so it cannot match a gate hash |
 | `send` | `("<prompt>" \| --prompt-file <path>) [--effort <e>] [--mode default] [--approval-policy untrusted]` | `{ ok, status:"running" }` · `{error:"busy"}` · `{error:"restart_required"}` · `{error:"no_model_for_mode"}` (only with `--mode`) · `{error:"wrong_gate_prompt"}` · `{error:"wrong_gate_turn_kind",expected:"plan"}` (a non-plan `send` on a `--gate architect` session — the rule keys on the turn's mode, so `send --mode plan` counts as a plan turn) · `{error:"gate_closed"}` (as for `plan`). `--prompt-file` as for `plan` |
-| `review` | `[--base <ref\|sha> \| --scope <auto\|working-tree\|branch>]` | `{ ok, status:"running", scope }` · `{error:"busy"}` · `{error:"wrong_thread_profile"}` · `{error:"restart_required"}` · `{error:"<validation>"}`. **Native git-scoped commit review** (`review/start`) — distinct from a prompt-based `send` review: it takes no prompt, inherits the config's effort, and returns the built-in reviewer's findings. Requires a session started with `--sandbox read-only --approval-policy never --ephemeral`. Scope is validated synchronously: an unresolvable/non-ancestor/empty-delta base is an error, never a silent fallback |
+| `review` | `[--base <ref\|sha> \| --scope <auto\|working-tree\|branch>]` | `{ ok, status:"running", scope }` · `{error:"busy"}` · `{error:"wrong_thread_profile"}` · `{error:"restart_required"}` · `{error:"<validation>"}`. **Native git-scoped commit review** (`review/start`) — distinct from a prompt-based `send` review: it takes no prompt, uses `review_model` when configured (otherwise the session model), inherits the config's effort, and returns the built-in reviewer's findings. Requires a session started with `--sandbox read-only --approval-policy never --ephemeral`. Scope is validated synchronously: an unresolvable/non-ancestor/empty-delta base is an error, never a silent fallback |
 | `wait` | `[--timeout-ms <N>]` | `{status:"completed",message[,empty:true]}` · `{status:"question",question}` · `{status:"approval",request}` · `{status:"interrupted"\|"failed",message}` · `{status:"unsupported",request}` · `{status:"timeout"[,turnStatus,lastEventAgoMs,eventCount]}` (exit 2) — on a client-side timeout the CLI probes the daemon's `status` (bounded, best-effort) and inlines the activity fields, so working-vs-stuck is decidable from the one call; missing fields mean the probe itself failed |
 | `answer` | `--id <qid> (--option <n> \| --text "<s>")` | `{ ok }` · `{error:"no_pending_question"}` (`--option` is 1-based; one selection per call — answering resumes the turn). Exactly one of `--option`/`--text` is required and both need a real value: a valueless flag used to answer the live question with the literal text `__option:true` / `true` |
 | `approve` | `--decision allow\|deny` | `{ ok }` · `{error:"no_pending_approval"}` |
 | `read` | `[--out <path>] [--parsed-verdict]` | `{ status, message[, empty:true], cwd, kind, turnToken }` (last assistant message; `empty:true` flags a completed turn that produced no content; `kind` is `plan\|review\|turn` for the turn being READ — gate attestation keys on it: the architect gate certifies only kind `plan`, the review gate only kind `turn`; `turnToken` is the per-daemon turn id that binds a result to one invocation). `--out` writes a non-empty message to a file; a RELATIVE path resolves against the daemon's reported `cwd`, not the caller's. `--parsed-verdict` (boolean) adds `parsedVerdict: NO ISSUES\|ISSUES FOUND\|UNCLEAR` from the ONE shared rule (`lib/verdict.mjs`: only the FINAL non-empty line may be a verdict) — opt-in, so a plan read carries no meaningless verdict |
 | `interrupt` | — | `{ ok }` · `{error:"no_active_turn"}` (only when nothing is running or awaiting input). A turn whose `turn/start` response has not arrived yet is **also** interruptible: it is ended locally as `interrupted` and the session is marked `restartRequired` (that turn's id never reached us, so its later traffic can no longer be told apart from a new turn's) |
-| `status` | — | `{ pid, threadId, turnStatus, parked, cwd, lastEventAgoMs, eventCount, restartRequired[, restartReason] }` — `restartRequired:true` means the session refuses new turns until `stop` + `start`. `lastEventAgoMs`/`eventCount`: ms since ANY app-server traffic this turn (own thread, delegated subagent threads, server requests) + how many such events — a running turn whose ago keeps growing while the count stands still is stuck; one that streams is merely slow |
+| `status` | — | `{ pid, threadId, turnStatus, parked, cwd, requestedModel, sessionModel, sessionModelSource, lastEventAgoMs, eventCount, restartRequired[, restartReason] }` — `restartRequired:true` means the session refuses new turns until `stop` + `start`. `lastEventAgoMs`/`eventCount`: ms since ANY app-server traffic this turn (own thread, delegated subagent threads, server requests) + how many such events — a running turn whose ago keeps growing while the count stands still is stuck; one that streams is merely slow |
 | `stop` | — | `{ ok }` (tears down the daemon, kills the app-server, removes the socket; the `~/.codex-drive/state.json` record is left behind as a stale entry — `start`'s liveness probe replaces it) |
 
 Every verb except `start` and `doctor` also accepts **`--socket <path>`**, which talks to that daemon
@@ -264,9 +285,11 @@ the same review measured **36 s at `low`** vs **>560 s (never completed) at `max
 
 - **`no active session; run start first`** — the daemon isn't up. Run `start`.
 - **`{error:"busy"}`** — a turn is already in flight. Run `wait` (or `interrupt` to abandon it).
-- **`{error:"no_model_for_mode"}`** — Plan/`--mode default` needs a concrete model string. Either
-  set a default in `~/.codex/config.toml`, or re-`start` with `--model <name>` (e.g. a model from
-  the user's Codex config). Plain `send` (review) does not need this.
+- **`{error:"no_model_for_mode"}`** — Plan/`--mode default` needs a concrete model string. The
+  daemon uses `--model`, then the upstream-confirmed session model, then the top-level user
+  config as a compatibility fallback. If none is available, set a default in
+  `~/.codex/config.toml` or re-`start` with `--model <name>`. Plain `send` can inherit without
+  locally resolving a model.
 - **`{status:"failed"}` with "codex app-server exited"** — the child died mid-turn. Run `stop`,
   then `start` again with `--resume <threadId>`/`--resume-latest` to keep the architect's plan thread.
 - **`{status:"completed", empty:true}` or a preamble-only message** — a malformed Codex turn (no

@@ -30,7 +30,7 @@
 //   noresponse    -> notifications + turn/completed but NO response, ever (arms the daemon backstop)
 //   ask/approve   -> parks a question / an approval mid-review
 import readline from 'node:readline';
-import { writeFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 
 //   permissions   -> parks a permissions-shaped approval (the one protocol.mjs refuses to fake)
 //   failbeforeresponse -> notifications ending in turn/completed{status:'failed'}, response never sent
@@ -57,6 +57,13 @@ const TICK_COUNT = 25;   // ~3s of activity: several expiries at the sub-second 
 // and doubles as a "was the app-server ever spawned?" sentinel for no-boot assertions.
 const recIdx = process.argv.indexOf('--record');
 const RECORD_PATH = recIdx >= 0 ? process.argv[recIdx + 1] : null;
+// Opt-in wire observability for model selection. Keep --record's original single-object format:
+// existing cwd and no-spawn regressions consume it directly.
+const requestsIdx = process.argv.indexOf('--requests-file');
+const REQUESTS_PATH = requestsIdx >= 0 ? process.argv[requestsIdx + 1] : null;
+const modelIdx = process.argv.indexOf('--session-model');
+// Omitted by default to preserve the older-server/no-model response fixtures.
+const SESSION_MODEL = modelIdx >= 0 ? process.argv[modelIdx + 1] : undefined;
 const rmIdx = process.argv.indexOf('--review-mode');
 // Guard the indexOf: argv[-1 + 1] is argv[0], so an unguarded read silently turns the first
 // unrelated argument into the mode.
@@ -278,6 +285,9 @@ rl.on('line', (line) => {
   if (!line.trim()) return;
   let msg;
   try { msg = JSON.parse(line); } catch { return; }
+  if (REQUESTS_PATH && msg.id !== undefined && typeof msg.method === 'string') {
+    appendFileSync(REQUESTS_PATH, JSON.stringify({ method: msg.method, params: msg.params }) + '\n');
+  }
   // Client response to one of our server-requests. An ERROR response is a FINAL answer too — the
   // real server treats it as one. Accepting only `result` meant the daemon's respondError decline
   // path never resolved this promise, so any test driving it hung at `await answered` instead of
@@ -296,7 +306,7 @@ rl.on('line', (line) => {
     if (RECORD_PATH) {
       try { writeFileSync(RECORD_PATH, JSON.stringify({ method: msg.method, params: msg.params || null, cwd: process.cwd() })); } catch { /* best effort */ }
     }
-    result(msg.id, { thread: { id } });
+    result(msg.id, { thread: { id }, ...(SESSION_MODEL !== undefined ? { model: SESSION_MODEL } : {}) });
     notify('thread/started', { thread: { id } });
   } else if (msg.method === 'turn/start') {
     const cm = msg.params.collaborationMode;

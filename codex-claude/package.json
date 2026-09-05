@@ -6,7 +6,8 @@
   "bin": { "codex-drive": "bin/codex-drive.mjs" },
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "test:live": "CODEX_DRIVE_LIVE=1 node --test test/integration.live.test.mjs"
+    "test:live": "CODEX_DRIVE_LIVE=1 node --test test/integration.live.test.mjs",
+    "test:model-protocol": "CODEX_DRIVE_MODEL_PROTOCOL=1 node --test test/model-selection.integration.test.mjs"
   },
   "engines": { "node": ">=20" }
 }
